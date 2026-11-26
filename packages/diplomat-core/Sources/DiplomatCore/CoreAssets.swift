@@ -331,11 +331,12 @@ public enum CoreAssets {
             public let maxChildren: Int
             public let instructions: [String]
         }
-        /// Diplomat's OAuth application on Linear, which `LinearLogin` signs in to.
-        public struct LinearOAuth: Decodable {
-            public let clientID: String
+        /// Linear's MCP server, which `LinearLogin` signs in to and `LinearMCP` calls.
+        public struct LinearMCP: Decodable {
+            public let url: String
             public let authorize: String
             public let token: String
+            public let register: String
             public let revoke: String
             public let scope: String
             /// `{port}` stands for whichever of `ports` was free.
@@ -357,7 +358,7 @@ public enum CoreAssets {
         public let maxLogBytes: Int
         public let httpTimeoutSecs: Double
         public let linearAPI: String
-        public let linearOAuth: LinearOAuth
+        public let linearMCP: LinearMCP
         public let linearMaxIssues: Int
         public let githubMaxItems: Int
         public let githubPage: GitHubPage
@@ -378,7 +379,7 @@ public enum CoreAssets {
 
         private enum CodingKeys: String, CodingKey {
             case syncSecs, minSyncSecs, maxItems, maxEvents, maxLogBytes, httpTimeoutSecs,
-                 linearAPI, linearOAuth, linearMaxIssues, githubMaxItems, githubPage, labels, triageLabels, stopLabels, levels, floor,
+                 linearAPI, linearMCP, linearMaxIssues, githubMaxItems, githubPage, labels, triageLabels, stopLabels, levels, floor,
                  rater, fracture, blocks, cleanMarker
         }
 

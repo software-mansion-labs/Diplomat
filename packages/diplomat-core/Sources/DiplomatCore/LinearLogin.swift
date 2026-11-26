@@ -3,21 +3,44 @@ import Foundation
 import Glibc
 #endif
 
-/// Diplomat's own sign-in to Linear: OAuth with PKCE in the browser, which hands the code
-/// back to a loopback port. The tokens are kept owner-only in the pipeline's directory and
-/// refreshed under its lock by whoever reads them. `LinearAPI.envVar` overrides the login.
+/// Diplomat's own login to Linear: a personal API key, which the sync takes to Linear's
+/// GraphQL API, or a sign-in through Linear's MCP server in the browser (OAuth with PKCE
+/// for a client registered on the spot, the code handed back to a loopback port), whose
+/// sync calls that server's tools (`LinearMCP`). It is kept owner-only in the pipeline's
+/// directory, an MCP login refreshed under its lock by whoever reads it. `LinearAPI.envVar`
+/// overrides it.
 public enum LinearLogin {
+    /// Which of Linear's APIs a login reaches.
+    public enum Method: String, Codable, Sendable {
+        case key, mcp
+    }
+
     public struct Saved: Codable, Equatable, Sendable {
+        public var method: Method
+        /// The key itself, for `.key`.
         public var accessToken: String
         public var refreshToken: String?
         public var expiresAt: Date?
-        /// Who Linear answered the token is, and their workspace.
+        /// The client an MCP sign-in registered, which refreshes and revokes its tokens.
+        public var clientID: String?
+        /// Who Linear answered the login is, and their workspace.
         public var user: String
         public var organization: String
     }
 
+    /// What a Linear call carries, and which API it goes to.
+    public struct Access: Equatable, Sendable {
+        public var method: Method
+        public var authorization: String
+
+        public init(_ method: Method, _ authorization: String) {
+            self.method = method
+            self.authorization = authorization
+        }
+    }
+
     public enum Failure: LocalizedError, Equatable {
-        case noClient
+        case noKey
         case noPort([Int])
         case timedOut
         case cancelled
@@ -29,8 +52,8 @@ public enum LinearLogin {
 
         public var errorDescription: String? {
             switch self {
-            case .noClient:
-                return "Linear sign-in has no OAuth client: linearOAuth.clientID in pipeline.json is empty"
+            case .noKey:
+                return "No Linear API key was given"
             case .noPort(let ports):
                 return "Linear sign-in needs one of the ports " + ports.map(String.init).joined(separator: ", ")
                     + " free on 127.0.0.1, and none was"
@@ -64,26 +87,28 @@ public enum LinearLogin {
     /// later, only an expired token is refreshed.
     private static var refreshFailed: Date?
 
-    /// The `Authorization` a Linear call carries: the override's key as is, else the saved
-    /// token, refreshed first once it expires within `refreshMarginSecs`, though while it is
-    /// still good, a minute after a refresh that failed. Nil when signed out; a login that can no
-    /// longer be refreshed is forgotten.
-    public static func authorization(in dir: URL = PipelineLog.dir, now: Date = Date(),
-                                     transport: @escaping SlackAPI.Transport = SlackAPI.curl) throws -> String? {
-        if let env = ProcessInfo.processInfo.environment[LinearAPI.envVar], !env.isEmpty { return env }
-        guard saved(in: dir) != nil else { return nil }
+    /// What a Linear call carries: the override's key as is, else the saved key, else the
+    /// MCP login's token, refreshed first once it expires within `refreshMarginSecs`, though
+    /// while it is still good, a minute after a refresh that failed. Nil when signed out; a
+    /// login that can no longer be refreshed is forgotten.
+    public static func access(in dir: URL = PipelineLog.dir, now: Date = Date(),
+                              transport: @escaping SlackAPI.Transport = SlackAPI.curl) throws -> Access? {
+        if let env = ProcessInfo.processInfo.environment[LinearAPI.envVar], !env.isEmpty { return Access(.key, env) }
+        guard let first = saved(in: dir) else { return nil }
+        if first.method == .key { return Access(.key, first.accessToken) }
         let model = try config()
-        let oauth = model.linearOAuth
-        guard let answer = try PrivateFiles.locked(lock(in: dir), { () throws -> String? in
+        let mcp = model.linearMCP
+        guard let answer = try PrivateFiles.locked(lock(in: dir), { () throws -> Access? in
             guard var login = saved(in: dir) else { return nil }
+            guard login.method == .mcp else { return Access(.key, login.accessToken) }
             let retry = refreshFailed.map { now.timeIntervalSince($0) >= 60 } ?? true
-            if let expires = login.expiresAt, expires <= now.addingTimeInterval(oauth.refreshMarginSecs),
+            if let expires = login.expiresAt, expires <= now.addingTimeInterval(mcp.refreshMarginSecs),
                expires <= now || retry {
                 do {
                     guard let refresh = login.refreshToken else { throw Failure.expired }
                     let t = try tokens([("grant_type", "refresh_token"), ("refresh_token", refresh),
-                                        ("client_id", oauth.clientID)], to: oauth.token, model: model,
-                                       now: now, transport: transport)
+                                        ("client_id", login.clientID ?? ""), ("resource", mcp.url)],
+                                       to: mcp.token, model: model, now: now, transport: transport)
                     login.accessToken = t.access
                     login.refreshToken = t.refresh ?? refresh
                     login.expiresAt = t.expires
@@ -95,46 +120,63 @@ public enum LinearLogin {
                     refreshFailed = now
                 }
             }
-            return "Bearer " + login.accessToken
+            return Access(.mcp, "Bearer " + login.accessToken)
         }) else {
             throw Failure.file("\(lock(in: dir).path) could not be locked")
         }
         return answer
     }
 
-    /// Hands `open` Linear's consent page once listening on 127.0.0.1, and waits there for the
-    /// browser to come back, until `signInSecs` pass or `cancelled` answers true; then
-    /// exchanges the code, asks Linear who the token is, and saves the login.
-    public static func signIn(in dir: URL = PipelineLog.dir, oauth given: CoreAssets.PipelineModel.LinearOAuth? = nil,
+    /// Asks Linear who `key` is, then saves it as the login.
+    public static func signIn(key given: String, in dir: URL = PipelineLog.dir,
+                              transport: @escaping SlackAPI.Transport = SlackAPI.curl) throws -> Saved {
+        let key = given.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { throw Failure.noKey }
+        let model = try config()
+        guard let url = LinearAPI.endpoint(model) else { throw Failure.transport("the Linear API is not a URL") }
+        let me = try whoami(LinearAPI(authorization: { key }, url: url, timeout: model.httpTimeoutSecs,
+                                      transport: transport))
+        let login = Saved(method: .key, accessToken: key, user: me.user, organization: me.organization)
+        try keep(login, in: dir)
+        return login
+    }
+
+    /// Registers a client with Linear's MCP server and hands `open` its consent page once
+    /// listening on 127.0.0.1, then waits there for the browser to come back, until
+    /// `signInSecs` pass or `cancelled` answers true; then exchanges the code, asks the
+    /// server who the token is, and saves the login.
+    public static func signIn(in dir: URL = PipelineLog.dir, mcp given: CoreAssets.PipelineModel.LinearMCP? = nil,
                               open: (URL) -> Void, cancelled: () -> Bool = { false },
                               transport: @escaping SlackAPI.Transport = SlackAPI.curl) throws -> Saved {
         let model = try config()
-        let oauth = given ?? model.linearOAuth
-        guard !oauth.clientID.isEmpty else { throw Failure.noClient }
+        let mcp = given ?? model.linearMCP
+        guard let server = URL(string: mcp.url) else { throw Failure.file("linearMCP.url is not a URL: \(mcp.url)") }
         // A loop: `lazy.compactMap(…).first` binds the port it finds twice.
         var bound: Listener?
-        for port in oauth.ports where bound == nil { bound = Listener(port: UInt16(clamping: port)) }
-        guard let listener = bound else { throw Failure.noPort(oauth.ports) }
-        let redirect = oauth.redirect.replacingOccurrences(of: "{port}", with: String(listener.port))
+        for port in mcp.ports where bound == nil { bound = Listener(port: UInt16(clamping: port)) }
+        guard let listener = bound else { throw Failure.noPort(mcp.ports) }
+        let redirect = mcp.redirect.replacingOccurrences(of: "{port}", with: String(listener.port))
+        let client = try register(redirect, at: mcp.register, model: model, transport: transport)
         let verifier = randomToken()
         let state = randomToken()
-        var page = URLComponents(string: oauth.authorize)
+        var page = URLComponents(string: mcp.authorize)
         page?.queryItems = [
-            URLQueryItem(name: "client_id", value: oauth.clientID),
+            URLQueryItem(name: "client_id", value: client),
             URLQueryItem(name: "redirect_uri", value: redirect),
             URLQueryItem(name: "response_type", value: "code"),
-            URLQueryItem(name: "scope", value: oauth.scope),
+            URLQueryItem(name: "scope", value: mcp.scope),
             URLQueryItem(name: "state", value: state),
             URLQueryItem(name: "code_challenge", value: challenge(verifier)),
             URLQueryItem(name: "code_challenge_method", value: "S256"),
+            URLQueryItem(name: "resource", value: mcp.url),
             // Lets a second sign-in pick another workspace.
             URLQueryItem(name: "prompt", value: "consent"),
         ]
-        guard let url = page?.url else { throw Failure.file("linearOAuth.authorize is not a URL: \(oauth.authorize)") }
+        guard let url = page?.url else { throw Failure.file("linearMCP.authorize is not a URL: \(mcp.authorize)") }
         guard !cancelled() else { throw Failure.cancelled }
         open(url)
         let path = URLComponents(string: redirect)?.path ?? ""
-        let deadline = Date().addingTimeInterval(oauth.signInSecs)
+        let deadline = Date().addingTimeInterval(mcp.signInSecs)
         while true {
             guard let call = listener.next(until: deadline, cancelled: cancelled) else {
                 throw cancelled() ? Failure.cancelled : Failure.timedOut
@@ -155,16 +197,14 @@ public enum LinearLogin {
                 }
                 guard let code = param("code"), !code.isEmpty else { throw Failure.refused("no code came back") }
                 let t = try tokens([("grant_type", "authorization_code"), ("code", code),
-                                    ("redirect_uri", redirect), ("client_id", oauth.clientID),
-                                    ("code_verifier", verifier)], to: oauth.token, model: model, now: Date(),
-                                   transport: transport)
-                let me = try whoami("Bearer " + t.access, model: model, transport: transport)
-                let login = Saved(accessToken: t.access, refreshToken: t.refresh, expiresAt: t.expires,
-                                  user: me.user, organization: me.organization)
-                PrivateFiles.prepare(dir)
-                guard try PrivateFiles.locked(lock(in: dir), { try save(login, in: dir) }) != nil else {
-                    throw Failure.file("\(lock(in: dir).path) could not be locked")
-                }
+                                    ("redirect_uri", redirect), ("client_id", client),
+                                    ("code_verifier", verifier), ("resource", mcp.url)],
+                                   to: mcp.token, model: model, now: Date(), transport: transport)
+                let me = try whoami(LinearAPI(mcp: server, authorization: { "Bearer " + t.access },
+                                              timeout: model.httpTimeoutSecs, transport: transport, cache: nil))
+                let login = Saved(method: .mcp, accessToken: t.access, refreshToken: t.refresh, expiresAt: t.expires,
+                                  clientID: client, user: me.user, organization: me.organization)
+                try keep(login, in: dir)
                 call.answer(200, "Diplomat is signed in to Linear as \(me.user) (\(me.organization)). "
                     + "You can close this tab.")
                 return login
@@ -175,8 +215,8 @@ public enum LinearLogin {
         }
     }
 
-    /// Forgets the login, then asks Linear to revoke it: nil once both are done, else why
-    /// Linear did not.
+    /// Forgets the login, then asks Linear's MCP server to revoke an MCP one: nil once both
+    /// are done, else why it did not. A key stays good until revoked in Linear's settings.
     public static func signOut(in dir: URL = PipelineLog.dir,
                                transport: @escaping SlackAPI.Transport = SlackAPI.curl) throws -> String? {
         guard saved(in: dir) != nil else { return nil }
@@ -189,11 +229,12 @@ public enum LinearLogin {
         }) else {
             throw Failure.file("\(lock(in: dir).path) could not be locked")
         }
-        guard let login else { return nil }
+        guard let login, login.method == .mcp else { return nil }
         do {
             let model = try config()
             let token = login.refreshToken.map { ($0, "refresh_token") } ?? (login.accessToken, "access_token")
-            let answer = try post(model.linearOAuth.revoke, [("token", token.0), ("token_type_hint", token.1)],
+            let answer = try post(model.linearMCP.revoke, [("token", token.0), ("token_type_hint", token.1),
+                                                           ("client_id", login.clientID ?? "")],
                                   timeout: model.httpTimeoutSecs, transport: transport)
             return answer.status == 200 ? nil : "Linear answered HTTP \(answer.status) to the revocation"
         } catch {
@@ -214,6 +255,42 @@ public enum LinearLogin {
         }
     }
 
+    /// `save` under the lock, for a new login.
+    private static func keep(_ login: Saved, in dir: URL) throws {
+        PrivateFiles.prepare(dir)
+        guard try PrivateFiles.locked(lock(in: dir), { try save(login, in: dir) }) != nil else {
+            throw Failure.file("\(lock(in: dir).path) could not be locked")
+        }
+    }
+
+    /// The client id Linear's MCP server registers for this sign-in (RFC 7591), a public
+    /// client whose one callback is `redirect`.
+    static func register(_ redirect: String, at endpoint: String, model: CoreAssets.PipelineModel,
+                         transport: SlackAPI.Transport) throws -> String {
+        guard let url = URL(string: endpoint) else { throw Failure.transport("\(endpoint) is not a URL") }
+        let body = try JSONSerialization.data(withJSONObject: [
+            "client_name": "Diplomat", "redirect_uris": [redirect], "token_endpoint_auth_method": "none",
+            "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+        ], options: [.sortedKeys])
+        let answer: (status: Int, headers: [String: String], body: Data)
+        do {
+            answer = try transport(SlackAPI.Request(
+                url: url, headers: ["Content-Type": "application/json", "Accept": "application/json"],
+                body: body, timeout: model.httpTimeoutSecs))
+        } catch SlackError.transport(let why) {
+            throw Failure.transport(why)
+        } catch {
+            throw Failure.transport("no HTTP answer (\(error.localizedDescription))")
+        }
+        let obj = (try? JSONSerialization.jsonObject(with: answer.body)) as? [String: Any]
+        guard (200..<300).contains(answer.status), let id = obj?["client_id"] as? String, !id.isEmpty else {
+            let why = [obj?["error"] as? String ?? "", obj?["error_description"] as? String ?? ""].filter { !$0.isEmpty }
+            throw Failure.refused("the client was not registered: "
+                + (why.isEmpty ? "HTTP \(answer.status)" : why.joined(separator: ": ")))
+        }
+        return id
+    }
+
     /// The token endpoint's answer; `invalid_grant` on a refresh is the login's end.
     static func tokens(_ fields: [(String, String)], to endpoint: String, model: CoreAssets.PipelineModel, now: Date,
                        transport: SlackAPI.Transport) throws -> (access: String, refresh: String?, expires: Date?) {
@@ -229,11 +306,8 @@ public enum LinearLogin {
         return (access, obj?["refresh_token"] as? String, expires)
     }
 
-    static func whoami(_ authorization: String, model: CoreAssets.PipelineModel,
-                       transport: @escaping SlackAPI.Transport) throws -> (user: String, organization: String) {
-        guard let url = LinearAPI.endpoint(model) else { throw Failure.transport("the Linear API is not a URL") }
-        let data = try LinearAPI(authorization: { authorization }, url: url, timeout: model.httpTimeoutSecs,
-                                 transport: transport).call("Viewer", [:])
+    static func whoami(_ api: LinearAPI) throws -> (user: String, organization: String) {
+        let data = try api.call("Viewer", [:])
         let user = (data["viewer"] as? [String: Any])?["name"] as? String ?? ""
         return (user, (data["organization"] as? [String: Any])?["name"] as? String ?? "")
     }
