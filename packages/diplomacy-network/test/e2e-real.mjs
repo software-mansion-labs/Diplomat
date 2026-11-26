@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
+import { marked } from '../src/requester/graphql.js';
 import { POOL, check, createBench, passed, sleep, until } from './lib/daemons.mjs';
 import { scratchDir } from './lib/scratch.mjs';
 
@@ -196,7 +197,7 @@ async function oneJob({ model }) {
       const seen = api();
       assert.ok(seen.every(as(a)), 'no request to the forge\'s API carried anything but A\'s credential');
       const posts = seen.filter((r) => r.method === 'POST');
-      assert.deepEqual(posts.map((r) => [r.path, JSON.parse(r.body)]), [['/repos/acme/widgets/pulls/1/reviews', { event: 'COMMENT', body: 'pong' }]]);
+      assert.deepEqual(posts.map((r) => [r.path, JSON.parse(r.body)]), [['/repos/acme/widgets/pulls/1/reviews', { event: 'COMMENT', body: marked('pong') }]]);
       assert.ok(seen.some((r) => r.method === 'GET' && r.path === '/repos/acme/widgets/pulls/1'));
       assert.ok(!seen.some((r) => r.method === 'DELETE'), 'the forbidden request never left');
       console.log(`INFO the agent answered ${JSON.stringify(done.outcome.summary)}: model ${JSON.stringify(done.outcome.model)}, ${done.outcome.tokens} tokens, $${done.outcome.usd}, ${done.requests} requests under the key, ${done.refused} refused`);
