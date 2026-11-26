@@ -12,15 +12,15 @@ Every five minutes while it is on, a **sync**:
 1. **Reads** each GitHub root's open issues and PRs (`gh api graphql`, a page at a time) and the
    tracked Linear teams' open issues, and links them: an issue to the PR that fixes it, a parent to
    its children, a PR to the PR stacked on it.
-2. **Rates** up to four items, by the [definitions below](#ratings), and writes each rating as
-   labels where Diplomat [may write](#who-diplomat-may-write-to).
+2. **Rates** items, by the [definitions below](#ratings): each rating is a queued job, whose answer
+   the next sync writes as labels where Diplomat [may write](#who-diplomat-may-write-to).
 3. **Routes** a low/low issue down the [fast track](#the-fast-track): its fix PR, that PR reviewed
    until clean, rated again at the clean head, and merged.
 4. **Splits** one medium- or high-complexity issue into low-complexity
    [sub-issues](#fracturing).
 
 Labels, child issues and the merge are done by the sync itself, in code. The fix and review runs are
-agents, queued like a sweep's asks: behind the [task cap](automation.md#autonomous-monitors), the
+agents and each rating a headless `claude -p` job, all queued like a sweep's asks: behind the [task cap](automation.md#autonomous-monitors), the
 [spending budget](automation.md#the-spending-budget) and the disk floor, and held while the ban list cannot be
 read and, after a launch or the pipeline going on, until a sync since has judged their item; each asked for once (a review
 once per head, a new head's no sooner than an hour after the last one was queued or, if it ran, began),
@@ -142,12 +142,15 @@ settings. It answers only through a JSON schema: `risk`, `complexity` and one se
 The title and body (up to 6000 characters), and a PR's diff at the head its rating is saved under (up
 to 20,000), are on its stdin, fenced as untrusted data.
 
-A sync rates up to four items past the ones you asked for with **Rate now**, in this order, newest
-first within each: your fast-track PRs clean at their head and awaiting the second rating, your
-unrated open PRs, unrated issues Diplomat may write to, other unrated issues. An issue already split
-or being fixed is not rated, nor is a Linear issue whose team has no repo root. A failed call is a
-notice, and the item is tried again 1, 2, 4 ... syncs later (a day at most), taking none of the four
-slots meanwhile.
+A sync asks for ratings until four wait past the ones you asked for with **Rate now**, in this
+order, newest first within each: your fast-track PRs clean at their head and awaiting the second
+rating, your unrated open PRs, unrated issues Diplomat may write to, other unrated issues. An issue
+already split or being fixed is not rated, nor is a Linear issue whose team has no repo root. Until
+its answer is applied, an item is neither fixed nor merged. An ask its item has moved past (a PR
+pushed to, an item labelled or closed meanwhile) is dropped, its answer unread, and a PR asked about
+again at its new head; one you cancel in the queue is not made again until **Rate now**. A failed
+call is a notice, and the item is tried again 1, 2, 4 ... syncs later (a day at most), taking none
+of the four slots meanwhile.
 
 Labels for both dimensions are the item's rating (two of one dimension: the higher), and it is not
 rated again but for the fast track's second rating or when you ask. A rating Diplomat writes is the
@@ -338,8 +341,8 @@ team's repo, and each group with no card in any root, whole.
   `clean`, `rerated`, `cleared`, `merged`, `held`, `fractured`, `child`, `asked`); a sync's errors
   are its notices, under the status line. And its actions:
   - **Open** - the issue or PR in the browser.
-  - **Rate now** (your open PR, or an open issue whose code a sync can read) - rated by a sync
-    started at once, ahead of every limit, even with **Rate issues and PRs** off.
+  - **Rate now** (your open PR, or an open issue whose code a sync can read) - its rating asked for
+    by a sync started at once, past the four, even with **Rate issues and PRs** off.
   - **Fracture** (an issue Diplomat may write to, not split or being fixed, whose code a sync can read) -
     split the same way, whatever its rating.
   - **Start fix** (a `candidate` issue no hold stops) - its fix queued at once, past its attempt record, to wait
@@ -361,10 +364,8 @@ running, which reads the switches again (`control.json`) before every step it ta
   label when the split filed nothing. Off, it reads nothing,
   and the work it queued waits.
 - **Rate issues and PRs** - the ratings and their labels. **Each rating is one `claude -p` call**,
-  up to four a sync past the ones you force - 48 an hour from the five-minute syncs while unrated
-  items remain, and four more for each sync you start with **Sync now**, **Rate now**, **Fracture**
-  or a switch turned on - each allowed five minutes. They run in Diplomat, not in the queue, so the
-  task cap and the spending budget do not hold them.
+  allowed five minutes, run from the queue like the fix and review runs, at most four waiting past
+  the ones you force.
 - **Open fix PRs** - a Fix-issues run for each `candidate` issue no open PR fixes.
 - **Fast-track my PRs** - `diplomat:fast-track` on each PR of yours rated low/low at its first rating
   that closes only `candidate` issues, a review run per head until clean, and `diplomat:cleared` taken
@@ -433,9 +434,12 @@ labels are the state; this is what a sync needs besides:
   labels or split failed, and when to
   try again; the issues that would not split and why, and those being split with the parts the
   model answered and those filed so far; and the issues Diplomat filed as parts, with the ban each
-  carries. An item missing from a read keeps these until it is read merged or closed, or goes 90 days unseen. Also what was last
+  carries; the ratings asked for and not yet applied, and the items whose rating was cancelled in
+  the queue. An item missing from a read keeps these until it is read merged or closed, or goes 90 days unseen. Also what was last
   logged, so the log does not repeat itself. A `state.json` or `ratings.json` that is there but
   cannot be read leaves every sync reading and showing only, with a notice.
+- `rate/` - each rating asked for: the call its job makes, and the answer it leaves for the next
+  sync, until the sync no longer asks for it.
 - `control.json` - the switches as the app has them, rewritten whenever one changes and before
   each sync.
 - `linear-login.json` - the [Linear login](#linear): its tokens, and who it is.

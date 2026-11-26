@@ -50,7 +50,7 @@ enum PipelineCommand {
         guard let item = obj["item"] as? String, let stamp = obj["stamp"] as? String else {
             die("stdin names no item and stamp", 1)
         }
-        if obj["cancel"] as? Bool == true {
+        if (obj["cancel"] as? JSONInput.Flag)?.on == true {
             let done = PipelineRateJob.cancel(item: item, stamp: stamp)
             return emitObject(["outcome": done ? "cancelled" : "superseded", "detail": ""])
         }
