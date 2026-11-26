@@ -575,10 +575,10 @@ class Store(QObject):
         self._pipeline_stopped = False
         # The running Linear sign-in's core (:meth:`linear_login`).
         self._linear_login_proc: subprocess.Popen | None = None
-        # Item ids the screen asked to rate or fracture ahead of every limit, until a
-        # sync that was handed them answers.
-        self._pipeline_force: dict[str, frozenset[str]] = {"rate": frozenset(),
-                                                           "fracture": frozenset()}
+        # Item ids the screen asked for ahead of every limit, by ask
+        # (:meth:`pipeline_force_now`), until a sync that was handed them answers.
+        self._pipeline_force: dict[str, frozenset[str]] = {
+            kind: frozenset() for kind in ("rate", "fracture", "takeover", "revoke")}
         # Bumped as the master switch flips or Fix / Fast track goes off: a sync begun
         # before may have been switched off midway, emitting less than it owes, so its
         # result withdraws and prunes nothing (:meth:`_apply_pipeline_sync`).
@@ -5112,11 +5112,16 @@ class Store(QObject):
             return self._pipeline_force[kind]
 
     def pipeline_force_now(self, kind: str, item_id: str) -> None:
-        """The screen's "Rate now" (``rate``) or "Fracture" (``fracture``): the item goes
-        ahead of every limit in a sync started now."""
+        """The screen's "Rate now" (``rate``), "Fracture" (``fracture``), "Authorize
+        takeover" (``takeover``) or "Revoke takeover" (``revoke``): the item goes ahead of
+        every limit in a sync started now. A takeover or revoke drops the other's ask: a
+        sync handed both revokes, then takes over, whichever was asked last."""
+        undone = {"takeover": "revoke", "revoke": "takeover"}.get(kind)
         with self._pipeline_lock:
-            self._pipeline_force = {**self._pipeline_force,
-                                    kind: self._pipeline_force[kind] | {item_id}}
+            force = {**self._pipeline_force, kind: self._pipeline_force[kind] | {item_id}}
+            if undone is not None:
+                force[undone] = force[undone] - {item_id}
+            self._pipeline_force = force
         self.pipeline_changed.emit()
         self.run_pipeline_sync_async()
 
@@ -5563,8 +5568,8 @@ class Store(QObject):
         return "Diplomat has this Linear issue's text only while Open fix PRs is on"
 
     def pipeline_ban_unread(self) -> str | None:
-        """Why a sync would rate and split nothing: the ban list cannot be read; None
-        while it can. Twin of ``Store.pipelineBanUnread``."""
+        """Why a sync would rate, split and take over nothing: the ban list cannot be
+        read; None while it can. Twin of ``Store.pipelineBanUnread``."""
         return ("The prompt-injection ban list could not be read" if self.ban_list_unreadable
                 else None)
 

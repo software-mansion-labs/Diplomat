@@ -95,6 +95,9 @@ _GH_CALLS_PER_CLAUDE = 16
 #: Per split part: a re-read, the parts filed before (twice after a failed create), the
 #: create and its sub-issue link.
 _GH_CALLS_PER_PART = 5
+#: Per takeover or revoke asked: a re-read, then the fast-track label's create and add, or
+#: the fast-track labels' removal.
+_GH_CALLS_PER_TAKEOVER = 3
 #: A root's merges: each PR read twice before ``gh pr merge`` (once without Linear) and
 #: once after.
 _MERGES_PER_ROOT = 3
@@ -132,8 +135,10 @@ def tick_timeout(settings: dict) -> float:
     per_claude = float(rater.get("timeoutSecs", 300)) + 5 + _GH_CALLS_PER_CLAUDE * _GH_CALL_SECS
     per_split = (int((t.get("fracture") or {}).get("maxChildren", 6)) * _GH_CALLS_PER_PART
                  * _GH_CALL_SECS)
+    takeovers = len(force.get("takeover") or []) + len(force.get("revoke") or [])
     roots = max(1, len(settings.get("roots") or []))
     return min(MAX_SYNC_SECS, claude_calls * per_claude + splits * per_split
+               + takeovers * _GH_CALLS_PER_TAKEOVER * _GH_CALL_SECS
                + roots * (_read_calls(t) + _MERGES_PER_ROOT * _GH_CALLS_PER_MERGE) * _GH_CALL_SECS
                + len(settings.get("queued") or []) * _GH_CALL_SECS
                + (_LINEAR_SECS if settings.get("linearTeams") else 0)

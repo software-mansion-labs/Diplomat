@@ -72,7 +72,8 @@ EDGE_STYLE = {"fixes": Qt.PenStyle.SolidLine, "child": Qt.PenStyle.DashLine,
 #: `PipelineEvent.Kind`'s raw values.
 EVENT_TINT = {"rated": _GREY, "labelled": _GREY, "fast-track": TINT, "clean": TINT,
               "rerated": _GREY, "cleared": _GREEN, "merged": _PURPLE, "held": _ORANGE,
-              "fractured": _TEAL, "child": _TEAL, "asked": _BLUE, "error": _RED}
+              "fractured": _TEAL, "child": _TEAL, "asked": _BLUE, "takeover": TINT,
+              "error": _RED}
 
 #: A connector bends halfway across a column gap; MARGIN_X gives the outer columns that
 #: room too.
@@ -731,6 +732,13 @@ def can_fracture(item: dict, edges: list[dict], rooted: bool) -> bool:
             and not any(e.get("kind") == "child" and _ends(e)[0] == item_id for e in edges))
 
 
+def can_take_over(item: dict) -> bool:
+    """A writable open item not taken over, unrated or left to a human."""
+    return (item.get("takenOver") is not True and bool(item.get("writable"))
+            and item.get("state") in ("open", "draft")
+            and item.get("stage") in ("unrated", "human"))
+
+
 def empty_text(repo: str, gitlab: bool, unread: bool, reads: bool) -> str:
     """The placeholder after a sync that read no item the picked root shows. ``repo``: its
     label; ``unread``: the sync read it in part; ``reads``: a GitHub root or a Linear team
@@ -1030,6 +1038,8 @@ class PipelineView(QWidget):
         self._line("Writable: Diplomat may label it and act on it." if item.get("writable")
                    else "Read only: Diplomat shows it and writes nothing to it.",
                    "font-size: 10px;")
+        if item.get("takenOver") is True:
+            self._line("Taken over: its rating does not hold it", muted(9))
         assignees = [str(a) for a in item.get("assignees") or []]
         people = ([f"by {_who(str(item['author']), item)}"] if item.get("author") else [])
         people.append(f"assigned to {', '.join(_who(a, item) for a in assignees)}"
@@ -1091,13 +1101,39 @@ class PipelineView(QWidget):
                         else st.pipeline_fix_unknown(item))))
             btn.setEnabled(on and known and badge is None and not split_asked and ban is None)
             self.buttons["fix"] = btn
-        row = QHBoxLayout()
-        row.setSpacing(4)
-        for btn in self.buttons.values():
-            row.addWidget(btn)
-        row.addStretch(1)
+        pr = item.get("kind") == "pr"
+        if can_take_over(item):
+            asked = item_id in st.pipeline_forced("takeover")
+            refused = ban_unread or item.get("takeoverRefused")
+            btn = _small_button("Takeover asked" if asked else "Authorize takeover",
+                                lambda: st.pipeline_force_now("takeover", item_id))
+            btn.setToolTip(plain_tooltip(refused or (
+                "Hand it to Diplomat in a sync started now: reviewed until clean and merged, "
+                "whatever its rating" if pr else
+                "Hand it to Diplomat in a sync started now: a fix candidate whatever its "
+                "rating or triage")))
+            btn.setEnabled(on and not asked and not refused)
+            self.buttons["takeover"] = btn
+        if item.get("takenOver") is True:
+            asked = item_id in st.pipeline_forced("revoke")
+            btn = _small_button("Revoke asked" if asked else "Revoke takeover",
+                                lambda: st.pipeline_force_now("revoke", item_id))
+            btn.setToolTip(plain_tooltip("Take it back from Diplomat in a sync started now"
+                                         + (": off the fast track for good" if pr else "")))
+            btn.setEnabled(on and not asked)
+            self.buttons["revoke"] = btn
         self.detail_col.addSpacing(4)
-        self.detail_col.addLayout(row)
+        # The pane does not scroll sideways, and all five on one line are wider than it.
+        apart = ("takeover", "revoke")
+        for line in ([b for k, b in self.buttons.items() if k not in apart],
+                     [b for k, b in self.buttons.items() if k in apart]):
+            if line:
+                row = QHBoxLayout()
+                row.setSpacing(4)
+                for btn in line:
+                    row.addWidget(btn)
+                row.addStretch(1)
+                self.detail_col.addLayout(row)
         answer = self._fix_answers.get(item_id)
         if answer is not None:
             self.fix_answer = self._line(answer, f"color: {_RED}; font-size: 10px;")
