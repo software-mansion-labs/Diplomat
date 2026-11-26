@@ -1031,15 +1031,20 @@ def test_the_sync_period_follows_its_environment_override(monkeypatch, env, held
 
 def test_a_syncs_deadline_grows_with_what_it_may_do(monkeypatch):
     monkeypatch.setattr(pipeline, "tunables",
-                        lambda: {"rater": {"perSync": 4, "timeoutSecs": 300}})
-    # 4 ratings, a fracture and the 3 forced: 8 claude calls at 300 + 5 + 16 gh calls of
-    # 65; each of the 2 splits 6 parts of 5 gh calls; 2 roots of 218 gh calls (below);
-    # Linear's 300, its 3 re-reads of 30 and the login's refresh; the lookups and the margin.
+                        lambda: {"rater": {"asks": 4, "timeoutSecs": 300}})
+    # 4 rating asks and the 2 forced, 16 gh calls of 65 each and no claude call: a queued
+    # job makes that; a fracture and the forced one, 2 claude calls at 300 + 5 + 16 gh
+    # calls, and 6 parts of 5 gh calls each; 2 roots of 218 gh calls (below); Linear's
+    # 300, its 3 re-reads of 30 and the login's refresh; the lookups and the margin.
     assert pipeline.tick_timeout({
         "roots": [{}, {}], "linearTeams": [{}],
         "force": {"rate": ["a", "b"], "fracture": ["c"]}}) == (
-            8 * 1345 + 2 * 1950 + 2 * 14170 + 300 + 4 * 30 + 40)
-    assert pipeline.tick_timeout({}) == 5 * 1345 + 1950 + 14170 + 40
+            6 * 1040 + 2 * 1345 + 2 * 1950 + 2 * 14170 + 300 + 4 * 30 + 40)
+    assert pipeline.tick_timeout({}) == 4 * 1040 + 1345 + 1950 + 14170 + 40
+    # The asks are read from the rater's own setting.
+    monkeypatch.setattr(pipeline, "tunables",
+                        lambda: {"rater": {"asks": 1, "timeoutSecs": 300}})
+    assert pipeline.tick_timeout({}) == 1040 + 1345 + 1950 + 14170 + 40
     # A gh call for each item an ask is held for.
     assert pipeline.tick_timeout({"queued": ["a", "b"]}) == pipeline.tick_timeout({}) + 2 * 65
 
@@ -1762,7 +1767,7 @@ def test_only_the_pipelines_asks_are_withdrawn(pipe):
         config={"kind": "issues", "target": "specific", "specificIssue": "12"}, repo="o/r")
     assert not sweep.pipeline
     assert pipeline.withdrawn([sweep], _result(items=(_item(writable=False),)), fix=False,
-                              fast_track=False) == []
+                              fast_track=False, rate=False) == []
 
 
 def _asked(effect: dict) -> autofix.RequestedWork:
@@ -1996,3 +2001,279 @@ def test_a_fix_running_for_another_linear_issue_is_not_this_ones(pipe, monkeypat
             "key": "pipeline-fix:https://linear.app/acme/issue/ENG-1"}
     pipe._apply_pipeline_effects(_result(eng1), time.time())
     assert _keys(pipe) == ["issues:linear:ENG-1"]
+
+
+# MARK: - Ratings
+
+
+def _rate(url: str = PR, number: int = 7, stamp: str = "s1", forced: bool = False,
+          author: str = "carol") -> dict:
+    return {"kind": "rate", "repo": "o/r", "number": number, "url": url, "stamp": stamp,
+            "forced": forced, "author": author, "key": f"pipeline-rate:{url}"}
+
+
+def _pr(number: int) -> str:
+    return f"https://github.com/o/r/pull/{number}"
+
+
+class _Rater:
+    """``pipeline.rate``, each call recorded and a run held until :attr:`go` is set."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+        self.go = threading.Event()
+        self.answer = {"outcome": "rated", "detail": "risk low, complexity low"}
+
+    def __call__(self, item, stamp, *, cancel=False, started=None):
+        self.calls.append((item, stamp, cancel))
+        if not cancel:
+            self.go.wait(10)
+        return dict(self.answer)
+
+
+@pytest.fixture
+def rater(pipe, monkeypatch):
+    QApplication.instance() or QApplication([])
+    r = _Rater()
+    monkeypatch.setattr(pipeline, "rate", r)
+    pipe.pipeline_rate = True
+    yield r
+    r.go.set()
+
+
+def _finish(pipe, r: _Rater) -> None:
+    """Let every held rating return and its answer reach the Qt thread."""
+    r.go.set()
+    assert pipe.wait_for_background() == []
+    QApplication.processEvents()
+
+
+def test_a_rate_effect_queues_one_rating_at_its_stamp_between_review_and_fix(pipe, rater):
+    _sync(pipe, _result(_fix(), _rate(), _review(), _rate(LINEAR, 0)))
+    assert [t.id for t in pipe.queued_tasks] == [
+        "review:o/r#7", "rate:o/r#7", "rate:linear:ENG-12", "issues:o/r#12"]
+    assert autofix.queue_band("rate:o/r#7") == 2
+    task = pipe.queued_tasks[1]
+    assert (task.job.kind, task.job.prompt, task.job.pr_url, task.job.attempt_stamp,
+            task.job.counter, task.job.item) == ("rate", "", PR, "s1", "pipeline", None)
+    assert pipe.queued_tasks[2].job.pr_url == LINEAR
+    assert [w.by_hand for w in pipe.requested_work if w.action == "rate"] == [False, False]
+    # It keeps no attempt record: the core retries it.
+    assert all(not k.startswith("pipeline-rate:") for k in pipe._load_attempts(PIPELINE_ATTEMPTS))
+    assert _feed("pipeline-rate") == ["Rating · #7 queued", "Rating · ENG-12 queued"]
+
+
+def test_no_rating_is_queued_while_rate_is_off_unless_rate_now_forced_it(pipe):
+    _sync(pipe, _result(_rate(), _rate(_pr(8), 8, forced=True)))
+    assert _keys(pipe) == ["rate:o/r#8"]
+    assert [w.by_hand for w in pipe.requested_work] == [True]
+    assert _feed("pipeline-rate") == ["Rating · #8 queued (Rate now)"]
+
+
+def test_a_banned_authors_rating_is_not_queued(pipe, rater):
+    _sync(pipe, _result(_rate(author="mallory")))
+    assert _keys(pipe) == []
+
+
+def test_a_new_stamp_replaces_the_queued_rating_and_the_same_one_leaves_it(pipe, rater):
+    _sync(pipe, _result(_rate()))
+    _sync(pipe, _result(_rate()))
+    assert [w.config["stamp"] for w in pipe.requested_work] == ["s1"]
+    _sync(pipe, _result(_rate(stamp="s2")))
+    assert [w.config["stamp"] for w in pipe.requested_work] == ["s2"]
+    assert [(t.id, t.job.attempt_stamp) for t in pipe.queued_tasks] == [("rate:o/r#7", "s2")]
+    assert _feed("pipeline-rate") == ["Rating · #7 queued", "Rating · #7 queued"]
+
+
+def test_rate_now_marks_the_queued_rating_by_hand(pipe, rater):
+    _sync(pipe, _result(_rate()))
+    _sync(pipe, _result(_rate(forced=True)))
+    assert [(w.key, w.by_hand) for w in pipe.requested_work] == [("rate:o/r#7", True)]
+    assert _feed("pipeline-rate") == ["Rating · #7 queued"]
+
+
+def test_rate_going_off_withdraws_the_ratings_it_queued_but_not_a_forced_one(pipe, rater):
+    _sync(pipe, _result(_rate(), _rate(_pr(8), 8, forced=True)))
+    pipe.pipeline_rate = False
+    assert _keys(pipe) == ["rate:o/r#8"]
+    assert [t.id for t in pipe.queued_tasks] == ["rate:o/r#8"]
+
+
+@pytest.mark.parametrize("forced", [False, True])
+def test_a_judged_sync_with_no_rating_at_its_stamp_withdraws_it(pipe, rater, forced):
+    _sync(pipe, _result(_rate(forced=forced)))
+    _sync(pipe, _result(_rate(forced=forced)))
+    assert _keys(pipe) == ["rate:o/r#7"]
+    _sync(pipe, _result())
+    assert _keys(pipe) == []
+    assert pipe.queued_tasks == []
+
+
+def test_a_rating_in_a_root_no_sync_judged_stays(pipe, rater):
+    _sync(pipe, _result(_rate()))
+    _sync(pipe, _result(unread=("o/r",)))
+    assert _keys(pipe) == ["rate:o/r#7"]
+
+
+def test_a_rating_of_the_issue_owes_no_fix_of_it(pipe, rater):
+    _queued_fix(pipe)
+    _sync(pipe, _result(_rate(ISSUE, 12)))
+    assert _keys(pipe) == ["rate:o/r#12"]
+
+
+def test_a_rating_runs_headless_holding_a_bay_until_it_returns(pipe, rater, monkeypatch):
+    calls = _spawn_recorder(monkeypatch)
+    pipe.auto_task_limit = 2
+    _sync(pipe, _result(_rate()))
+    pipe._drain_queued_tasks([], closed=set())
+    [job] = pipe.running_ratings
+    assert (job.url, job.stamp, job.label, job.forced) == (PR, "s1", "Rating · #7", False)
+    assert (calls, _keys(pipe), pipe.queued_tasks) == ([], [], [])
+    assert (pipe._auto_tasks_running(), pipe.free_auto_slots) == (1, 1)
+    assert "pipeline-rate:" + PR not in pipe._load_attempts(PIPELINE_ATTEMPTS)
+    assert pipe.pipeline_badges() == {}
+    pipe.pipeline_result = _result(items=(_item(PR, kind="pr", label="#7"),))
+    assert pipe.pipeline_badges() == {PR: "agent"}
+    # A sync landing meanwhile asks for no second one.
+    _sync(pipe, _result(_rate(), items=(_item(PR, kind="pr", label="#7"),)))
+    assert _keys(pipe) == []
+    _finish(pipe, rater)
+    assert rater.calls == [(PR, "s1", False)]
+    assert (pipe.running_ratings, pipe._auto_tasks_running()) == ([], 0)
+
+
+def test_a_queued_rating_badges_its_item_queued(pipe, rater):
+    linear = _item(LINEAR, source="linear", label="ENG-12")
+    pr = _item(PR, kind="pr", label="#7")
+    _sync(pipe, _result(_rate(), _rate(LINEAR, 0), items=(pr, linear)))
+    assert pipe.pipeline_badges() == {PR: "queued", LINEAR: "queued"}
+
+
+@pytest.mark.parametrize("networked", [False, True])
+def test_the_drain_starts_no_rating_past_the_cap(pipe, rater, monkeypatch, networked):
+    """Networked, the offers behind it still go."""
+    from diplomat_app import diplomacynetwork
+
+    offered = []
+    monkeypatch.setattr(diplomacynetwork, "enabled", lambda: networked)
+    monkeypatch.setattr(Store, "_offer_tracked", lambda self, job, *a: (
+        offered.append(job.label), diplomacynetwork.Offered("t1"))[1])
+    calls = _spawn_recorder(monkeypatch)
+    pipe.auto_task_limit = 1
+    _sync(pipe, _result(_rate(_pr(8), 8), _rate(_pr(9), 9), _fix()))
+    assert [t.id for t in pipe.queued_tasks] == ["rate:o/r#8", "rate:o/r#9", "issues:o/r#12"]
+    pipe._drain_queued_tasks([], closed=set())
+    assert [r.url for r in pipe.running_ratings] == [_pr(8)]
+    assert calls == []
+    assert [t.id for t in pipe.queued_tasks] == (
+        ["rate:o/r#9", "issues:o/r#12"] if not networked else ["rate:o/r#9"])
+    assert offered == ([pipe.pipeline_work(_fix()).label_among(1)] if networked else [])
+    # Nor is the pool's room any for the rating left.
+    assert pipe._drain_has_room(0) is False
+
+
+@pytest.mark.parametrize("hold", ["budget", "disk", "queue"])
+def test_a_rating_is_held_by_the_budget_the_disk_and_auto_execute(pipe, rater, monkeypatch,
+                                                                    hold):
+    """The network switch on, as it is not for them."""
+    from diplomat_app import diplomacynetwork
+    from diplomat_runtime import diskfloor
+
+    monkeypatch.setattr(diplomacynetwork, "enabled", lambda: True)
+    if hold == "budget":
+        monkeypatch.setattr("diplomat_app.store.autobudget.enabled", lambda: True)
+        monkeypatch.setattr("diplomat_app.store.autobudget.decide",
+                            lambda: autofix.Budget(affordable=False, window="week",
+                                                   left=0.5, needed=5.0))
+    elif hold == "disk":
+        monkeypatch.setattr(Store, "_lowest_disk",
+                            staticmethod(lambda: diskfloor.Reading("/v", 1, 2)))
+    else:
+        pipe.queue_auto_run = False
+    _sync(pipe, _result(_rate()))
+    pipe._drain_queued_tasks([], closed=set())
+    assert (rater.calls, pipe.running_ratings, _keys(pipe)) == ([], [], ["rate:o/r#7"])
+    feed = {"budget": "no-budget", "disk": "low-disk", "queue": "queue-run"}[hold]
+    assert len(_feed(feed)) == (hold != "queue")
+
+
+def test_execute_now_starts_a_held_rating(pipe, rater):
+    pipe.queue_auto_run = False
+    _sync(pipe, _result(_rate()))
+    pipe._execute_queued_task(pipe.queued_tasks[0])
+    assert [r.url for r in pipe.running_ratings] == [PR]
+    assert _feed("queue-run") == ["Rating · #7 — started ahead of the task cap"]
+
+
+def test_cancel_drops_the_rating_and_cancels_it_in_the_core(pipe, rater):
+    _sync(pipe, _result(_rate()))
+    assert pipe.pipeline_cancel_help(pipe.queued_tasks[0].job) == (
+        "Drop this rating from the queue without running it. The pipeline does not ask for it "
+        "again; Rate now on the Pipeline screen does.")
+    pipe.cancel_requested_work("rate:o/r#7")
+    assert (_keys(pipe), pipe.queued_tasks) == ([], [])
+    assert pipe.wait_for_background() == []
+    assert rater.calls == [(PR, "s1", True)]
+    assert _feed("queue-cancel") == ["Rating · #7 — cancelled, not run"]
+    assert _feed("pipeline-rate") == ["Rating · #7 queued"]
+
+
+def test_a_cancel_the_core_could_not_make_is_logged(pipe, rater):
+    rater.answer = {"error": "diplomat-core pipeline-rate failed"}
+    _sync(pipe, _result(_rate()))
+    pipe.cancel_requested_work("rate:o/r#7")
+    assert pipe.wait_for_background() == []
+    assert _feed("pipeline-rate")[1:] == [
+        "Rating · #7 was not cancelled: diplomat-core pipeline-rate failed"]
+
+
+@pytest.mark.parametrize("answer, line", [
+    ({"outcome": "rated", "detail": "risk low"}, "Rating · #7 rated: risk low"),
+    ({"outcome": "failed", "detail": "claude timed out"},
+     "Rating · #7 was not rated: claude timed out"),
+    ({"error": "core gone"}, "Rating · #7 was not rated: core gone"),
+    ({"outcome": "answered", "detail": ""}, None),
+    ({"outcome": "superseded", "detail": ""}, None),
+])
+def test_a_returned_rating_logs_its_outcome_and_frees_its_bay(pipe, rater, monkeypatch,
+                                                                answer, line):
+    forward, syncs = [], []
+    monkeypatch.setattr(Store, "_bring_poll_forward", lambda self, load: forward.append(load))
+    monkeypatch.setattr(Store, "run_pipeline_sync_async", lambda self: syncs.append(1))
+    rater.answer = answer
+    _sync(pipe, _result(_rate()))
+    pipe._drain_queued_tasks([], closed=set())
+    forward.clear()
+    _finish(pipe, rater)
+    assert _feed("pipeline-rate")[1:] == ([line] if line else [])
+    assert (pipe.running_ratings, forward, syncs) == ([], [0], [])
+
+
+def test_a_forced_rating_starts_a_sync_as_it_returns(pipe, rater, monkeypatch):
+    syncs = []
+    monkeypatch.setattr(Store, "run_pipeline_sync_async", lambda self: syncs.append(1))
+    _sync(pipe, _result(_rate(forced=True)))
+    pipe._drain_queued_tasks([], closed=set())
+    assert [r.forced for r in pipe.running_ratings] == [True]
+    assert syncs == []
+    _finish(pipe, rater)
+    assert syncs == [1]
+
+
+def test_quit_stops_each_ratings_core(pipe, rater, monkeypatch):
+    stopped = []
+    monkeypatch.setattr(promptcore, "stop", lambda proc: stopped.append(proc))
+
+    def rate(item, stamp, *, cancel=False, started=None):
+        started("core")
+        rater.go.wait(10)
+        return {"outcome": "rated", "detail": ""}
+
+    monkeypatch.setattr(pipeline, "rate", rate)
+    _sync(pipe, _result(_rate()))
+    pipe._drain_queued_tasks([], closed=set())
+    deadline = time.monotonic() + 5
+    while not any(r.proc for r in pipe.running_ratings) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    pipe.stop_pipeline_sync()
+    assert stopped == ["core"]

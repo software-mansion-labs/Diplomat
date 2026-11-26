@@ -240,6 +240,22 @@ class RemoteCall:
     at: float | None = None
 
 
+@dataclass(frozen=True)
+class RatingJob:
+    """A Pipeline rating running headless (:meth:`Store._start_rating`), holding a bay of
+    the task cap until it returns."""
+
+    #: The rated item's link, as its rate effect's ``url``.
+    url: str
+    stamp: str
+    label: str
+    started_at: float
+    #: By Rate now, so its answer is applied by a sync started as it returns.
+    forced: bool
+    #: The core running it, once started; what a quit stops.
+    proc: subprocess.Popen | None = None
+
+
 # MARK: - Store
 
 
@@ -298,6 +314,8 @@ class Store(QObject):
     _pipeline_synced = Signal(object)
     # Emitted once the Qt thread has applied a sync's answer.
     pipeline_sync_applied = Signal()
+    # A rating job's answer, handed to the Qt thread (:meth:`_rating_done`).
+    _rating_finished = Signal(object)
     # Emitted when the repo roots or the other checkouts listed in Settings change, so
     # the wizards re-judge a link they are already holding and the header re-lists.
     local_repos_changed = Signal()
@@ -579,9 +597,9 @@ class Store(QObject):
         # sync that was handed them answers.
         self._pipeline_force: dict[str, frozenset[str]] = {"rate": frozenset(),
                                                            "fracture": frozenset()}
-        # Bumped as the master switch flips or Fix / Fast track goes off: a sync begun
-        # before may have been switched off midway, emitting less than it owes, so its
-        # result withdraws and prunes nothing (:meth:`_apply_pipeline_sync`).
+        # Bumped as the master switch flips or Fix / Fast track / Rate goes off: a sync
+        # begun before may have been switched off midway, emitting less than it owes, so
+        # its result withdraws and prunes nothing (:meth:`_apply_pipeline_sync`).
         self._pipeline_epoch = 0
         # A sync begun since launch or the master switch went on was applied: until then
         # each pipeline ask queued is stale (:attr:`_pipeline_stale`).
@@ -591,6 +609,11 @@ class Store(QObject):
         # does not start (:meth:`is_held`). Filled once the stored asks can be read.
         self._pipeline_stale: set[str] = set()
         self._pipeline_synced.connect(self._apply_pipeline_sync)
+        # The rating jobs running, by item link (:attr:`running_ratings`); replaced, never
+        # mutated, under the lock: workers and the Qt thread both change it.
+        self._ratings: dict[str, RatingJob] = {}
+        self._rating_lock = threading.Lock()
+        self._rating_finished.connect(self._rating_done)
 
         # Pruned on every start — a Store outlives thousands of polls.
         self._workers: list[threading.Thread] = []
@@ -1344,8 +1367,12 @@ class Store(QObject):
 
     @pipeline_rate.setter
     def pipeline_rate(self, value: bool) -> None:
+        if self.pipeline_rate and not value:
+            self._pipeline_cut()
         self._settings.setValue("pipelineRate", bool(value))
         self._write_pipeline_control()
+        if not value:
+            self._withdraw_pipeline_asks(None)
 
     @property
     def pipeline_fix(self) -> bool:
@@ -1608,15 +1635,20 @@ class Store(QObject):
                 return
             self._early_poll = None
         # That poll may have drained already.
-        if self._drain_has_room(self._auto_tasks_running()):
+        if self._drain_has_room(len(self._agent_tick().cap_load)):
             self.run_autofix_poll_async()
 
     def _drain_has_room(self, load: int) -> bool:
-        # With the network on, the room is the pool's, not this device's cap.
-        room = (self.network_answered is not False
-                and not diplomacynetwork.settings_unknown()
-                if diplomacynetwork.enabled() else load < self.auto_task_limit)
-        return room and bool(self.drainable_tasks)
+        """``load`` is the agents' share of this device's cap; the ratings running take the
+        rest."""
+        here = load + len(self.running_ratings) < self.auto_task_limit
+        if not diplomacynetwork.enabled():
+            return here and bool(self.drainable_tasks)
+        # With the network on, the room is the pool's, not this device's cap, but for a
+        # rating, which runs here.
+        pool = self.network_answered is not False and not diplomacynetwork.settings_unknown()
+        return any(here if t.job.kind == autofix.QUEUE_RATE_ACTION else pool
+                   for t in self.drainable_tasks)
 
     def _autofix_poll_once(self) -> None:
         self._poll_error_this_cycle = None
@@ -2048,7 +2080,9 @@ class Store(QObject):
         :class:`diplomacynetwork.Offered` (``"spawned"``) or a
         :class:`diplomacynetwork.Refused`. Only a paused monitor or queue then holds it:
         the cap, the disk and the budget are the claiming machine's
-        (:func:`network.admit`).
+        (:func:`network.admit`). A Pipeline rating is never offered: it starts no agent but
+        a headless job here (:meth:`_start_rating`), which this device's gates hold
+        whatever the network's switch.
 
         In-flight evidence is the tracked list OR a live ``claude`` visible in
         ``ps`` - the ground-truth floor that also catches agents whose local
@@ -2102,8 +2136,9 @@ class Store(QObject):
             # does not cover.
             agent_on_pr = item is not None and self._in_flight(job.pr_url or "")
             # Networked, the claiming machine answers for its own disk, cap and budget,
-            # so neither disk nor budget is read here.
-            networked = diplomacynetwork.enabled()
+            # so neither disk nor budget is read here. A rating runs here either way.
+            rating = job.kind == autofix.QUEUE_RATE_ACTION
+            networked = diplomacynetwork.enabled() and not rating
             # The disk first: it outranks every other hold on auto work. Measured on
             # the fullest of the volumes an agent fills: the repo roots (its
             # worktree) and ~/.diplomat (the tool caches).
@@ -2210,6 +2245,9 @@ class Store(QObject):
                 started = self._offer_tracked(job, source, attempt, forced, row_label)
                 if not isinstance(started, diplomacynetwork.Offered):
                     return started
+            elif rating:
+                if not self._start_rating(job, row_label):
+                    return autofix.VERDICT_IN_FLIGHT
             else:
                 try:
                     self._spawn_tracked(job.prompt, job.pr_url, job.pr_number,
@@ -2625,8 +2663,8 @@ class Store(QObject):
 
     def _auto_tasks_running(self) -> int:
         """How many bays of this device's cap are held right now — the number the cap
-        is compared against."""
-        return len(self._agent_tick().cap_load)
+        is compared against: the agents', and the ratings running."""
+        return len(self._agent_tick().cap_load) + len(self.running_ratings)
 
     def refresh_auto_task_count(self) -> None:
         """Re-resolve for the display alone, signalling only on a change.
@@ -2724,9 +2762,10 @@ class Store(QObject):
         Work that is starting holds one. Its spawn has not registered anywhere yet,
         but the bay is spoken for — and drawn as free it would put a row that is
         launching next to the empty slot it is launching into, which is one row more
-        than the cap allows."""
+        than the cap allows. So does each rating running."""
         return autofix.free_slots(
-            self.auto_task_limit, self.auto_tasks_shown + len(self.starting_tasks)
+            self.auto_task_limit,
+            self.auto_tasks_shown + len(self.running_ratings) + len(self.starting_tasks)
         )
 
     def _log_at_capacity(self) -> None:
@@ -2979,9 +3018,13 @@ class Store(QObject):
         asks. Nor a ``counter``, but for the Pipeline's asks
         (:attr:`autofix.RequestedWork.pipeline`), which its master switch pauses: no
         monitor owns any other, so no toggle pauses it and no auto-handled counter
-        counts it."""
+        counts it.
+
+        A rating has no prompt: it runs headless (:meth:`_start_rating`) at the stamp its
+        job carries."""
         roots = review.repo_roots()
         label = entry.label_among(len(roots))
+        rating = entry.action == autofix.QUEUE_RATE_ACTION
         checkout = self._root_of(entry.repo).path if entry.repo else None
         stamp = (entry.config, label, checkout)
         cached = self._requested_tasks.get(entry.key)
@@ -2991,7 +3034,8 @@ class Store(QObject):
         # PR number, which an issue's would collide with. The assignee claim, which
         # every machine sees, keeps two agents off one issue.
         is_pr = entry.action == autofix.QUEUE_REVIEW_ACTION
-        # A Pipeline fix carries its effect's url, which its attempt record is found by.
+        # A Pipeline ask carries its effect's url, which a fix's attempt record and a
+        # rating's job are found by.
         # Any other is built from the ask's root key, not its url (which may be empty), so
         # the run stays that root's even once the root is gone.
         link = entry.url if is_pr or entry.pipeline else (
@@ -3004,11 +3048,12 @@ class Store(QObject):
                 kind=entry.action,
                 audit_action=entry.action,
                 label=label,
-                prompt=promptcore.build_prompt(entry.config),
+                prompt="" if rating else promptcore.build_prompt(entry.config),
                 pr_url=link,
                 pr_number=entry.number if is_pr else None,
                 author_login=entry.author or None,
                 counter=PIPELINE_COUNTER if entry.pipeline else None,
+                attempt_stamp=str(entry.config.get("stamp") or "") if rating else "",
                 # A root's checkout is wherever that root is now, not where it was asked.
                 checkout=checkout or where,
                 **diplomacynetwork.terms(entry.config),
@@ -3153,11 +3198,22 @@ class Store(QObject):
         runs — and a fix stands whatever happens to its issue, the poll reading PRs
         alone. Without a way back out, a mis-aimed sweep is a day of agents nobody can
         call off. A pipeline ask's attempt record is concluded (:func:`pipeline.cancelled`),
-        or its next sync would queue it again."""
+        or its next sync would queue it again; a rating, which keeps none, is cancelled in
+        the core instead, on a worker (:func:`pipeline.rate`)."""
         entry = next((e for e in self.queued_tasks if e.id == task_id), None)
         if entry is None or not entry.job.requested:
             return
-        if entry.job.counter == PIPELINE_COUNTER:
+        if entry.job.kind == autofix.QUEUE_RATE_ACTION:
+            job = entry.job
+
+            def work() -> None:
+                why = pipeline.rate(job.pr_url or "", job.attempt_stamp, cancel=True).get("error")
+                if why:
+                    activity.log("panel", "pipeline-rate", f"{job.label} was not cancelled: {why}")
+                    self.refresh_activity()
+
+            self.start_background(work, name="pipeline-rate-cancel")
+        elif entry.job.counter == PIPELINE_COUNTER:
             self._save_attempts(PIPELINE_ATTEMPTS, pipeline.cancelled(
                 self._load_attempts(PIPELINE_ATTEMPTS), entry.job.kind, entry.job.pr_url or "",
                 time.time()))
@@ -3175,6 +3231,9 @@ class Store(QObject):
         if job.kind == autofix.QUEUE_REVIEW_ACTION:
             return ("Drop this review from the queue without running it. The pipeline asks "
                     "for it again once the PR's head moves.")
+        if job.kind == autofix.QUEUE_RATE_ACTION:
+            return ("Drop this rating from the queue without running it. The pipeline does "
+                    "not ask for it again; Rate now on the Pipeline screen does.")
         return ("Drop this fix from the queue without running it. The pipeline does not ask "
                 "for it again; Start fix on the Pipeline screen does.")
 
@@ -3261,9 +3320,13 @@ class Store(QObject):
                 continue
             if outside(entry):
                 continue
-            # A task offered to the Diplomacy Network takes no bay of this machine's.
-            if (not diplomacynetwork.enabled()
+            # A task offered to the Diplomacy Network takes no bay of this machine's; a
+            # rating, never offered, does, and holds none of the offers behind it.
+            networked = diplomacynetwork.enabled()
+            if ((not networked or entry.job.kind == autofix.QUEUE_RATE_ACTION)
                     and self._auto_tasks_running() >= self.auto_task_limit):
+                if networked:
+                    continue
                 return
             # Finding room here is what re-arms the saturation notice. The gate's own
             # reset sits behind the capacity measurement this path skips, so without
@@ -3276,8 +3339,11 @@ class Store(QObject):
             # Every remaining entry would be priced against the same windows and get
             # the same answer, and the dispatch has already re-staged this one for the
             # commit at the end of the cycle. Draining on would cost a round of
-            # refusals to no end. The same holds for a disk below its floor.
+            # refusals to no end. The same holds for a disk below its floor. Networked,
+            # only a rating is priced here, and the offers behind it are not.
             if verdict in (autofix.VERDICT_UNAFFORDABLE, autofix.VERDICT_LOW_DISK):
+                if networked:
+                    continue
                 return
             # A silent or stopping daemon takes none of the rest; a refusal of this
             # job's own leaves the next to be asked.
@@ -3469,6 +3535,7 @@ class Store(QObject):
             activity.log("panel", "queue-run",
                          f"{label} - offered for this machine to run at once"
                          if diplomacynetwork.enabled()
+                         and entry.job.kind != autofix.QUEUE_RATE_ACTION
                          else f"{label} — started ahead of the task cap")
         # The rest are all logged by the step that decided them, but a feed line is
         # not an answer to a click: the row vanished and nothing opened, so say why in
@@ -5084,9 +5151,9 @@ class Store(QObject):
 
     # MARK: The Pipeline
     #
-    # A sync is the core's (:mod:`pipeline`). The agent work it owes becomes asks on the
-    # queue every other ask waits in, so the ban list, the task cap and the budget all
-    # still apply, each asked for once per attempt.
+    # A sync is the core's (:mod:`pipeline`). The work it owes becomes asks on the queue
+    # every other ask waits in, so the ban list, the task cap and the budget all still
+    # apply: a fix or review asked for once per attempt, a rating once per stamp.
 
     def pipeline_settings_payload(self) -> dict:
         """The ``PipelineSettings`` JSON a sync is handed; the Pipeline skips GitLab roots."""
@@ -5165,14 +5232,16 @@ class Store(QObject):
         self.start_background(work, name="pipeline-sync")
 
     def stop_pipeline_sync(self) -> None:
-        """At quit: no sync or Linear sign-in starts again, the running sync's core is
-        stopped with what it runs (:func:`promptcore.stop`), and the sign-in cancelled
-        (:meth:`stop_linear_login`)."""
+        """At quit: no sync or Linear sign-in starts again, the running sync's core and each
+        rating's are stopped with what they run (:func:`promptcore.stop`), and the sign-in
+        cancelled (:meth:`stop_linear_login`). An answer a rating leaves is the next sync's
+        to apply or sweep."""
         with self._pipeline_lock:
             self._pipeline_stopped = True
             proc = self._pipeline_proc
-        if proc is not None:
-            promptcore.stop(proc)
+        for core in (proc, *(r.proc for r in self.running_ratings)):
+            if core is not None:
+                promptcore.stop(core)
         self.stop_linear_login()
 
     def linear_login(self, cancelled: Callable[[], bool],
@@ -5207,6 +5276,65 @@ class Store(QObject):
             stopped = self._pipeline_stopped
         if stopped:
             promptcore.stop(proc)
+
+    @property
+    def running_ratings(self) -> list[RatingJob]:
+        """The rating jobs running, in the order they started; each holds a bay of the
+        task cap."""
+        with self._rating_lock:
+            return list(self._ratings.values())
+
+    def _start_rating(self, job: autofix.AgentJob, label: str) -> bool:
+        """Run the rating ``job`` stands for on a worker (:func:`pipeline.rate`), holding a
+        bay of the task cap from now until it returns, when :meth:`_rating_done` has its
+        answer; forced when its ask is ``by_hand``. False, starting nothing, while a
+        rating of its item runs."""
+        url = job.pr_url or ""
+        forced = any(w.by_hand for w in self.requested_work
+                     if w.action == autofix.QUEUE_RATE_ACTION and w.url == url)
+        with self._rating_lock:
+            if url in self._ratings:
+                return False
+            self._ratings = {**self._ratings, url: RatingJob(
+                url=url, stamp=job.attempt_stamp, label=label, started_at=time.time(),
+                forced=forced)}
+
+        def started(proc: subprocess.Popen) -> None:
+            with self._rating_lock:
+                self._ratings = {k: dataclasses.replace(r, proc=proc) if k == url else r
+                                 for k, r in self._ratings.items()}
+            with self._pipeline_lock:
+                stopped = self._pipeline_stopped
+            if stopped:
+                promptcore.stop(proc)
+
+        def work() -> None:
+            try:
+                answer = pipeline.rate(url, job.attempt_stamp, started=started)
+            finally:
+                with self._rating_lock:
+                    self._ratings = {k: r for k, r in self._ratings.items() if k != url}
+            self._rating_finished.emit({**answer, "label": label, "forced": forced})
+
+        self.start_background(work, name="pipeline-rate")
+        return True
+
+    def _rating_done(self, answer: dict) -> None:
+        """The Qt-thread end of a rating job: its feed line, its freed bay brought forward
+        to the queue, and for a forced one a sync at once, which applies its answer; the
+        next timed sync applies any other. An answer there already, or a rating no sync
+        asks for any more, says nothing."""
+        label, outcome, detail = answer["label"], answer.get("outcome"), answer.get("detail")
+        line = (f"{label} was not rated: {answer['error']}" if "error" in answer
+                else f"{label} rated: {detail}" if outcome == "rated"
+                else f"{label} was not rated: {detail}" if outcome == "failed" else "")
+        if line:
+            activity.log("auto", "pipeline-rate", line)
+            self.refresh_activity()
+        self.tasks_changed.emit()
+        self._bring_poll_forward(self._settled_load)
+        if answer["forced"]:
+            self.run_pipeline_sync_async()
 
     def _pipeline_sync_once(self) -> dict:
         """The slow half of a sync, off the Qt thread: ``{"result"}`` or ``{"error"}``,
@@ -5331,7 +5459,8 @@ class Store(QObject):
     def _withdraw_pipeline_asks(self, result: dict | None,
                                 handed: list[str] | None = None) -> None:
         gone = set(pipeline.withdrawn(self.requested_work, result, fix=self.pipeline_fix,
-                                      fast_track=self.pipeline_fast_track, handed=handed))
+                                      fast_track=self.pipeline_fast_track,
+                                      rate=self.pipeline_rate, handed=handed))
         gone -= {e.id for e in self.starting_tasks}
         roots = len(review.repo_roots())
         carried = set()
@@ -5387,13 +5516,16 @@ class Store(QObject):
 
         The records kept are :func:`pipeline.retained`'s after a ``judged`` sync, every
         one after any other. An ask that could not be queued is an attempt too, retried
-        on the same ladder."""
+        on the same ladder. A rating keeps no record (:meth:`_queue_rating`)."""
         banned = bans.read()
         unreadable = bans.unreadable()
         roots = len(review.repo_roots())
         starting = {e.id for e in self.starting_tasks}
         for effect in result.get("effects") or []:
             kind = effect.get("kind")
+            if kind == "rate":
+                self._queue_rating(effect, banned, unreadable, roots, starting)
+                continue
             if not {"fixIssue": self.pipeline_fix, "fixLinear": self.pipeline_fix,
                     "review": self.pipeline_fast_track}.get(kind, False):
                 continue
@@ -5448,10 +5580,46 @@ class Store(QObject):
             self._save_attempts(PIPELINE_ATTEMPTS, pipeline.retained(
                 self._load_attempts(PIPELINE_ATTEMPTS), result, now, teams, handed=handed))
 
+    def _queue_rating(self, effect: dict, banned: list, unreadable: bool, roots: int,
+                      starting: set[str]) -> None:
+        """Queue the rating a ``rate`` effect asks for, while Rate is on or Rate now forced
+        it. It keeps no attempt record: the core retries it, and its ``stamp`` tells a new
+        ask from the one queued, which a new stamp replaces and the same one leaves
+        standing, marked ``by_hand`` once forced. Nothing is queued while its author is
+        banned or the ban list unreadable, nor while its ask is starting or a rating of
+        its item runs."""
+        forced = effect.get("forced") is True
+        if not (self.pipeline_rate or forced):
+            return
+        try:
+            work = self.pipeline_work(effect)
+        except (KeyError, TypeError, ValueError):
+            return
+        if (work is None or unreadable
+                or (bool(work.author) and bans.is_banned(work.author, banned))
+                or work.key in starting or any(r.url == work.url for r in self.running_ratings)):
+            return
+        old = next((w for w in self.requested_work if w.key == work.key), None)
+        if old is not None and old.config.get("stamp") == work.config.get("stamp"):
+            if forced and not old.by_hand:
+                with self._requested_lock:
+                    self.requested_work = [dataclasses.replace(r, by_hand=True)
+                                           if r.key == old.key else r
+                                           for r in self.requested_work]
+            return
+        if old is not None:
+            self._forget_requested(old.key)
+            self._drop_queued_task(old.key)
+        self.request_one(work)
+        activity.log("auto", "pipeline-rate", f"{work.label_among(roots)} queued"
+                     + (" (Rate now)" if forced else ""))
+
     def pipeline_work(self, effect: dict) -> autofix.RequestedWork | None:
         """The ask a ``PipelineEffect`` stands for, in its root's checkout; None when its
         repo is no GitHub root any more. The effect's ``author`` is the ask's ban
-        dimension, as a Comms fix's is: the issue's text is what the fixer reads."""
+        dimension, as a Comms fix's is: the issue's text is what the fixer reads. A
+        rating's config is its effect's link, stamp and ``forced``, which is also its
+        ``by_hand``; a Linear issue's (``number`` 0) names it by its identifier."""
         roots = [r for r in review.repo_roots() if not r.is_gitlab]
         root = root_named(str(effect.get("repo") or ""), roots)
         if root is None:
@@ -5462,27 +5630,37 @@ class Store(QObject):
         kind = effect.get("kind")
         if kind == "review":
             number = int(effect["number"])
-            cfg = review.ReviewConfig(depth=PIPELINE_REVIEW_DEPTH, target=PRTarget.SPECIFIC,
-                                      specific_pr=str(number), me=me,
-                                      specific_author=review.SpecificAuthor.MINE, home=root,
-                                      fast_track=True)
+            config = review.ReviewConfig(
+                depth=PIPELINE_REVIEW_DEPTH, target=PRTarget.SPECIFIC, specific_pr=str(number),
+                me=me, specific_author=review.SpecificAuthor.MINE, home=root,
+                fast_track=True).prompt_payload()
         elif kind == "fixIssue":
             number = int(effect["number"])
-            cfg = issues.IssueConfig(target=issues.Target.SPECIFIC, specific_issue=str(number),
-                                     me=me, home=root, pipeline=True)
+            config = issues.IssueConfig(target=issues.Target.SPECIFIC,
+                                        specific_issue=str(number), me=me, home=root,
+                                        pipeline=True).prompt_payload()
         elif kind == "fixLinear":
             identifier = str(effect["identifier"])
             number = 0
-            cfg = issues.IssueConfig(target=issues.Target.SPECIFIC, me=me, home=root,
-                                     pipeline=True,
-                                     linear={"identifier": identifier, "url": url,
-                                             "text": str(effect.get("text") or "")})
+            config = issues.IssueConfig(target=issues.Target.SPECIFIC, me=me, home=root,
+                                        pipeline=True,
+                                        linear={"identifier": identifier, "url": url,
+                                                "text": str(effect.get("text") or "")}
+                                        ).prompt_payload()
+        elif kind == "rate":
+            number = int(effect["number"])
+            config = {"kind": autofix.QUEUE_RATE_ACTION, "pipeline": True, "url": url,
+                      "stamp": str(effect["stamp"]), "forced": effect.get("forced") is True}
+            if not number:
+                config["linear"] = {"identifier": pipeline.identity(url).removeprefix(
+                    autofix.linear_item(""))}
         else:
             return None
         author = str(effect.get("author") or "")
         mine = bool(me) and author.lower() == me.lower()
         return autofix.RequestedWork(number=number, url=url, author="" if mine else author,
-                                     config=cfg.prompt_payload(), repo=root.key)
+                                     config=config, repo=root.key,
+                                     by_hand=config.get("forced") is True)
 
     def _pipeline_in_flight(self, work: autofix.RequestedWork) -> bool:
         waiting = ({e.id for e in self.queued_tasks + self.starting_tasks}
@@ -5501,9 +5679,10 @@ class Store(QObject):
 
     def pipeline_badges(self) -> dict[str, str]:
         """``agent`` or ``queued`` by item id, for the items something is on now: an
-        agent on the PR, or fixing the issue, not a released one; work about it
-        waiting in the queue or starting."""
+        agent on the PR, or fixing the issue, not a released one, or a rating of it
+        running; work about it waiting in the queue or starting."""
         rows = [a for a in self.running_tasks if not a.released]
+        rated = {pipeline.identity(r.url) for r in self.running_ratings}
         tasks = self.queued_tasks + self.starting_tasks
         waiting = {e.id for e in tasks}
         # A pipeline task's link names its item as the sync read it, after a rename too.
@@ -5516,8 +5695,8 @@ class Store(QObject):
             if it.get("source") == "linear":
                 identifier = str(it.get("label") or "")
                 agent = self._fix_of(rows, None, identifier) is not None
-                queued = autofix.queue_key(autofix.QUEUE_ISSUES_ACTION,
-                                           autofix.linear_item(identifier)) in waiting
+                queued = any(autofix.queue_key(verb, autofix.linear_item(identifier)) in waiting
+                             for verb in (autofix.QUEUE_ISSUES_ACTION, autofix.QUEUE_RATE_ACTION))
             else:
                 item = item_key_from_url(item_id)
                 if item is None:
@@ -5525,7 +5704,7 @@ class Store(QObject):
                 agent = (any(a.item == item for a in rows)
                          or self._fix_of(rows, item, item_label(item, roots)) is not None)
                 queued = item in waiting_items
-            if agent:
+            if agent or pipeline.identity(item_id) in rated:
                 badges[item_id] = "agent"
             elif queued:
                 badges[item_id] = "queued"

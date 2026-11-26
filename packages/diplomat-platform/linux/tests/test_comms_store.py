@@ -427,7 +427,7 @@ def test_a_bump_moves_everything_queued_for_that_number(comms_store, monkeypatch
 
 
 @needs_core
-def test_an_investigation_is_band_3_and_outlives_a_restart(comms_store, monkeypatch):
+def test_an_investigation_is_band_4_and_outlives_a_restart(comms_store, monkeypatch):
     _sweep_review(comms_store, 1)
     m = _message(1, "the screenshot tool hangs on Android 14")
     _tick(comms_store, monkeypatch, (m, _decision("investigate", 0, "screenshot hangs")))
@@ -435,7 +435,7 @@ def test_an_investigation_is_band_3_and_outlives_a_restart(comms_store, monkeypa
     number = int(m["ts"].replace(".", ""))
     key = f"investigate:{number}"
     assert [t.id for t in comms_store.queued_tasks] == [qkey("review", 13), qkey("review", 1), key]
-    assert autofix.queue_band(key) == 3
+    assert autofix.queue_band(key) == 4
     task = comms_store.queued_tasks[-1]
     sent = time.strftime("%H:%M:%S", time.localtime(float(m["ts"])))
     assert task.job.label == f"Investigate · Slack · kacper · screenshot hangs · {sent}"

@@ -41,6 +41,7 @@ def test_category_of_matches_swift_taxonomy() -> None:
         "comms-notice": "comms",
         "pipeline-fix": "issues",
         "pipeline-review": "review",
+        "pipeline-rate": "review",
         "pipeline-merge": "merge",
         "pipeline-fracture": "issues",
         "pipeline-notice": "system",
@@ -83,9 +84,9 @@ def test_glyph_falls_back_to_category_glyph() -> None:
         "comms-error", "comms-recovered", "comms-notice")] == [
             "✉", "☑", "⊙", "↑", "⌕", "△", "✓", "△"]
     assert [activity.glyph_for(v) for v in (
-        "pipeline-fix", "pipeline-review", "pipeline-merge", "pipeline-fracture",
+        "pipeline-fix", "pipeline-review", "pipeline-rate", "pipeline-merge", "pipeline-fracture",
         "pipeline-notice", "pipeline-error", "pipeline-recovered")] == [
-            "⊙", "☑", "✓", "⊶", "△", "△", "✓"]
+            "⊙", "☑", "☑", "✓", "⊶", "△", "△", "✓"]
     assert activity.color_for("comms-investigate") == "#007AFF"
     # The Machines screen's own glyph, as macOS marks them all with server.rack.
     assert {activity.glyph_for(v) for v in (
