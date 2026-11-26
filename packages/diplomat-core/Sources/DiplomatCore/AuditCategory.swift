@@ -65,7 +65,7 @@ public enum AuditCategory: String, CaseIterable, Sendable {
         case .merge:      return "checkmark.seal.fill"
         case .bans:       return "hand.raised.fill"
         case .comms:      return "bubble.left.and.bubble.right.fill"
-        case .network:    return "point.3.connected.trianglepath.dotted"
+        case .network:    return "globe"
         case .system:     return "gearshape.fill"
         }
     }

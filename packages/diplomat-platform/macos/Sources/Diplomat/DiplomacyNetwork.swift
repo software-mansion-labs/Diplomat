@@ -175,7 +175,7 @@ enum NetworkText {
         + "it again until it does."
     static let rowHelp = "Open the Network screen."
     static let forgetHelp = "Withdraw this job from the pool and remove it from the list."
-    static let symbol = "point.3.connected.trianglepath.dotted"
+    static let symbol = "globe"
 
     static let switchTitle = "Offer every job to the Diplomacy Network"
     static let offNote = "Off: every job runs in a terminal on this machine."
