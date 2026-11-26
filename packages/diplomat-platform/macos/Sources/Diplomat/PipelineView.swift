@@ -15,6 +15,7 @@ struct PipelineView: View {
     @State private var lane: PipelineLane?
     @State private var selected: String?
     @State private var actionError: String?
+    @FocusState private var focused: Bool
 
     static let detailWidth: CGFloat = 290
 
@@ -28,7 +29,7 @@ struct PipelineView: View {
     var body: some View {
         let picked = store.selectedRoot
         let result = store.pipelineShown
-        return VStack(alignment: .leading, spacing: 8) {
+        return ScrollViewReader { proxy in VStack(alignment: .leading, spacing: 8) {
             header(result)
             statusLine(result)
             if store.pipelineEnabled, let error = store.pipelineError {
@@ -64,9 +65,26 @@ struct PipelineView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
+        .focusable()
+        .focusEffectDisabled()
+        .focused($focused)
+        .onKeyPress(keys: [.upArrow, .downArrow, .leftArrow, .rightArrow]) { press in
+            guard let result else { return .ignored }
+            let (dx, dy) = PipelineView.arrows[press.key] ?? (0, 0)
+            guard let next = PipelineLayout.make(result, lane: lane).step(from: selected, dx: dx, dy: dy)
+            else { return .ignored }
+            selected = next
+            proxy.scrollTo(next)
+            return .handled
+        }
+        .onAppear { focused = true }
         .onChange(of: selected) { actionError = nil }
         .task { await store.loadPipelineLast() }
+        }
     }
+
+    static let arrows: [KeyEquivalent: (Int, Int)] = [.leftArrow: (-1, 0), .rightArrow: (1, 0),
+                                                       .upArrow: (0, -1), .downArrow: (0, 1)]
 
     /// `repo`: the picked root's label; `unread`: the last sync read it in part; `reads`: a
     /// GitHub root or a Linear team is set. Twin of `pipelineview.empty_text`.
@@ -396,6 +414,22 @@ struct PipelineLayout {
         return out
     }
 
+    /// The card an arrow `dx`/`dy` moves the selection to: of the cards that way, the one in
+    /// the nearest row, then column. None that way keeps `selected`; none selected among the
+    /// cards picks the first. Twin of `pipelineview.step`.
+    func step(from selected: String?, dx: Int, dy: Int) -> String? {
+        func key(_ card: Card, _ at: CGRect) -> (CGFloat, CGFloat, CGFloat, CGFloat) {
+            (abs(card.frame.minY - at.minY), abs(card.frame.minX - at.minX), card.frame.minY, card.frame.minX)
+        }
+        guard let at = cards.first(where: { $0.item.id == selected })?.frame else {
+            return cards.min { key($0, .zero) < key($1, .zero) }?.item.id
+        }
+        let ahead = cards.filter {
+            dy != 0 ? ($0.frame.minY - at.minY) * CGFloat(dy) > 0 : ($0.frame.minX - at.minX) * CGFloat(dx) > 0
+        }
+        return ahead.min { key($0, at) < key($1, at) }?.item.id ?? selected
+    }
+
     /// Each edge from its source's right side to its target's left side, never across a
     /// card: into the next column one curve through the gutter between; anything else out
     /// into the source's gutter, along the middle of the gap between card rows (above the
@@ -490,7 +524,9 @@ private struct PipelineCanvas: View {
             ForEach(layout.cards, id: \.item.id) { card in
                 PipelineCard(item: card.item, badge: badges[Store.pipelineIdentity(card.item.id)],
                              selected: selected == card.item.id) { select(card.item.id) }
-                    .offset(x: card.frame.minX, y: card.frame.minY)
+                    // Not .offset: scrollTo goes to the frame layout gave the card, before any offset.
+                    .alignmentGuide(.leading) { _ in -card.frame.minX }
+                    .alignmentGuide(.top) { _ in -card.frame.minY }
             }
         }
         .frame(width: layout.size.width, height: layout.size.height, alignment: .topLeading)
