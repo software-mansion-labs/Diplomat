@@ -34,6 +34,7 @@ enum Headless {
         "DIPLOMAT_ALLOCATOR_TEST": false,
         "DIPLOMAT_WATCHDOG": false,
         "DIPLOMAT_WATCHDOG_TEST": false,
+        "DIPLOMAT_UPDATE_TEST": false,
         "DIPLOMAT_REPOPATHS_TEST": false,
         "DIPLOMAT_REOPEN_TEST": false,
         "DIPLOMAT_APPLOG_TEST": false,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Lay out Diplomat.app around an already built binary.
-# Usage: ./install/assemble-app.sh <binary> <assets-dir> <checkout> <dest.app>
+# Usage: ./install/assemble-app.sh <binary> <assets-dir> <checkout> <commit> <dest.app>
 # build-app.sh calls it after the compile; tests/full-disk.sh calls it directly.
 #
 # The new bundle is assembled beside <dest.app>, on the same volume, and swapped
@@ -8,8 +8,8 @@
 # non-zero with the old bundle still at <dest.app>: the watchdog and the
 # self-updater relaunch exactly <dest.app>, so losing it leaves nothing to run.
 set -euo pipefail
-[ "$#" -eq 4 ] || { echo "usage: $0 <binary> <assets-dir> <checkout> <dest.app>" >&2; exit 2; }
-BIN="$1"; ASSETS="$2"; CHECKOUT="$3"; APP="${4%/}"
+[ "$#" -eq 5 ] || { echo "usage: $0 <binary> <assets-dir> <checkout> <commit> <dest.app>" >&2; exit 2; }
+BIN="$1"; ASSETS="$2"; CHECKOUT="$3"; COMMIT="$4"; APP="${5%/}"
 APP_NAME="Diplomat"
 
 STAGE="$(mktemp -d "$(dirname "$APP")/.$(basename "$APP").XXXXXX")"
@@ -42,8 +42,9 @@ cat > "$STAGE/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 # A copy of the bundle kept outside the checkout finds it through this record;
-# RepoPaths.root reads it back.
+# RepoPaths.root reads it back. The commit is what SelfUpdate.check compares.
 plutil -insert DiplomatCheckout -string "$CHECKOUT" "$STAGE/Contents/Info.plist"
+plutil -insert DiplomatCommit -string "$COMMIT" "$STAGE/Contents/Info.plist"
 
 # One rename: the path holds the old bundle or the complete new one, never neither.
 # A running app keeps its executable through it.

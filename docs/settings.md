@@ -258,7 +258,7 @@ swaps the panel to a settings screen:
   described in [Pipeline → Settings](pipeline.md#settings), the login in
   [Pipeline → Linear](pipeline.md#linear).
 - **Update** - pull the checkout, rebuild, and relaunch in place. Shows how many
-  commits the checkout is behind *and* ahead of upstream, with a ↻ re-check
+  commits the running build is behind *and* ahead of upstream, with a ↻ re-check
   button; the button fetches and **merges** (fast-forward when strictly behind, a
   merge commit when you have local commits of your own - `--ff-only` used to refuse
   that), runs `install/build-app.sh`, and reopens the rebuilt app (the newest-wins
