@@ -325,6 +325,8 @@ final class PipelineSync {
     }
 
     static let banNotice = "the prompt-injection ban list could not be read, so this sync took no step past that"
+    /// Why an item a rating was asked for is neither merged nor fixed until it is in.
+    static let ratingAsked = "a rating asked for it is not in yet"
     static let banUnread = "the prompt-injection ban list could not be read"
 
     /// Whose text a part Diplomat split off carries: its marker's, else the one recorded
@@ -1101,13 +1103,13 @@ final class PipelineSync {
     /// The head a rating of `e` reads the diff at; nil for an issue.
     func head(_ e: PipelineEntry) -> String? { e.item.kind == .pr ? e.item.headSha : nil }
 
-    /// Applies each answer a rating job left for a current ask, and drops each ask an
-    /// answer shows is no longer worth applying. An answer for an item this sync did not
-    /// read, or that a switch keeps from applying now, waits.
+    /// Applies each answer a rating job left for a current ask, in the order they were
+    /// asked for, and drops each ask an answer shows is no longer worth applying. An answer
+    /// for an item this sync did not read, or that a switch keeps from applying now, waits.
     func answers() {
-        for answer in PipelineRateJob.answers(in: dir) {
-            guard let a = state.rateAsks[answer.item], a.stamp == answer.stamp,
-                  let i = pos[answer.item] else { continue }
+        let current = PipelineRateJob.answers(in: dir).filter { state.rateAsks[$0.item]?.stamp == $0.stamp }
+        for answer in current.sorted(by: { asked(state.rateAsks[$0.item]!, before: state.rateAsks[$1.item]!) }) {
+            guard let a = state.rateAsks[answer.item], let i = pos[answer.item] else { continue }
             let id = answer.item
             if answer.cancelled == true {
                 state.rateAsks[id] = nil
@@ -1714,6 +1716,8 @@ final class PipelineSync {
                 let code: String?
                 if let stop = stops(e).first {
                     (code, hold) = (PipelineGate.Hold.stopLabel(stop).code, PipelineGate.Hold.stopLabel(stop).message)
+                } else if state.rateAsks[e.id] != nil {
+                    (code, hold) = ("rating-asked", Self.ratingAsked)
                 } else if let h = mergeHold(e, fixes: fixesCandidate(e), unjudged: closesUnwritable(e)) {
                     (code, hold) = (h.code, h.message)
                 } else if let why = e.unwritable {
@@ -1813,6 +1817,7 @@ final class PipelineSync {
         if let why = incomplete[root.slug] { return "\(why), so a PR fixing it might not be seen" }
         if let why = partial[root.slug] ?? twinsUnread(e) { return why }
         if e.item.ratedBy != "label" { return "its rating labels could not be written" }
+        if state.rateAsks[e.id] != nil { return Self.ratingAsked }
         if e.item.source == .linear, e.item.repo.uppercased() == "GH" {
             return "GitHub reads Linear team GH's `Fixes \(e.item.label)` as closing #\(e.item.label.dropFirst(3))"
         }
@@ -2011,13 +2016,16 @@ final class PipelineSync {
         return out
     }
 
-    /// A rating effect per ask this sync read the item of and no answer is waiting for,
-    /// forced first, then oldest first.
+    /// Forced first, then oldest first.
+    func asked(_ a: PipelineRateAsk, before b: PipelineRateAsk) -> Bool {
+        (a.forced ? 0 : 1, Int(a.stamp) ?? 0) < (b.forced ? 0 : 1, Int(b.stamp) ?? 0)
+    }
+
+    /// A rating effect per ask this sync read the item of and no answer is waiting for, in
+    /// `asked` order.
     func rateAsked() -> [PipelineEffect] {
         let unforced = may(.rate), forced = may(.forced)
-        return state.rateAsks.sorted {
-            ($0.value.forced ? 0 : 1, Int($0.value.stamp) ?? 0) < ($1.value.forced ? 0 : 1, Int($1.value.stamp) ?? 0)
-        }.compactMap { id, a in
+        return state.rateAsks.sorted { asked($0.value, before: $1.value) }.compactMap { id, a in
             guard let i = pos[id], let root = entries[i].root, a.forced ? forced : unforced,
                   banHold(entries[i]) == nil, !PipelineRateJob.answered(id, a.stamp, in: dir) else { return nil }
             return .rate(repo: root.slug, number: entries[i].number ?? 0, url: id, stamp: a.stamp, forced: a.forced,
