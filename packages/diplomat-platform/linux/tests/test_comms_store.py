@@ -1686,6 +1686,25 @@ def test_the_tick_child_is_given_the_bound_of_the_operators_batch(monkeypatch):
     assert seen[0][1] > comms.tick_timeout()
 
 
+def test_the_docs_name_exactly_the_comms_json_keys_linux_reads(monkeypatch):
+    read = set()
+
+    class Recording(dict):
+        def get(self, key, default=None):
+            read.add(key)
+            return super().get(key, default)
+
+    monkeypatch.setattr(comms, "tunables", lambda: Recording(core.comms()))
+    monkeypatch.setattr("diplomat_runtime.promptcore.core_bin", lambda: "/bin/core")
+    monkeypatch.setattr("subprocess.Popen", _answering_core([]))
+    comms.poll_secs(), comms.tick({}), comms.auth(), comms.batch_defaults()
+    readme = (core.assets_dir() / "README.md").read_text(encoding="utf-8")
+    row = next(r for r in readme.splitlines() if r.startswith("| `comms.json` |"))
+    assert set(re.findall(r"`(\w+)`", row.split("reads only", 1)[1])) == read
+    comment = core.comms()["_comment"].split("Settings stops: ", 1)[1].split(" (", 1)[0]
+    assert set(re.split(r", | and ", comment)) == read
+
+
 @pytest.mark.parametrize("raw", ["inf", "1e12", "-inf", "nan"])
 def test_an_extreme_period_is_held_to_one_a_timer_can_take(monkeypatch, raw):
     monkeypatch.setenv("DIPLOMAT_COMMS_SECS", raw)
