@@ -946,7 +946,7 @@ private func fixFX(_ n: Int, author: String = "reporter") -> PipelineEffect {
 func pipelineSmoke() throws {
     section("pipeline")
     let model = try CoreAssets.pipeline()
-    check(model.rater.model == "sonnet" && model.rater.prModel == "opus" && model.rater.perSync == 4)
+    check(model.rater.model == "sonnet" && model.rater.prModel == "opus" && model.rater.asks == 4)
     check(model.raterSchema.contains("\"risk\"") && model.fractureSchema.contains("\"parts\""))
 
     // ---- The floor a diff puts under a PR's rating ----
@@ -3642,6 +3642,8 @@ private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: Pipeli
             return .fixLinear(repo: "acme/app-old", identifier: id, url: url, text: text, author: author)
         case .review(_, let n, let url, let head, let author):
             return .review(repo: "acme/app-old", number: n, url: url, headSha: head, author: author)
+        case .rate(_, let n, let url, let stamp, let forced, let author):
+            return .rate(repo: "acme/app-old", number: n, url: url, stamp: stamp, forced: forced, author: author)
         }
     }
     check(old.writes == named.writes && old.claude == named.claude && old.result.notices == named.result.notices

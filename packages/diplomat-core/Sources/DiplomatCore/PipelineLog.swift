@@ -92,6 +92,12 @@ struct PipelineState: Codable, Equatable {
     var clean: [String: String] = [:]
     /// Per effect key, the stamp last logged `asked`.
     var asked: [String: String] = [:]
+    /// Per item, the rating asked of a queued job and not yet applied.
+    var rateAsks: [String: PipelineRateAsk] = [:]
+    /// The last rating ask's stamp.
+    var rateSeq = 0
+    /// Items whose queued rating the operator cancelled: not asked again unless forced.
+    var declined: [String] = []
     /// The last sync's notices, so each is logged as an `error` once.
     var notices: [String] = []
 
@@ -99,7 +105,7 @@ struct PipelineState: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case labelsMade, decided, untracked, unsplit, splitting, parts, rerated, cleared, retry, syncs, lineage, seen,
-             holds, clean, asked, notices
+             holds, clean, asked, rateAsks, rateSeq, declined, notices
     }
 
     /// A field missing is empty; one there but not of its type fails the whole file.
@@ -120,6 +126,9 @@ struct PipelineState: Codable, Equatable {
         holds = try c.decodeIfPresent([String: String].self, forKey: .holds) ?? [:]
         clean = try c.decodeIfPresent([String: String].self, forKey: .clean) ?? [:]
         asked = try c.decodeIfPresent([String: String].self, forKey: .asked) ?? [:]
+        rateAsks = try c.decodeIfPresent([String: PipelineRateAsk].self, forKey: .rateAsks) ?? [:]
+        rateSeq = try c.decodeIfPresent(Int.self, forKey: .rateSeq) ?? 0
+        declined = try c.decodeIfPresent([String].self, forKey: .declined) ?? []
         notices = try c.decodeIfPresent([String].self, forKey: .notices) ?? []
     }
 
@@ -157,6 +166,8 @@ struct PipelineState: Codable, Equatable {
         cleared = cleared.filter { live($0.key) }
         retry = retry.filter { live($0.key) }
         lineage = lineage.filter { live($0.key) }
+        rateAsks = rateAsks.filter { live($0.key) }
+        declined.removeAll { !live($0) }
         func keep(_ id: String) -> Bool { live(id) && (!readAll || read.contains(id)) }
         holds = holds.filter { keep($0.key) }
         clean = clean.filter { keep($0.key) }
