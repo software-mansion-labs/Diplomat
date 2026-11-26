@@ -1087,7 +1087,7 @@ def test_revoke_takeover_takes_it_back_and_a_pr_off_the_fast_track_for_good(stor
     revoke.click()
     view.select(P2)
     assert _tip(view.buttons["revoke"]) == ("Take it back from Diplomat in a sync started now: "
-                                            "off the fast track for good")
+                                            "its fast-track labels come off")
     view.buttons["revoke"].click()
     assert calls == [("revoke", I5), ("revoke", P2)]
     view.select(I6)

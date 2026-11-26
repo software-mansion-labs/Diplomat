@@ -733,7 +733,8 @@ def can_fracture(item: dict, edges: list[dict], rooted: bool) -> bool:
 
 
 def can_take_over(item: dict) -> bool:
-    """A writable open item not taken over, unrated or left to a human."""
+    """A writable open item not taken over, unrated or left to a human. Twin of
+    ``PipelineView.canTakeOver``."""
     return (item.get("takenOver") is not True and bool(item.get("writable"))
             and item.get("state") in ("open", "draft")
             and item.get("stage") in ("unrated", "human"))
@@ -1119,7 +1120,7 @@ class PipelineView(QWidget):
             btn = _small_button("Revoke asked" if asked else "Revoke takeover",
                                 lambda: st.pipeline_force_now("revoke", item_id))
             btn.setToolTip(plain_tooltip("Take it back from Diplomat in a sync started now"
-                                         + (": off the fast track for good" if pr else "")))
+                                         + (": its fast-track labels come off" if pr else "")))
             btn.setEnabled(on and not asked)
             self.buttons["revoke"] = btn
         self.detail_col.addSpacing(4)

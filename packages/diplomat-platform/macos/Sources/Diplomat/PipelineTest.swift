@@ -777,7 +777,7 @@ enum PipelineTest {
                   && detail(at(.candidate, takenOver: true)).revokeTip
                       == "Take it back from Diplomat in a sync started now"
                   && detail(at(.fastTrack, .pr, takenOver: true)).revokeTip
-                      == "Take it back from Diplomat in a sync started now: off the fast track for good")
+                      == "Take it back from Diplomat in a sync started now: its fast-track labels come off")
 
         print("\npipeline: connectors")
         func graph(_ cells: [(String, Int, Int)], _ edges: [(String, String, PipelineGraph.EdgeKind)])

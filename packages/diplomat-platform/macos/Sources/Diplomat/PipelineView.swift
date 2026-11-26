@@ -215,6 +215,7 @@ struct PipelineView: View {
         item.kind == .issue && item.stage == .candidate && item.writable
     }
 
+    /// Twin of `pipelineview.can_take_over`.
     static func canTakeOver(_ item: PipelineItem) -> Bool {
         item.takenOver != true && item.writable && (item.state == "open" || item.state == "draft")
             && [.unrated, .human].contains(item.stage)
@@ -720,7 +721,7 @@ struct PipelineDetail: View {
     }
     var revokeEnabled: Bool { enabled && !forcedRevoke }
     var revokeTip: String {
-        "Take it back from Diplomat in a sync started now" + (item.kind == .pr ? ": off the fast track for good" : "")
+        "Take it back from Diplomat in a sync started now" + (item.kind == .pr ? ": its fast-track labels come off" : "")
     }
 
     private var actions: some View {
