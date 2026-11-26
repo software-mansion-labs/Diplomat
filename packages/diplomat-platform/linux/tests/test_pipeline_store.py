@@ -2038,7 +2038,8 @@ def rater(pipe, monkeypatch):
     monkeypatch.setattr(pipeline, "rate", r)
     pipe.pipeline_rate = True
     yield r
-    r.go.set()
+    # Its answer is delivered here, not to the next test's store.
+    _finish(pipe, r)
 
 
 def _finish(pipe, r: _Rater) -> None:
@@ -2071,8 +2072,8 @@ def test_no_rating_is_queued_while_rate_is_off_unless_rate_now_forced_it(pipe):
 
 
 def test_a_banned_authors_rating_is_not_queued(pipe, rater):
-    _sync(pipe, _result(_rate(author="mallory")))
-    assert _keys(pipe) == []
+    _sync(pipe, _result(_rate(author="mallory"), _rate(_pr(8), 8)))
+    assert _keys(pipe) == ["rate:o/r#8"]
 
 
 def test_a_new_stamp_replaces_the_queued_rating_and_the_same_one_leaves_it(pipe, rater):
@@ -2168,7 +2169,7 @@ def test_the_drain_starts_no_rating_past_the_cap(pipe, rater, monkeypatch, netwo
     assert [t.id for t in pipe.queued_tasks] == (
         ["rate:o/r#9", "issues:o/r#12"] if not networked else ["rate:o/r#9"])
     assert offered == ([pipe.pipeline_work(_fix()).label_among(1)] if networked else [])
-    # Nor is the pool's room any for the rating left.
+    # A rating needs a bay here, whatever room the pool has.
     assert pipe._drain_has_room(0) is False
 
 
@@ -2216,6 +2217,54 @@ def test_cancel_drops_the_rating_and_cancels_it_in_the_core(pipe, rater):
     assert rater.calls == [(PR, "s1", True)]
     assert _feed("queue-cancel") == ["Rating · #7 — cancelled, not run"]
     assert _feed("pipeline-rate") == ["Rating · #7 queued"]
+
+
+def _core_job(tmp_path, monkeypatch) -> tuple:
+    """A rating job of ``PR`` at ``s1`` for the real core, as a sync leaves it (named as
+    ``PipelineRateJob.name`` names it), and the mark a ``claude`` it runs leaves."""
+    ran = tmp_path / "claude-ran"
+    claude = tmp_path / "claude"
+    rating = json.dumps({"type": "result", "is_error": False, "structured_output": {
+        "risk": "low", "complexity": "low", "why": "one line"}})
+    claude.write_text(f"#!/bin/sh\ntouch {ran}\necho '{rating}'\n")
+    claude.chmod(0o755)
+    monkeypatch.setenv("DIPLOMAT_CLAUDE", str(claude))
+    name = 0xcbf29ce484222325
+    for b in PR.encode():
+        name = ((name ^ b) * 0x100000001b3) % 2 ** 64
+    jobs = tmp_path / "pipeline" / "rate"
+    jobs.mkdir(parents=True)
+    (jobs / f"{name:x}-s1.job.json").write_text(json.dumps(
+        {"item": PR, "stamp": "s1", "model": "sonnet", "prompt": "p", "input": "i",
+         "cwd": str(tmp_path)}))
+    return jobs / f"{name:x}-s1.answer.json", ran
+
+
+@pytest.mark.skipif(not os.environ.get("DIPLOMAT_CORE_BIN"), reason="DIPLOMAT_CORE_BIN not set")
+def test_a_cancel_through_the_real_core_runs_nothing(pipe, tmp_path, monkeypatch):
+    answer, ran = _core_job(tmp_path, monkeypatch)
+    pipe.pipeline_rate = True
+    _sync(pipe, _result(_rate()))
+    pipe.cancel_requested_work("rate:o/r#7")
+    assert pipe.wait_for_background(30) == []
+    assert not ran.exists()
+    assert json.loads(answer.read_text())["cancelled"] is True
+    assert _feed("pipeline-rate") == ["Rating · #7 queued"]
+
+
+@pytest.mark.skipif(not os.environ.get("DIPLOMAT_CORE_BIN"), reason="DIPLOMAT_CORE_BIN not set")
+def test_a_rating_runs_through_the_real_core(pipe, tmp_path, monkeypatch):
+    QApplication.instance() or QApplication([])
+    answer, ran = _core_job(tmp_path, monkeypatch)
+    pipe.pipeline_rate = True
+    _sync(pipe, _result(_rate()))
+    pipe._drain_queued_tasks([], closed=set())
+    assert pipe.wait_for_background(30) == []
+    QApplication.processEvents()
+    assert ran.exists()
+    assert json.loads(answer.read_text())["status"] == 0
+    assert _feed("pipeline-rate") == ["Rating · #7 queued",
+                                      "Rating · #7 rated: low risk, low complexity"]
 
 
 def test_a_cancel_the_core_could_not_make_is_logged(pipe, rater):
