@@ -1745,11 +1745,17 @@ enum PipelineTest {
               summary() == "Linear answered HTTP 400: Authentication required, not authenticated"
                   && store.linearKey == "lin_api_wrong" && store.linearLogin == nil
                   && !FileManager.default.fileExists(atPath: file))
+        store.linearKey = nil
+        let cancelled = summary()
+        store.linearLoginNote = "Signed out, but Linear answered HTTP 503 to the revocation"
+        store.linearKey = ""
+        check("…Cancel closes the field and its note, and opening it clears an older one",
+              cancelled == "Not signed in" && summary() == "Not signed in")
         store.linearKey = "  lin_api_selftest\n"
         sent = []
         var saving = false
         await underWay({ await store.signInToLinearWithKey() }, busy: { store.linearSavingKey }) {
-            saving = store.linearSavingKey && store.linearLoginNote == nil
+            saving = store.linearSavingKey && store.linearLoginNote == nil && summary() == "Checking the key with Linear…"
             await store.signInToLinearWithKey()
         }
         for _ in 0..<200 where ticks == 0 { try? await Task.sleep(nanoseconds: 10_000_000) }

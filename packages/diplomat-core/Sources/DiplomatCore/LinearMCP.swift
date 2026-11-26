@@ -47,10 +47,10 @@ final class LinearMCP {
             return ["issue": try fresh(text("id"))]
         case "Recheck":
             defer { save() }
-            return ["issues": ["nodes": try (variables["ids"] as? [String] ?? []).map(fresh)]]
+            return ["issues": ["nodes": try (variables["ids"] as? [String] ?? []).compactMap(found)]]
         case "Queued":
             defer { save() }
-            return ["issues": ["nodes": try Self.identifiers(variables["filter"]).map(fresh)]]
+            return ["issues": ["nodes": try Self.identifiers(variables["filter"]).compactMap(found)]]
         case "Attached":
             return ["attachmentsForURL": attached(text("url"))]
         case "Labels":
@@ -223,6 +223,15 @@ final class LinearMCP {
         kept[uuid] = d
         touched.insert(uuid)
         return try shape(issue, d)
+    }
+
+    /// `fresh(id)`, or nil for an issue Linear cannot find, which a GraphQL list leaves out.
+    private func found(_ id: String) throws -> [String: Any]? {
+        do {
+            return try fresh(id)
+        } catch LinearAPI.Failure.api(let why) where why.hasPrefix("get_issue: ") && why.contains("Could not find referenced Issue") {
+            return nil
+        }
     }
 
     /// A `get_issue` or `list_issues` issue, with `d`, as `linear.graphql` reads one; its

@@ -873,7 +873,9 @@ private final class Trackers {
             return answer(["id": t.creator.id, "name": t.creator.displayName + " Smith", "displayName": t.creator.displayName])
         case "get_issue":
             if linearIssueDown { return (500, [:], Data("Internal Server Error".utf8)) }
-            guard let i = ticket(a["id"]) else { return reply("Entity not found: Issue", error: true) }
+            guard let i = ticket(a["id"]) else {
+                return reply(#"{"error":"invalid_request","message":"Could not find referenced Issue.","status":400}"#, error: true)
+            }
             return answer(issue(tickets[i], full: true))
         case "list_issues":
             let limit = min((a["limit"] as? NSNumber)?.intValue ?? 50, mcpPage)
@@ -1839,6 +1841,16 @@ private func pipelineMCP(base: URL, root: PipelineSettings.Root, team: PipelineS
     let sw = PipelineTick.run(settings: every, now: t0, dir: base.appendingPathComponent("mcp-swapped"), io: swappedIO)
     check(sw.notices == ["Linear: the Linear login changed during the sync"] && swapped.authorizations.isEmpty,
           "a login changed mid-sync: \(sw.notices) \(swapped.authorizations)")
+    // An issue Linear cannot find is left out of a batch, as GraphQL leaves it.
+    func vanished(_ mcp: Bool) throws -> Synced {
+        let (t, d) = try twin(mcp, "vanished-\(mcp)")
+        t.tickets[2].state = "canceled"
+        return sync(t, PipelineSettings(roots: [root], linearTeams: [team], fix: true,
+                                        queued: [linearURL("ENG-999"), linearURL("ENG-3")]), d, t0)
+    }
+    let vk = try vanished(false), vm = try vanished(true)
+    check(vm.result.read.contains(linearURL("ENG-3")) && vm.result.read == vk.result.read
+          && vm.result.notices == vk.result.notices, "a queued issue not found over MCP: \(vm.result.notices)")
     let revoked = try twin(true, "revoked").0
     revoked.mcpRefused = true
     let rv = sync(revoked, every, base.appendingPathComponent("mcp-revoked"), t0)
@@ -4333,8 +4345,9 @@ private func pipelineKept(base: URL, root: PipelineSettings.Root, team: Pipeline
 
     // A Linear fix is asked for only if a read of it right before still finds it a candidate.
     let fixLinear = PipelineSettings(roots: [root], linearTeams: [team], rate: true, fix: true)
-    func racing(_ name: String, _ meanwhile: @escaping (Trackers) -> Void) -> (Trackers, Synced) {
+    func racing(_ name: String, mcp: Bool = false, _ meanwhile: @escaping (Trackers) -> Void) -> (Trackers, Synced) {
         let t = only([1])
+        t.mcp = mcp
         t.labelBook.append(("lab-rm", "risk:medium", nil))
         t.tickets = [.init(id: "lin-9", identifier: "ENG-9", title: "Wrong margin", labels: ["lab-rl", "lab-cl"],
                            updated: at("10:00"))]
@@ -4372,6 +4385,10 @@ private func pipelineKept(base: URL, root: PipelineSettings.Root, team: Pipeline
               && stageOf(s.result, linearURL("ENG-9")) == "candidate/fast (\(hold))",
               "a Linear candidate \(what) during the sync: \(s.result.effects) \(stageOf(s.result, linearURL("ENG-9")))")
     }
+    let (_, deleted) = racing("linear-deleted-mcp", mcp: true) { $0.tickets = [] }
+    check(stageOf(deleted.result, linearURL("ENG-9")) == "candidate/fast (it changed since this sync read it: it was not found)"
+          && deleted.result.unread.isEmpty,
+          "a Linear candidate deleted during a sync over MCP: \(stageOf(deleted.result, linearURL("ENG-9")))")
 
     // `read` names every item read, past the items shown too; none of a root only shown, nor
     // of a blocked or locked-out sync.

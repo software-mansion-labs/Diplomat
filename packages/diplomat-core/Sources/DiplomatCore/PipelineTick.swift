@@ -544,7 +544,7 @@ final class PipelineSync {
                 return unreadable("Linear was not read: linearMCP.url is not a URL")
             }
             api = LinearAPI(mcp: url, authorization: authorization, timeout: model.httpTimeoutSecs, transport: io.linear,
-                            cache: dir.appendingPathComponent("linear-mcp-cache.json"))
+                            cache: LinearLogin.cache(in: dir))
         }
         linear = api
         var after: String?

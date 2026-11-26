@@ -446,7 +446,7 @@ labels are the state; this is what a sync needs besides:
   each sync.
 - `linear-login.json` - the [Linear login](#linear): its key or tokens, and who it is.
 - `linear-mcp-cache.json` - under a sign-in through Linear's MCP server, the issues it read whole,
-  each by when it last changed, so an unchanged one is not read again.
+  each by when it last changed, so an unchanged one is not read again; **Sign out** forgets it.
 
 The fix and review asks' attempt records are the app's own (`pipelineAttempts`): a run that reported
 back (a PR, a clean marker or nothing) concludes its ask, which is not made again while syncs owe it,
@@ -454,7 +454,7 @@ nor for 30 days after. On Linux a sync is `diplomat-core pipeline-tick`, the sam
 the app quits.
 
 `DIPLOMAT_PIPELINE_SECS` overrides the five-minute sync (60 seconds to a day),
-`DIPLOMAT_LINEAR_API` Linear's endpoint, and `DIPLOMAT_CLAUDE` and `DIPLOMAT_GH` the binaries.
+`DIPLOMAT_LINEAR_API` Linear's GraphQL endpoint, and `DIPLOMAT_CLAUDE` and `DIPLOMAT_GH` the binaries.
 
 ## Limits
 

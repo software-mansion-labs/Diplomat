@@ -459,6 +459,19 @@ func linearLoginSmoke() throws {
           && out.requests.isEmpty, "a key is forgotten, with nothing to revoke")
     check((try LinearLogin.signOut(in: outDir, transport: out.transport)) == nil && out.requests.isEmpty,
           "nothing saved: nothing to revoke")
+    let cache = outDir.appendingPathComponent("linear-mcp-cache.json")
+    try saveLogin(outDir, expires: now.addingTimeInterval(3600))
+    try Data("{}".utf8).write(to: cache)
+    _ = try LinearLogin.signOut(in: outDir, transport: out.transport)
+    check(!FileManager.default.fileExists(atPath: cache.path), "the issues kept under the login go with it")
+    out.requests = []
+    try Data(#"{"accessToken":"old","refreshToken":"old-r","user":"Ada","organization":"Acme"}"#.utf8)
+        .write(to: outDir.appendingPathComponent("linear-login.json"))
+    let unreadable = LinearLogin.saved(in: outDir)
+    let unreadableOut = try LinearLogin.signOut(in: outDir, transport: out.transport)
+    check(unreadable == nil && unreadableOut == nil
+          && !FileManager.default.fileExists(atPath: outDir.appendingPathComponent("linear-login.json").path)
+          && out.requests.isEmpty, "a login it cannot read is forgotten all the same")
     check((try LinearLogin.signOut(in: base.appendingPathComponent("none"), transport: out.transport)) == nil,
           "no directory: nothing to sign out of")
 }

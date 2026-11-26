@@ -77,6 +77,8 @@ public enum LinearLogin {
 
     static func file(in dir: URL) -> URL { dir.appendingPathComponent("linear-login.json") }
     static func lock(in dir: URL) -> URL { dir.appendingPathComponent("linear-login.lock") }
+    /// The issues a sync under an MCP login keeps (`LinearMCP`).
+    static func cache(in dir: URL) -> URL { dir.appendingPathComponent("linear-mcp-cache.json") }
 
     public static func saved(in dir: URL = PipelineLog.dir) -> Saved? {
         guard let data = FileManager.default.contents(atPath: file(in: dir).path) else { return nil }
@@ -215,15 +217,16 @@ public enum LinearLogin {
         }
     }
 
-    /// Forgets the login, then asks Linear's MCP server to revoke an MCP one: nil once both
-    /// are done, else why it did not. A key stays good until revoked in Linear's settings.
+    /// Forgets the login, even one it cannot read, and the issues kept under it, then asks
+    /// Linear's MCP server to revoke an MCP one: nil once both are done, else why it did
+    /// not. A key stays valid until revoked in Linear's settings.
     public static func signOut(in dir: URL = PipelineLog.dir,
                                transport: @escaping SlackAPI.Transport = SlackAPI.curl) throws -> String? {
-        guard saved(in: dir) != nil else { return nil }
+        guard FileManager.default.fileExists(atPath: file(in: dir).path) else { return nil }
         guard let login = try PrivateFiles.locked(lock(in: dir), { () throws -> Saved? in
             let login = saved(in: dir)
-            if unlink(file(in: dir).path) != 0 && errno != ENOENT {
-                throw Failure.file("\(file(in: dir).path) could not be removed")
+            for url in [file(in: dir), cache(in: dir)] where unlink(url.path) != 0 && errno != ENOENT {
+                throw Failure.file("\(url.path) could not be removed")
             }
             return login
         }) else {

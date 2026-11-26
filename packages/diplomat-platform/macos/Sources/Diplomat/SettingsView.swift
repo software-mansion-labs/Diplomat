@@ -1201,6 +1201,7 @@ struct SettingsView: View {
             return store.linearSignInPage?.opened == false ? "No browser opened: Copy link and paste it into one"
                 : "Waiting for the browser…"
         }
+        if store.linearSavingKey { return "Checking the key with Linear…" }
         if let note = store.linearLoginNote { return note }
         if ProcessInfo.processInfo.environment[LinearAPI.envVar]?.isEmpty == false {
             return "$\(LinearAPI.envVar), which wins over the login"

@@ -22,7 +22,7 @@ import Foundation
 //   diplomat-core pipeline-teams    < {"raw": line}  # the Linear teams setting parsed
 //   diplomat-core linear-login                       # sign in to Linear's MCP server in the browser
 //   diplomat-core linear-login-key  < {"key": key}   # sign in to Linear with a personal API key
-//   diplomat-core linear-logout                      # forget and revoke that login
+//   diplomat-core linear-logout                      # forget the login, revoking a sign-in
 //   diplomat-core linear-whoami                      # who the saved Linear login is
 //   diplomat-core opencode-session-model             # what an unpinned 2.x spawn names
 //
