@@ -1,7 +1,7 @@
 """The Linear login through the built ``diplomat-core`` CLI, never a reimplementation of
 it: the runtime's calls and the Settings row against a fake Linear on loopback, whose
 consent page ``curl`` fetches, following its redirect back as a browser would. The core
-reads a copy of the assets whose ``linearOAuth`` names the fake.
+reads a copy of the assets whose ``linearMCP`` names the fake.
 """
 
 from __future__ import annotations
@@ -39,11 +39,13 @@ pytestmark = pytest.mark.skipif(
            "packages/diplomat-platform/linux/install/build-core.sh)")
 
 CODE, ACCESS, REFRESH = "the-code", "the-access-token", "the-refresh-token"
+CLIENT, SESSION, KEY = "the-client", "the-session", "lin_api_good"
 ME = {"user": "Ada Lovelace", "organization": "Ours"}
 
 
 class _Linear(BaseHTTPRequestHandler):
-    """Linear's OAuth endpoints, and GraphQL's ``Viewer``, as a sign-in reaches them."""
+    """Linear's MCP server and its OAuth endpoints as a sign-in reaches them, and
+    GraphQL's ``Viewer`` as a key's check does, answering ``KEY`` alone."""
 
     #: ``(endpoint, fields)`` of each request.
     seen: list = []
@@ -65,11 +67,34 @@ class _Linear(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
         endpoint = urlsplit(self.path).path.rpartition("/")[2]
+        auth = self.headers["Authorization"]
         if endpoint == "graphql":
             _Linear.seen.append((endpoint, {"operationName": json.loads(body)["operationName"],
-                                            "Authorization": self.headers["Authorization"]}))
+                                            "Authorization": auth}))
+            if auth != KEY:
+                return self._send(401, {"errors": [
+                    {"message": "Authentication required, not authenticated"}]})
             return self._send(200, {"data": {"viewer": {"id": "u1", "name": ME["user"]},
                                              "organization": {"name": ME["organization"]}}})
+        if endpoint == "mcp":
+            rpc = json.loads(body)
+            _Linear.seen.append((endpoint, {"method": rpc["method"],
+                                            "tool": rpc.get("params", {}).get("name"),
+                                            "Authorization": auth,
+                                            "Mcp-Session-Id": self.headers["Mcp-Session-Id"]}))
+            if rpc["method"] == "initialize":
+                return self._send(200, {"jsonrpc": "2.0", "id": rpc["id"],
+                                        "result": {"protocolVersion": "2025-06-18"}},
+                                  {"Mcp-Session-Id": SESSION})
+            if rpc["method"] == "notifications/initialized":
+                return self._send(202, None)
+            me = {"user": {"id": "u1", "name": ME["user"]},
+                  "workspace": {"name": ME["organization"]}}
+            return self._send(200, {"jsonrpc": "2.0", "id": rpc["id"], "result": {
+                "content": [{"type": "text", "text": json.dumps(me)}]}})
+        if endpoint == "register":
+            _Linear.seen.append((endpoint, json.loads(body)))
+            return self._send(201, {"client_id": CLIENT})
         _Linear.seen.append((endpoint, dict(parse_qsl(body))))
         if endpoint == "token" and "refresh_token" in _Linear.seen[-1][1]:
             return self._send(400, {"error": "invalid_grant"})
@@ -80,11 +105,13 @@ class _Linear(BaseHTTPRequestHandler):
                                     "expires_in": _Linear.expires_in, "token_type": "Bearer"})
         self._send(_Linear.revoke_status, {})
 
-    def _send(self, status: int, body: dict) -> None:
-        data = json.dumps(body).encode()
+    def _send(self, status: int, body: dict | None, headers: dict | None = None) -> None:
+        data = b"" if body is None else json.dumps(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(data)
 
@@ -105,7 +132,7 @@ def _listening(port: int) -> bool:
 
 @pytest.fixture
 def linear(tmp_path, monkeypatch):
-    """The fake Linear and the core's assets naming it. Yields the ``linearOAuth`` the
+    """The fake Linear and the core's assets naming it. Yields the ``linearMCP`` the
     core reads."""
     _Linear.seen, _Linear.expires_in, _Linear.revoke_status = [], 86400, 200
     _Linear.exchange_secs, _Linear.exchanging = 0.0, threading.Event()
@@ -116,13 +143,13 @@ def linear(tmp_path, monkeypatch):
     assets = tmp_path / "assets"
     shutil.copytree(core.assets_dir(), assets)
     model = json.loads((assets / "pipeline.json").read_text())
-    model["linearOAuth"].update(clientID="diplomat-test", authorize=f"{base}/oauth/authorize",
-                                token=f"{base}/oauth/token", revoke=f"{base}/oauth/revoke",
-                                ports=[_free_port()])
+    model["linearMCP"].update(url=f"{base}/mcp", authorize=f"{base}/authorize",
+                              token=f"{base}/token", register=f"{base}/register",
+                              revoke=f"{base}/revoke", ports=[_free_port()])
     (assets / "pipeline.json").write_text(json.dumps(model))
     monkeypatch.setenv("DIPLOMAT_CORE", str(assets))
     monkeypatch.setenv("DIPLOMAT_LINEAR_API", f"{base}/graphql")
-    yield model["linearOAuth"]
+    yield model["linearMCP"]
     server.shutdown()
     server.server_close()
 
@@ -187,35 +214,74 @@ def test_a_sign_in_saves_the_login_and_a_sign_out_forgets_and_revokes_it(linear,
     assert pipeline.linear_whoami() is None
     pages = []
     assert pipeline.linear_login(page=lambda url: (pages.append(url), visit(url))) == (ME, "")
-    assert pipeline.linear_whoami() == ME
+    assert pipeline.linear_whoami() == {**ME, "method": "mcp"}
     saved = pipeline.pipeline_dir() / "linear-login.json"
     assert stat.S_IMODE(saved.stat().st_mode) == 0o600
-    assert [endpoint for endpoint, _ in _Linear.seen] == ["authorize", "token", "graphql"]
-    page, exchange, viewer = (fields for _, fields in _Linear.seen)
+    assert [endpoint for endpoint, _ in _Linear.seen] == ["register", "authorize", "token",
+                                                         "mcp", "mcp", "mcp"]
+    client, page, exchange, *whoami = (fields for _, fields in _Linear.seen)
     assert pages[0].startswith(f"{linear['authorize']}?")
     assert [dict(parse_qsl(urlsplit(url).query)) for url in pages] == [page]
     assert page["redirect_uri"] == f"http://127.0.0.1:{linear['ports'][0]}/linear/callback"
-    assert (exchange["code"], exchange["redirect_uri"]) == (CODE, page["redirect_uri"])
+    assert client["redirect_uris"] == [page["redirect_uri"]]
+    assert (page["client_id"], page["resource"]) == (CLIENT, linear["url"])
+    assert (exchange["code"], exchange["redirect_uri"], exchange["client_id"]) == (
+        CODE, page["redirect_uri"], CLIENT)
     verifier = hashlib.sha256(exchange["code_verifier"].encode()).digest()
     assert base64.urlsafe_b64encode(verifier).rstrip(b"=").decode() == page["code_challenge"]
-    assert viewer == {"operationName": "Viewer", "Authorization": f"Bearer {ACCESS}"}
+    bearer = f"Bearer {ACCESS}"
+    assert whoami == [
+        {"method": "initialize", "tool": None, "Authorization": bearer, "Mcp-Session-Id": None},
+        {"method": "notifications/initialized", "tool": None, "Authorization": bearer,
+         "Mcp-Session-Id": SESSION},
+        {"method": "tools/call", "tool": "whoami", "Authorization": bearer,
+         "Mcp-Session-Id": SESSION}]
 
     _Linear.seen = []
     assert pipeline.linear_logout() == (True, "")
-    assert _Linear.seen == [("revoke", {"token": REFRESH, "token_type_hint": "refresh_token"})]
+    assert _Linear.seen == [("revoke", {"token": REFRESH, "token_type_hint": "refresh_token",
+                                        "client_id": CLIENT})]
     assert pipeline.linear_whoami() is None
     assert not saved.exists()
 
 
-def test_a_sign_in_the_core_refuses_says_why(linear, monkeypatch):
-    assets = os.environ["DIPLOMAT_CORE"]
-    model = json.loads(open(f"{assets}/pipeline.json").read())
-    model["linearOAuth"]["clientID"] = ""
-    with open(f"{assets}/pipeline.json", "w") as fh:
-        json.dump(model, fh)
-    assert pipeline.linear_login() == (None, "Linear sign-in has no OAuth client: "
-                                             "linearOAuth.clientID in pipeline.json is empty")
+def test_a_key_linear_answers_for_is_saved_and_a_sign_out_forgets_it_unrevoked(
+        linear, monkeypatch):
+    """Through the core's stdin alone: never its argv or environment."""
+    cores = []
+    popen = subprocess.Popen
+
+    def spy(argv, **kw):
+        cores.append((argv, kw.get("env") or {}))
+        return popen(argv, **kw)
+
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    assert pipeline.linear_login_key(f" {KEY}\n") == (ME, "")
+    assert cores[0][0][1:] == ["linear-login-key"]
+    assert not any(KEY in part for argv, env in cores for part in [*argv, *env.values()])
+    assert pipeline.linear_whoami() == {**ME, "method": "key"}
+    saved = pipeline.pipeline_dir() / "linear-login.json"
+    assert stat.S_IMODE(saved.stat().st_mode) == 0o600
+    assert _Linear.seen == [("graphql", {"operationName": "Viewer", "Authorization": KEY})]
+
+    _Linear.seen = []
+    assert pipeline.linear_logout() == (True, "")
     assert _Linear.seen == []
+    assert pipeline.linear_whoami() is None
+    assert not saved.exists()
+
+
+@pytest.mark.parametrize("key, error, asked", [
+    ("lin_api_bad", "Linear answered HTTP 401: Authentication required, not authenticated",
+     [("graphql", {"operationName": "Viewer", "Authorization": "lin_api_bad"})]),
+    ("", "No Linear API key was given", []),
+    (" \n", "No Linear API key was given", []),
+])
+def test_a_key_linear_does_not_answer_for_is_not_saved(linear, key, error, asked):
+    assert pipeline.linear_login_key(key) == (None, error)
+    assert _Linear.seen == asked
+    assert pipeline.linear_whoami() is None
+    assert not (pipeline.pipeline_dir() / "linear-login.json").exists()
 
 
 def test_the_settings_row_signs_in_and_out_through_the_core(linear, make_view, monkeypatch,
@@ -227,7 +293,8 @@ def test_the_settings_row_signs_in_and_out_through_the_core(linear, make_view, m
     assert (row.summary(), button.text()) == ("Not signed in", "Sign in…")
     button.click()
     _settle(view)
-    assert (row.summary(), button.text()) == ("Signed in as Ada Lovelace (Ours)", "Sign out")
+    assert (row.summary(), button.text()) == (
+        "Signed in as Ada Lovelace (Ours) through Linear's MCP server", "Sign out")
     assert len(pages) == 1 and asked == pages
     # A switch turned on syncs at once; so does a sign-in.
     assert synced == [True]
@@ -239,6 +306,26 @@ def test_the_settings_row_signs_in_and_out_through_the_core(linear, make_view, m
         "Signed out, but Linear answered HTTP 500 to the revocation", "Sign in…")
     assert pipeline.linear_whoami() is None
     assert synced == [True]
+
+
+def test_the_settings_row_saves_a_key_through_the_core(linear, make_view, monkeypatch):
+    view, synced = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    row, line, save = view._pipeline_login_row, view._linear_key, view._linear_key_save
+    view._linear_key_button.click()
+    line.setText("lin_api_bad")
+    save.click()
+    _settle(view)
+    assert (row.summary(), line.isVisibleTo(view), line.text()) == (
+        "Linear answered HTTP 401: Authentication required, not authenticated", True,
+        "lin_api_bad")
+    assert synced == []
+    line.setText(KEY)
+    save.click()
+    _settle(view)
+    assert (row.summary(), view._linear_button.text(), line.isVisibleTo(view), line.text()) == (
+        "Signed in as Ada Lovelace (Ours) with an API key", "Sign out", False, "")
+    assert synced == [True]
+    assert pipeline.linear_whoami() == {**ME, "method": "key"}
 
 
 def test_a_page_no_browser_opened_is_copied_and_still_signs_in(linear, make_view,
@@ -258,7 +345,7 @@ def test_a_page_no_browser_opened_is_copied_and_still_signs_in(linear, make_view
     visit(QGuiApplication.clipboard().text())
     _settle(view)
     assert (row.summary(), button.text(), copy.isVisibleTo(view)) == (
-        "Signed in as Ada Lovelace (Ours)", "Sign out", False)
+        "Signed in as Ada Lovelace (Ours) through Linear's MCP server", "Sign out", False)
     assert synced == [True]
 
 
@@ -274,7 +361,7 @@ def test_a_login_the_sync_forgets_is_signed_out_on_the_row(linear, make_view, mo
     monkeypatch.setattr(review, "roots_complete", lambda: True)
     view = make_view(pipeline_enabled=True, pipeline_linear_teams_raw="ENG=o/r")
     row = view._pipeline_login_row
-    assert row.summary() == "Signed in as Ada Lovelace (Ours)"
+    assert row.summary() == "Signed in as Ada Lovelace (Ours) through Linear's MCP server"
     view.store.run_pipeline_sync_async()
     _settle(view)
     assert ("Linear was not read: Linear no longer accepts the login: sign in again "
@@ -323,9 +410,10 @@ def test_a_cancel_once_the_browser_is_back_still_signs_in(linear, make_view, mon
     _settle(view)
     assert answers == [(ME, "")]
     assert [proc.returncode for proc in procs] == [0]
-    assert (row.summary(), button.text()) == ("Signed in as Ada Lovelace (Ours)", "Sign out")
+    assert (row.summary(), button.text()) == (
+        "Signed in as Ada Lovelace (Ours) through Linear's MCP server", "Sign out")
     assert synced == [True]
-    assert pipeline.linear_whoami() == ME
+    assert pipeline.linear_whoami() == {**ME, "method": "mcp"}
 
 
 def test_a_cancel_before_the_core_starts_cancels_it_as_it_does(linear, make_view,

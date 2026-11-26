@@ -238,10 +238,11 @@ def _linear_call_secs(t: dict) -> float:
 
 
 def _linear_answer(verb: str, timeout: float, started: Callable | None = None,
-                   line: Callable | None = None) -> tuple[dict | None, str]:
+                   line: Callable | None = None,
+                   stdin: object = None) -> tuple[dict | None, str]:
     """The last line of ``diplomat-core <verb>``'s stdout, read as an object."""
     try:
-        out = promptcore.cli([verb], timeout=timeout, started=started, line=line)
+        out = promptcore.cli([verb], stdin=stdin, timeout=timeout, started=started, line=line)
     except (RuntimeError, promptcore.CoreBinaryMissing) as exc:
         return None, str(exc)
     try:
@@ -253,13 +254,23 @@ def _linear_answer(verb: str, timeout: float, started: Callable | None = None,
     return answer, ""
 
 
+def _signed_in(answer: dict | None, error: str) -> tuple[dict | None, str]:
+    if answer is None:
+        return None, error
+    if answer.get("ok") is not True:
+        return None, str(answer.get("error") or "Linear sign-in did not say why it failed")
+    return {"user": str(answer.get("user") or ""),
+            "organization": str(answer.get("organization") or "")}, ""
+
+
 def linear_login(started: Callable | None = None,
                  page: Callable[[str], None] | None = None) -> tuple[dict | None, str]:
-    """``({"user", "organization"}, "")`` once signed in to Linear in the browser, else
-    ``(None, why not)``. ``page`` is handed Linear's consent page to open, ``started``
-    the core's process, whose SIGTERM cancels a sign-in still waiting for the browser.
-    Bounded by ``signInSecs`` and three Linear calls: the code's exchange, who the token
-    is, and a sync's refresh holding the login's lock. Never raises."""
+    """``({"user", "organization"}, "")`` once signed in through Linear's MCP server in
+    the browser, else ``(None, why not)``. ``page`` is handed the consent page to open,
+    ``started`` the core's process, whose SIGTERM cancels a sign-in still waiting for the
+    browser. Bounded by ``signInSecs`` and six Linear calls: the client's registration,
+    the code's exchange, the three that ask the MCP server who the token is, and a sync's
+    refresh holding the login's lock. Never raises."""
     def line(text: str) -> None:
         with contextlib.suppress(ValueError, AttributeError):
             url = json.loads(text).get("url")
@@ -267,15 +278,19 @@ def linear_login(started: Callable | None = None,
                 page(url)
 
     t = tunables()
-    timeout = (float((t.get("linearOAuth") or {}).get("signInSecs", 300))
-               + 3 * _linear_call_secs(t) + _MARGIN_SECS)
-    answer, error = _linear_answer("linear-login", timeout, started, line)
-    if answer is None:
-        return None, error
-    if answer.get("ok") is not True:
-        return None, str(answer.get("error") or "Linear sign-in did not say why it failed")
-    return {"user": str(answer.get("user") or ""),
-            "organization": str(answer.get("organization") or "")}, ""
+    timeout = (float((t.get("linearMCP") or {}).get("signInSecs", 300))
+               + 6 * _linear_call_secs(t) + _MARGIN_SECS)
+    return _signed_in(*_linear_answer("linear-login", timeout, started, line))
+
+
+def linear_login_key(key: str) -> tuple[dict | None, str]:
+    """``({"user", "organization"}, "")`` once Linear has said who ``key``, a personal API
+    key, is and it is saved as the login, else ``(None, why not)``. The key reaches the
+    core on its stdin alone. Bounded by that call and a sync's refresh holding the login's
+    lock. Never raises."""
+    return _signed_in(*_linear_answer("linear-login-key",
+                                      2 * _linear_call_secs(tunables()) + _MARGIN_SECS,
+                                      stdin={"key": key}))
 
 
 def linear_logout() -> tuple[bool, str]:
@@ -291,12 +306,14 @@ def linear_logout() -> tuple[bool, str]:
 
 
 def linear_whoami() -> dict | None:
-    """``{"user", "organization"}`` of the saved login, without a call to Linear; None
-    when there is none, or the core cannot say. Never raises."""
+    """``{"user", "organization", "method"}`` of the saved login, ``method`` ``"key"`` or
+    ``"mcp"``, without a call to Linear; None when there is none, or the core cannot say.
+    Never raises."""
     answer, _ = _linear_answer("linear-whoami", 10)
     if answer is None or "user" not in answer:
         return None
-    return {"user": str(answer["user"]), "organization": str(answer.get("organization") or "")}
+    return {"user": str(answer["user"]), "organization": str(answer.get("organization") or ""),
+            "method": str(answer.get("method") or "")}
 
 
 # MARK: - reading a result
