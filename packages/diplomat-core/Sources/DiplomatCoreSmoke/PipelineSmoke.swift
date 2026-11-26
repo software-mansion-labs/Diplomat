@@ -5196,6 +5196,24 @@ private func pipelineTakeover(base: URL, root: PipelineSettings.Root, team: Pipe
     check(ask.result.effects.isEmpty && said(ask) == [revoked] && ask.result.fixable.isEmpty
           && item(ask.result, issueURL(3))?.hold == "its takeover was revoked",
           "#3 revoked mid-sync: \(ask.result.effects) \(said(ask)) \(stageOf(ask.result, issueURL(3)))")
+    // As the apps send it, forced and in control.json at once: applied once, at the start.
+    func revokedBoth(_ name: String, _ prepare: (URL) throws -> Void = { _ in }) throws -> Synced {
+        _ = sync(only([3]), with(fixOnly, takeover: [issueURL(3)]), dir(name), t0)
+        PipelineControl(enabled: true, rate: false, fix: true, fastTrack: false, merge: false, fracture: false,
+                        revoke: [issueURL(3)]).save(in: dir(name))
+        try prepare(dir(name))
+        return sync(only([3]), with(fixOnly, revoke: [issueURL(3)]), dir(name), later(5))
+    }
+    let both = try revokedBoth("revoke-both")
+    check(said(both) == [revoked] && stageOf(both.result, issueURL(3)) == "human/human",
+          "#3 revoked as the apps send it: \(said(both)) \(stageOf(both.result, issueURL(3)))")
+    let unsaved = try revokedBoth("revoke-blocked") {
+        try Data("not json".utf8).write(to: $0.appendingPathComponent("ratings.json"))
+    }
+    let unsavedKept = try kept(dir("revoke-blocked"))
+    check(said(unsaved).isEmpty && item(unsaved.result, issueURL(3))?.hold != "its takeover was revoked"
+          && unsavedKept == [issueURL(3): "issue"],
+          "#3 revoked while ratings.json cannot be read: \(said(unsaved)) \(stageOf(unsaved.result, issueURL(3))) \(unsavedKept)")
     let revokeJSON = String(decoding: try JSONEncoder().encode(
         PipelineControl(enabled: true, rate: false, fix: false, fastTrack: false, merge: false, fracture: false,
                         revoke: ["a"])), as: UTF8.self)

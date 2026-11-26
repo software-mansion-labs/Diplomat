@@ -579,6 +579,11 @@ class Store(QObject):
         # (:meth:`pipeline_force_now`), until a sync that was handed them answers.
         self._pipeline_force: dict[str, frozenset[str]] = {
             kind: frozenset() for kind in ("rate", "fracture", "takeover", "revoke")}
+        # The revokes no sync answered before the app quit, asked again so the first sync
+        # applies them; read only where :meth:`_write_pipeline_control` writes. Twin of
+        # ``Store.restorePipelineRevokes``.
+        if not headless.active(os.environ) or os.environ.get("DIPLOMAT_PIPELINE_DIR"):
+            self._pipeline_force["revoke"] = frozenset(pipeline.control_revokes())
         # Bumped as the master switch flips or Fix / Fast track goes off: a sync begun
         # before may have been switched off midway, emitting less than it owes, so its
         # result withdraws and prunes nothing (:meth:`_apply_pipeline_sync`).

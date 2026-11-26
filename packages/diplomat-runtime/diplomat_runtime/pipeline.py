@@ -64,6 +64,15 @@ def write_control(switches: dict) -> None:
             tmp.unlink()
 
 
+def control_revokes() -> list[str]:
+    """The ``revoke`` asks ``control.json`` holds; none when it is missing or unreadable."""
+    try:
+        revoke = json.loads((pipeline_dir() / "control.json").read_text()).get("revoke")
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [r for r in revoke if isinstance(r, str)] if isinstance(revoke, list) else []
+
+
 def tunables() -> dict:
     try:
         return core.pipeline()

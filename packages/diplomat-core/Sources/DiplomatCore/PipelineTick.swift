@@ -2013,9 +2013,9 @@ final class PipelineSync {
     /// The agent work owed, newest item first, judged by the ban list as it reads now; each
     /// logged `asked` once per stamp.
     func owed() -> [PipelineEffect] {
-        lateRevokes()
         let fix = may(.fix), review = may(.fastTrack)
         if fix { recheckLinear() }
+        lateRevokes()
         var out: [PipelineEffect] = []
         for i in entries.indices.sorted(by: newer) {
             let e = entries[i]

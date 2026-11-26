@@ -70,6 +70,16 @@ extension Store {
                         revoke: revoke.isEmpty ? nil : revoke).save()
     }
 
+    /// The revokes `control.json` holds that no sync answered before the app quit, asked
+    /// again so the first sync applies them. Read only where `writePipelineControl` writes.
+    func restorePipelineRevokes() {
+        let env = ProcessInfo.processInfo.environment["DIPLOMAT_PIPELINE_DIR"] ?? ""
+        guard !Headless.active || !env.isEmpty else { return }
+        for id in PipelineControl.read()?.revoke ?? [] where !pipelineForce.revoke.contains(id) {
+            pipelineForce.revoke.append(id)
+        }
+    }
+
     nonisolated static func pipelineTeams(_ raw: String) -> [PipelineSettings.LinearTeam] {
         PipelineSettings.LinearTeam.parse(raw).teams
     }

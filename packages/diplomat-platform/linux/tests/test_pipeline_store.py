@@ -166,6 +166,13 @@ def test_a_takeover_and_a_revoke_of_one_item_drop_each_others_ask(pipe, monkeypa
     assert len(syncs) == 7
 
 
+def test_a_revoke_no_sync_answered_before_a_quit_is_asked_again_at_launch(pipe):
+    pipe.pipeline_force_now("revoke", PR)
+    assert Store().pipeline_forced("revoke") == {PR}
+    (pipeline.pipeline_dir() / "control.json").write_text('{"revoke": "not a list"}')
+    assert Store().pipeline_forced("revoke") == frozenset()
+
+
 # MARK: - Effects to asks
 
 

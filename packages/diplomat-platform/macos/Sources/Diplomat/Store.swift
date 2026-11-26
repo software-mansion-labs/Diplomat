@@ -1437,6 +1437,7 @@ final class Store: ObservableObject {
             // `finished` lines into it (`noteCommsRuns`).
             refreshComms()
             startCommsMonitor()
+            restorePipelineRevokes()
             startPipelineMonitor()
             refreshLinearLogin()
             refreshBanList()

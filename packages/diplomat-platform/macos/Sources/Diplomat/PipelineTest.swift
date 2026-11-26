@@ -554,6 +554,11 @@ enum PipelineTest {
               store.pipelineForce == forced)
         check("…the revokes written where a running sync's merge reads them",
               PipelineControl.read()?.revoke == [linear])
+        let pressed = store.pipelineForce
+        store.pipelineForce = PipelineSettings.Force(revoke: [issue])
+        store.restorePipelineRevokes()
+        check("…and asked again at launch, as a quit left them", store.pipelineForce.revoke == [issue, linear])
+        store.pipelineForce = pressed
         store.pipelineForce.rate.insert(linear, at: 0)
         store.pipelineForce.takeover.insert(linear, at: 0)
         store.pipelineForce.revoke.append(issue)
