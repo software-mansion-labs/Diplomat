@@ -104,8 +104,9 @@ Linux; `DIPLOMAT_APIWATCH_SECS`, floor 5s).
 are level-triggered over everything GitHub currently owes, so one poll of a busy
 day would otherwise dispatch every pending unit in a single pass - a terminal
 window and an agent session per conflicted PR and per owed review, all at the
-same moment. The cap is the *machine's*, not a monitor's: it spans every monitor
-and the work a sweep queues, and it counts
+same moment. The cap is the *machine's*, not a monitor's: it spans every monitor,
+the work a sweep queues and the [Pipeline's ratings](pipeline.md#ratings), each a headless
+`claude -p` job holding a bay until it returns, and it counts
 agents that are really running (`ps`, so it survives an applet restart) rather than
 a tally that can drift. The agent a wizard press opens on the spot is outside it
 and is never refused; what a press leaves in the queue instead - the reviews of a

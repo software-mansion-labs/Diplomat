@@ -342,7 +342,8 @@ team's repo, and each group with no card in any root, whole.
   are its notices, under the status line. And its actions:
   - **Open** - the issue or PR in the browser.
   - **Rate now** (your open PR, or an open issue whose code a sync can read) - its rating asked for
-    by a sync started at once, past the four, even with **Rate issues and PRs** off.
+    by a sync started at once, past the four, even with **Rate issues and PRs** off, and applied
+    by a sync started as its job returns.
   - **Fracture** (an issue Diplomat may write to, not split or being fixed, whose code a sync can read) -
     split the same way, whatever its rating.
   - **Start fix** (a `candidate` issue no hold stops) - its fix queued at once, past its attempt record, to wait
