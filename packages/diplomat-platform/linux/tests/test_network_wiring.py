@@ -538,6 +538,18 @@ def test_the_admit_is_said_when_it_changes_and_once_a_minute(store, on, daemon, 
     assert len(d.sent("admit")) == 6 and len(d.sent("pools")) == 1
 
 
+def test_the_admit_leaves_out_the_bays_ratings_hold(store, on, daemon):
+    from diplomat_app.store import RatingJob
+
+    d = daemon()
+    store.auto_task_limit = 3
+    url = "https://github.com/o/r/pull/7"
+    store._ratings = {url: RatingJob(url=url, stamp="1", label="Rating · #7", started_at=0.0,
+                                     forced=False)}
+    store._network_cycle_once(1000.0)
+    assert d.sent("admit") == [{"slots": 2}]
+
+
 def test_a_daemon_that_started_since_is_told_both_again(store, on, daemon):
     d = daemon()
     store._network_cycle_once(1000.0)

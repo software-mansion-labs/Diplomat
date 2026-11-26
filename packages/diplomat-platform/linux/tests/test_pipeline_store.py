@@ -2173,6 +2173,21 @@ def test_the_drain_starts_no_rating_past_the_cap(pipe, rater, monkeypatch, netwo
     assert pipe._drain_has_room(0) is False
 
 
+def test_a_rating_counts_the_runs_executed_here_for_the_network(pipe, rater, monkeypatch):
+    from diplomat_app import diplomacynetwork
+    from diplomat_runtime import network
+
+    monkeypatch.setattr(diplomacynetwork, "enabled", lambda: True)
+    pipe.network_state = network.Snapshot(runs=(network.Run(run_id="r1", state="running"),
+                                                network.Run(run_id="r0", state="finished")))
+    pipe.auto_task_limit = 2
+    _sync(pipe, _result(_rate(_pr(8), 8), _rate(_pr(9), 9)))
+    pipe._drain_queued_tasks([], closed=set())
+    assert [r.url for r in pipe.running_ratings] == [_pr(8)]
+    assert [t.id for t in pipe.queued_tasks] == ["rate:o/r#9"]
+    assert (pipe._auto_tasks_running(), pipe._drain_has_room(0)) == (2, False)
+
+
 @pytest.mark.parametrize("hold", ["budget", "disk", "queue"])
 def test_a_rating_is_held_by_the_budget_the_disk_and_auto_execute(pipe, rater, monkeypatch,
                                                                     hold):

@@ -1639,9 +1639,9 @@ class Store(QObject):
             self.run_autofix_poll_async()
 
     def _drain_has_room(self, load: int) -> bool:
-        """``load`` is the agents' share of this device's cap; the ratings running take the
-        rest."""
-        here = load + len(self.running_ratings) < self.auto_task_limit
+        """``load`` is the agents' share of this device's cap; the rest is
+        :attr:`_ratings_and_pool_runs`'s."""
+        here = load + self._ratings_and_pool_runs < self.auto_task_limit
         if not diplomacynetwork.enabled():
             return here and bool(self.drainable_tasks)
         # With the network on, the room is the pool's, not this device's cap, but for a
@@ -2663,8 +2663,15 @@ class Store(QObject):
 
     def _auto_tasks_running(self) -> int:
         """How many bays of this device's cap are held right now — the number the cap
-        is compared against: the agents', and the ratings running."""
-        return len(self._agent_tick().cap_load) + len(self.running_ratings)
+        is compared against: the agents', and :attr:`_ratings_and_pool_runs`."""
+        return len(self._agent_tick().cap_load) + self._ratings_and_pool_runs
+
+    @property
+    def _ratings_and_pool_runs(self) -> int:
+        """The bays of the task cap held outside ``cap_load``: the ratings running, and the
+        runs this machine executes for the network (:func:`network.running`). Twin of
+        ``Store.ratingsAndPoolRuns``."""
+        return len(self.running_ratings) + network.running(self.network_state)
 
     def refresh_auto_task_count(self) -> None:
         """Re-resolve for the display alone, signalling only on a change.
@@ -6363,11 +6370,11 @@ class Store(QObject):
 
     def _network_admit(self, snapshot: network.Snapshot) -> network.Admit:
         """How many more tasks this machine takes: what is left of the automatic cap
-        after the runs it executes for the network and its own local agents, and
+        after the runs it executes for the network, its own local agents and its ratings, and
         nothing at all while the disk is low, the budget is spent or automatic work is
         switched off (:func:`network.admit`)."""
         disk = self._lowest_disk()
-        local = len(self._tick_with(network.tasks(snapshot)).cap_load)
+        local = len(self._tick_with(network.tasks(snapshot)).cap_load) + len(self.running_ratings)
         return network.admit(
             self.auto_task_limit, network.running(snapshot) + local,
             low_disk=disk is not None and disk.low,
