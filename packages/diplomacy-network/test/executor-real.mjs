@@ -659,14 +659,17 @@ exit 0
       'rm /work/gone.bin /root/gone.bin /dev/shm/gone.bin',
       'exec sleep 603',
     ].join(' && '));
-    await until('the files are held with no name', async () => (await docker(['exec', name, 'sh', '-c', 'pgrep -f "sleep 60[3]" && ! ls /work/gone.bin /root/gone.bin /dev/shm/gone.bin'])).code === 0);
+    // The holder by its whole command line, exec'd once all before it succeeded; the sh it
+    // replaces names "sleep 603" too, while the files are still being written.
+    const holder = 'pgrep -xf "sleep 603"';
+    await until('the files are held with no name', async () => (await docker(['exec', name, 'sh', '-c', holder])).code === 0);
     const layer = async () => Number(await sh('container', 'inspect', '--size', '--format', '{{.SizeRw}}', name));
     const holding = await containers.usage(name);
     console.log(`INFO disk use of ${name} with 60 MiB held open under no name: ${holding} bytes (${holding - after} more), the engine's own figure for the layer ${await layer()}`);
     assert.ok(holding - after >= 60 * MiB && holding - after < 62 * MiB, `${holding - after} for ${60 * MiB}`);
     assert.equal(await sh('ps', '-a', '-q', ...mine, '--filter', 'label=dn.probe'), '', 'what counted them is gone');
-    await sh('exec', name, 'sh', '-c', 'pkill -f "sleep 60[3]"');
-    await until('the holder is gone', async () => (await docker(['exec', name, 'sh', '-c', 'pgrep -f "sleep 60[3]"'])).code !== 0);
+    await sh('exec', name, 'sh', '-c', 'pkill -xf "sleep 603"');
+    await until('the holder is gone', async () => (await docker(['exec', name, 'sh', '-c', holder])).code !== 0);
     const released = await containers.usage(name);
     assert.ok(Math.abs(released - after) < MiB, `${released} once they are closed, ${after} before they were written`);
     await leave();
