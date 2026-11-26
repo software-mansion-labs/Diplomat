@@ -12,6 +12,7 @@ import Foundation
 //   diplomat-core telemetry         < ledger.json    # prints the Telemetry screen's figures
 //   diplomat-core agent-state       < fixture.json   # prints what every agent run resolves to
 //   diplomat-core agent-registry    < runs.json      # round-trips the run book on disk
+//   diplomat-core network           < fixture.json   # prints the Diplomacy Network's pure answers
 //   diplomat-core comms-tick        < settings.json  # one Slack watcher tick (see CommsCommand)
 //   diplomat-core comms-auth                         # who Claude Code's Slack login is
 //   diplomat-core comms-feed        [--limit N]      # the Comms screen's rows
@@ -83,12 +84,13 @@ func specificAuthor(_ s: String?) -> SpecificAuthor {
 
 let args = CommandLine.arguments
 guard args.count >= 2,
-      ["build-prompt", "tool-data", "telemetry", "agent-state", "agent-registry",
+      ["build-prompt", "tool-data", "telemetry", "agent-state", "agent-registry", "network",
        "comms-tick", "comms-auth", "comms-feed", "comms-effect", "pipeline-tick", "pipeline-last",
        "pipeline-teams", "linear-login", "linear-logout", "linear-whoami",
        "opencode-session-model"].contains(args[1]) else {
     die("usage: diplomat-core (build-prompt | tool-data | telemetry | agent-state"
-        + " | agent-registry | comms-tick | comms-effect | pipeline-tick | pipeline-teams)  (JSON on stdin)"
+        + " | agent-registry | network | comms-tick | comms-effect | pipeline-tick | pipeline-teams)"
+        + "  (JSON on stdin)"
         + "\n       diplomat-core comms-feed [--limit N]"
         + "\n       diplomat-core comms-auth"
         + "\n       diplomat-core pipeline-last"
@@ -168,6 +170,11 @@ if args[1] == "agent-state" {
 
 if args[1] == "agent-registry" {
     AgentRegistryCommand.run(obj)
+    exit(0)
+}
+
+if args[1] == "network" {
+    NetworkCommand.run(obj)
     exit(0)
 }
 

@@ -252,7 +252,7 @@ struct IssueWizardView: View {
             queueSweep(cfg)
             return
         }
-        // The SAME pipeline the auto-monitor rides — ban check, tracking — only the
+        // The SAME pipeline the auto-monitor rides - ban check, tracking - only the
         // trigger (this click) and its policies (foreground, none of the automatic-work
         // gates) differ. An issue run is not PR-scoped, so there is no dedup key; what keeps
         // two agents off one issue is the assign-to-me claim, which every machine can
@@ -264,8 +264,9 @@ struct IssueWizardView: View {
                                  label: trackingLabel, prompt: cfg.buildPrompt(),
                                  prURL: cfg.singleLink, prNumber: nil,
                                  authorLogin: nil,
-                                 counter: nil, directory: cfg.checkout)
-        status = "Launching \(term.title)…"
+                                 counter: nil, directory: cfg.checkout,
+                                 allows: .init(issues: cfg))
+        status = store.dispatchingText(terminal: term.title)
         Task {
             status = statusText(for: await store.dispatchAgent(job, source: .panel),
                                 terminal: term.title)

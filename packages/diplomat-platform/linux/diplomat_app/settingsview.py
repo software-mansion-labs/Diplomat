@@ -45,7 +45,7 @@ from diplomat_runtime import (
 )
 from diplomat_runtime.models import Fmt
 from diplomat_runtime.prref import LocalRepo, root_label
-from . import glyphs
+from . import diplomacynetwork, glyphs
 from .devicesview import AllocatorControls, allocator_pill, allocator_summary
 from .store import Store, tools
 from .widgets import (
@@ -136,6 +136,7 @@ class SettingsView(QWidget):
         right.addWidget(self._comms_card())
         right.addWidget(self._pipeline_card())
         right.addWidget(self._allocator_card())
+        right.addWidget(self._network_card())
         right.addWidget(self._update_card())
         right.addStretch(1)
 
@@ -149,6 +150,7 @@ class SettingsView(QWidget):
         store.autofix_changed.connect(self._refresh_autofix_ui)
         store.apiwatch_changed.connect(self._refresh_apiwatch_ui)
         store.comms_changed.connect(self._refresh_comms_ui)
+        store.network_changed.connect(self._refresh_network_ui)
         store.pipeline_changed.connect(self._refresh_pipeline_ui)
         store.pipeline_sync_applied.connect(self._on_pipeline_sync_applied)
         self._comms_tested.connect(self._on_comms_tested)
@@ -1747,6 +1749,34 @@ class SettingsView(QWidget):
         s = self.store.allocator_install
         self._alloc_pill.set_state(*allocator_pill(s))
         self._alloc_controls.refresh(s)
+
+    # MARK: the Diplomacy Network
+
+    def _network_card(self) -> QWidget:
+        card, body, self._network_pill = settings_card(
+            glyphs.G_NETWORK, "DIPLOMACY NETWORK", _TEAL)
+        self._sw_network = SwitchToggle(_TEAL)
+        self._sw_network.toggled.connect(self._on_network_toggled)
+        self._network_row = self._track(SettingRow(
+            diplomacynetwork.SWITCH_TITLE, self._sw_network,
+            detail=f"{diplomacynetwork.EXPLANATION} While it is on, no agent starts "
+                   "in a terminal on this machine. The pools and the hours a job may "
+                   "take are on the Network screen.",
+        ))
+        body.addWidget(self._network_row)
+        self._refresh_network_ui()
+        return card
+
+    def _refresh_network_ui(self) -> None:
+        on = self.store.network_enabled
+        self._sw_network.setChecked(on)
+        self._network_pill.set_state("on" if on else "off", _GREEN if on else _GREY)
+
+    def _on_network_toggled(self, on: bool) -> None:
+        # _refresh_network_ui's setChecked lands here too, as no change to make.
+        if on != self.store.network_enabled:
+            self._save(lambda: self.store.set_network_enabled(on))
+        self._refresh_network_ui()
 
     # MARK: applet update
 

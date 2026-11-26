@@ -384,8 +384,9 @@ struct SettingsCard<Content: View>: View {
                     .font(.system(size: 9, weight: .bold)).foregroundStyle(tint)
                     .frame(width: 17, height: 17)
                     .background(RoundedRectangle(cornerRadius: 5).fill(tint.opacity(0.16)))
-                Text(title).font(.system(size: 10, weight: .heavy)).kerning(0.6)
-                    .foregroundStyle(.secondary)
+                // Verbatim: a pool's id, the title here, comes from an invite.
+                Text(verbatim: title).font(.system(size: 10, weight: .heavy)).kerning(0.6)
+                    .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 6)
                 pill
             }
@@ -562,7 +563,7 @@ func axisText(_ s: String) -> Text {
 extension View {
     /// The panel's card chrome: padded content on a soft rounded tint. Every grouped
     /// block in the panel wears it — the activity feed, the ongoing-sessions list, the
-    /// device pool — so the corner radius and the tint
+    /// device pool - so the corner radius and the tint
     /// live in one place instead of once per card.
     ///
     /// `fill` is the whole colour, opacity included, because the one non-default card

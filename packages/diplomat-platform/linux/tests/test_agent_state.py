@@ -70,6 +70,26 @@ def released(**kw) -> A.RunRecord:
     return rec(**base)
 
 
+TASK = "github.com/o/r#review:pr-337@octocat"
+
+PEER = "eeeeffff00001111"
+
+
+def net(**kw) -> A.RunRecord:
+    base = dict(run_id="n1", pid=None, tty="", network=TASK)
+    base.update(kw)
+    return rec(**base)
+
+
+def offer(state: str, executor: str = "", here: bool = False,
+          ok: bool = False, reason: str = "", not_taking: str = "",
+          capped: bool = False) -> dict[str, A.NetworkTask]:
+    return {TASK: A.NetworkTask(state, executor, here, ok, reason, not_taking, capped)}
+
+
+NO_DAEMON = A.Observation.unavailable("the daemon did not answer")
+
+
 #: The screens probe as the operator's Mac reported it for sixteen days (#147/#148).
 BLIND = A.Observation.unavailable("are unreadable (the terminals would not answer)")
 
@@ -80,7 +100,7 @@ def proc(elapsed: float = 60.0, tty: str = "pts/3", is_agent: bool = True):
 
 def ev(*, processes=None, sentinels=None, tails=None,
        merged=None, live_agents=None, sessions=None, activity=None,
-       tokens=None) -> A.Evidence:
+       tokens=None, network=None) -> A.Evidence:
     """An evidence bundle where anything not named is PRESENT-and-empty.
 
     Empty, not unavailable: these cases are about a machine that was successfully
@@ -116,6 +136,7 @@ def ev(*, processes=None, sentinels=None, tails=None,
         sessions=obs(sessions, {}),
         activity=obs(activity, {}),
         tokens_left=obs(tokens, True),
+        network=obs(network, {}),
     )
 
 
@@ -597,6 +618,98 @@ CASES = [
          reap_refused_at=T0 - A.QUIET_TIMEOUT),
      ev(processes={4242: proc()}, tails={"pts/3": WORKING}),
      A.FINISHED, "its screen has not changed in 40m"),
+
+    # --- a run the network carries, judged by its offer ---------------------
+    ("an offer still in the pool is starting",
+     net(), ev(network=offer("pooled")),
+     A.STARTING, "in the pool"),
+    ("a task this machine claimed is running here",
+     net(), ev(network=offer("claimed", PEER, here=True)),
+     A.RUNNING, "running on this machine"),
+    ("a task another machine claimed is running there",
+     net(), ev(network=offer("claimed", PEER)),
+     A.RUNNING, "running on eeeeffff"),
+    ("a claim that names no executor is running on the network",
+     net(), ev(network=offer("claimed")),
+     A.RUNNING, "running on the network"),
+    ("a task reported done and well is finished",
+     net(), ev(network=offer("done", PEER, ok=True)),
+     A.FINISHED, "finished on eeeeffff"),
+    ("a task reported done but not well has failed",
+     net(), ev(network=offer("done", PEER)),
+     A.FAILED, "failed on eeeeffff"),
+    ("an offer the network gave up on has failed",
+     net(), ev(network=offer("failed")),
+     A.FAILED, "refused by the network"),
+    ("a cancelled offer has failed",
+     net(), ev(network=offer("cancelled")),
+     A.FAILED, "withdrawn from the network"),
+    ("an offer the network gave up on says how its last attempt ended",
+     net(), ev(network=offer("failed", reason="the container exited 137")),
+     A.FAILED, "refused by the network: the container exited 137"),
+    ("a withdrawn offer says why",
+     net(), ev(network=offer("cancelled", reason="merged")),
+     A.FAILED, "withdrawn from the network: merged"),
+    ("a reason is not read of an offer in the pool",
+     net(), ev(network=offer("pooled", reason="x")),
+     A.STARTING, "in the pool"),
+    ("a reason is not read of a claimed offer",
+     net(), ev(network=offer("claimed", reason="x")),
+     A.RUNNING, "running on the network"),
+    ("a reason is not read of a finished offer",
+     net(), ev(network=offer("done", ok=True, reason="x")),
+     A.FINISHED, "finished on the network"),
+    ("a reason is not read of an offer done but not well",
+     net(), ev(network=offer("done", reason="x")),
+     A.FAILED, "failed on the network"),
+    ("an offer this machine does not take while it waits says why",
+     net(), ev(network=offer("pooled", not_taking="docker is down: no engine")),
+     A.STARTING, "in the pool, not taken here: docker is down: no engine"),
+    ("why it was not taken is not read of a claimed offer",
+     net(), ev(network=offer("claimed", PEER, not_taking="x")),
+     A.RUNNING, "running on eeeeffff"),
+    ("why it was not taken is not read of an offer that ended",
+     net(), ev(network=offer("failed", not_taking="x")),
+     A.FAILED, "refused by the network"),
+    ("a finished job whose cost the executor capped says so",
+     net(), ev(network=offer("done", PEER, ok=True, capped=True)),
+     A.FINISHED, "finished on eeeeffff, its reported cost capped"),
+    ("a job done but not well whose cost the executor capped says so",
+     net(), ev(network=offer("done", PEER, here=True, capped=True)),
+     A.FAILED, "failed on this machine, its reported cost capped"),
+    ("a cap is not read of an offer that is not done",
+     net(), ev(network=offer("claimed", PEER, capped=True)),
+     A.RUNNING, "running on eeeeffff"),
+    ("an offer in a state this build does not know is unknown",
+     net(), ev(network=offer("limbo")),
+     A.UNKNOWN, "the network reports limbo"),
+    ("an offer the snapshot does not hold yet is starting",
+     net(dispatched_at=T0 - 10), ev(network={}),
+     A.STARTING, "offered 10s ago, not in the pool yet"),
+    ("an offer the snapshot still does not hold past the grace has failed",
+     net(), ev(network={}),
+     A.FAILED, "the network holds no such offer"),
+    ("a daemon that did not answer fails no network run",
+     net(dispatched_at=T0 - PAST_DEADLINE), ev(network=NO_DAEMON),
+     A.UNKNOWN, "the network could not be asked: the daemon did not answer"),
+    ("a PR that merged while its offer was pooled is merged",
+     net(), ev(network=offer("pooled"), merged={337}),
+     A.MERGED, "PR #337 is merged"),
+    # Everything a local run is judged by, present and saying otherwise.
+    ("a network run is judged by nothing on this machine",
+     net(pid=4242, tty="pts/3"),
+     ev(processes={4242: proc()}, tails={"pts/3": AT_PROMPT}, sentinels={"n1"},
+        activity={"n1": ("idle", T0 - 5)}, network=offer("claimed", PEER)),
+     A.RUNNING, "running on eeeeffff"),
+    ("no clock ends a network run",
+     net(dispatched_at=T0 - PAST_DEADLINE), ev(network=offer("claimed", PEER)),
+     A.RUNNING, "running on eeeeffff"),
+    ("a record carrying a removed mesh's keys is a local run",
+     A.RunRecord.from_json({**rec().to_json(), "placement": "mesh-peer",
+                            "node": "brick", "workKey": "review:github.com/o/r#337@abc",
+                            "claimSeenAt": T0 - 1}),
+     ev(processes={4242: proc()}, tails={"pts/3": WORKING}, network=NO_DAEMON),
+     A.RUNNING, "pid 4242 alive; working"),
 ]
 
 
@@ -631,12 +744,14 @@ def test_only_the_agents_own_word_marks_a_run_reported():
     """``reported`` is what lets a review request's run end it without a retry
     (:func:`autofix.concluded`), so it must name only the rungs where the agent's own
     runner said the turn went well — never a sentinel, a session that ended, a gone
-    pid, a refused turn or a backstop, none of which says the agent meant to stop."""
+    pid, a refused turn or a backstop, none of which says the agent meant to stop. For
+    a run the network carried that word is its executor's outcome."""
     for name, record, evidence, _state, _reason in CASES:
         got = A.resolve_one(record, evidence, T0)
         by_report = got.reason.endswith(("its CLI reported the turn over",
                                          "its runner reported the turn over"))
-        assert got.reported is by_report, f"{name}: {got.reason!r}"
+        by_outcome = record.network is not None and got.state == A.FINISHED
+        assert got.reported is (by_report or by_outcome), f"{name}: {got.reason!r}"
     verdicts = [A.resolve_one(r, e, T0) for _n, r, e, _s, _rr in CASES]
     assert any(v.reported for v in verdicts)
     assert any(v.state == A.FINISHED and not v.reported for v in verdicts)
@@ -1425,6 +1540,133 @@ def test_free_slots_never_goes_negative(limit, occupied, want):
 
 
 # MARK: - Round-tripping (the parity payload rides on this)
+
+
+# MARK: - A run the network carries
+
+
+def _net_tick(network, *, record=None, merged=None, live=None) -> A.Tick:
+    record = net() if record is None else record
+    return A.tick([record], ev(network=network, merged=merged, live_agents=live),
+                  T0, 2, A.RUN_DEADLINE)
+
+
+def test_a_network_run_holds_no_bay_and_adopts_no_tty_but_takes_its_pr():
+    t =_net_tick(offer("claimed"), live={337: "pts/9"})
+    assert [(r.run_id, r.tty) for r in t.records] == [("n1", "")]
+    assert (t.cap_load, t.free_slots) == (set(), 2)
+    assert t.in_flight(item(337))
+    assert [r.run_id for r, _ in t.rows] == ["n1"]
+    assert (t.retirable, t.reapable, t.close_on_retire, t.withdrawable) == ([], [], [], [])
+
+    local = _net_tick(offer("claimed"), record=net(network=None), live={337: "pts/9"})
+    assert local.cap_load == {"n1"}
+    assert local.records[0].tty == "pts/9"
+
+
+@pytest.mark.parametrize("state,ok,blocks", [
+    ("pooled", False, True), ("claimed", False, True), ("limbo", False, True),
+    ("done", True, False), ("failed", False, False), ("cancelled", False, False),
+])
+def test_a_network_run_takes_its_pr_until_the_network_is_done_with_it(state, ok, blocks):
+    t = _net_tick(offer(state, ok=ok))
+    assert t.in_flight(item(337)) is blocks
+    assert [r.run_id for r in t.retirable] == ([] if blocks else ["n1"])
+    assert (t.cap_load, t.reapable, t.close_on_retire) == (set(), [], [])
+
+
+def test_an_unanswered_daemon_keeps_the_pr_taken_and_retires_nothing():
+    t = _net_tick(NO_DAEMON)
+    assert t.in_flight(item(337))
+    assert (t.retirable, t.cap_load) == ([], set())
+
+
+def test_nothing_is_released_for_a_network_run():
+    """A live agent on a network run's PR was never that run's."""
+    t = _net_tick(offer("done", ok=True), live={337: "pts/9"})
+    assert [r.run_id for r in t.records] == ["n1"]
+    assert [r.run_id for r in t.retirable] == ["n1"]
+
+
+@pytest.mark.parametrize("network,merged,task,want", [
+    (offer("pooled"), True, TASK, (["n1"], TASK)),
+    (offer("claimed"), True, TASK, (["n1"], TASK)),
+    (NO_DAEMON, True, TASK, (["n1"], TASK)),
+    (offer("done", ok=True), True, TASK, ([], None)),
+    (offer("cancelled"), True, TASK, ([], None)),
+    ({}, True, TASK, ([], None)),
+    (offer("pooled"), False, TASK, ([], TASK)),
+    (offer("pooled"), True, None, ([], None)),
+], ids=["merged while pooled", "merged while claimed", "merged, daemon silent",
+        "the network finished it", "already cancelled", "never held",
+        "unmerged: only when forgotten", "a local run has no offer"])
+def test_an_offer_is_withdrawn_while_the_network_still_carries_it(network, merged, task,
+                                                                  want):
+    record = net(network=task)
+    evidence = ev(network=network, merged={337} if merged else None)
+    t = A.tick([record], evidence, T0, 2)
+    assert ([r.run_id for r in t.withdrawable],
+            A.withdraw_on_forget(record, evidence)) == want
+
+
+def test_the_deadline_never_applies_to_a_network_run():
+    assert not A.deadline_applies(net())
+    assert A.deadline_applies(net(network=None))
+    assert not net().runs_here and net(network=None).runs_here
+    old = A.resolve_one(net(dispatched_at=T0 - PAST_DEADLINE),
+                        ev(network=offer("claimed")), T0, A.RUN_DEADLINE)
+    assert (old.state, old.expired, old.wedged, old.lapsed, old.reported) == (
+        A.RUNNING, False, False, False, False)
+
+
+def test_a_network_run_is_reported_when_it_went_well_and_spent_when_its_attempts_are_used():
+    def flags(seen, age=60) -> tuple[bool, bool]:
+        v = A.resolve_one(net(dispatched_at=T0 - age), ev(network=seen), T0)
+        return v.reported, v.spent
+
+    assert flags(offer("done", ok=True)) == (True, False)
+    assert flags(offer("failed")) == (False, True)
+    assert flags(offer("done")) == (False, True)
+    for unrun in (offer("cancelled"), offer("pooled"), offer("claimed"), {}, NO_DAEMON):
+        assert flags(unrun) == (False, False), unrun
+    assert flags({}, age=5) == (False, False)
+    went_well = A.resolve_one(net(), ev(network=offer("done", ok=True)), T0)
+    assert A.close_on_retire([net()], {"n1": went_well}) == [], "it has no window here"
+    assert A.close_on_retire([net(network=None)], {"n1": went_well}) == [net(network=None)]
+
+
+def test_a_network_run_survives_the_book_and_a_local_one_carries_no_task():
+    assert A.RunRecord.from_json(net().to_json()) == net()
+    assert net().to_json()["network"] == TASK
+    assert "network" not in rec().to_json()
+    for spoilt in (7, "", None, True, ["t"]):
+        assert A.RunRecord.from_json({**rec().to_json(), "network": spoilt}) == rec()
+
+
+def test_a_reason_is_read_of_a_failed_or_cancelled_offer_alone():
+    """The whole line, where the scenario table asks only that it contains one."""
+    def line(state: str, **kw) -> str:
+        return A.network_verdict(TASK, A.Observation.present(offer(state, **kw)), 60)[1]
+
+    assert line("failed", reason="x") == "refused by the network: x"
+    assert line("cancelled", reason="x") == "withdrawn from the network: x"
+    assert (line("failed"), line("cancelled")) == (
+        "refused by the network", "withdrawn from the network")
+    assert [line("pooled", reason="x"), line("claimed", reason="x"),
+            line("done", ok=True, reason="x"), line("done", reason="x")] == [
+        "in the pool", "running on the network", "finished on the network",
+        "failed on the network"]
+
+
+def test_the_networks_evidence_survives_json_and_silence_stays_silence():
+    seen = {TASK: A.NetworkTask("claimed", PEER, True, False),
+            "other": A.NetworkTask("done", "", False, True),
+            "gone": A.NetworkTask("failed", reason="the container exited 137")}
+    assert A.Evidence.from_json(ev(network=seen).to_json()).network.value == seen
+    back = A.Evidence.from_json(ev(network=NO_DAEMON).to_json()).network
+    assert (back.ok, back.reason) == (False, "the daemon did not answer")
+    assert not A.Evidence.from_json({}).network.ok
+    assert not A.Evidence().network.ok, "an unwired probe is not an empty pool"
 
 
 def test_records_and_evidence_survive_a_json_round_trip():

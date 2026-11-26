@@ -235,6 +235,60 @@ def test_a_paused_monitors_row_says_nothing_will_start_it(panel):
     assert "monitor off" not in _row_text(_rows(panel, QueuedTaskRow)[0])
 
 
+def test_a_row_the_network_refused_says_why(panel):
+    """The daemon's sentence may quote a peer's rules: painted plain."""
+    task = _queued(512)
+    panel.store.queued_tasks = [task, _queued(513)]
+    panel.store.network_job_refusals = {task.job.label: "That pool's rules name no <b>review</b>."}
+    panel._rebuild_agent_tasks()
+    first, second = _rows(panel, QueuedTaskRow)
+    assert "not offered: That pool's rules name no <b>review</b>." in _row_text(first)
+    assert "&lt;b&gt;review" in first.refusal.toolTip()
+    assert "not offered" not in _row_text(second)
+
+
+def test_the_list_says_what_of_the_network_does_not_work(panel):
+    from diplomat_runtime import appconfig, network
+
+    from diplomat_app.widgets import NoticeRow
+
+    panel._rebuild_agent_tasks()
+    assert _rows(panel, NoticeRow) == []
+
+    panel.store.network_answered = False
+    panel.store.network_changed.emit()
+    [notice] = _rows(panel, NoticeRow)
+    assert notice.text._full == "Diplomacy Network: the daemon is not answering"
+
+    panel.store.network_answered = True
+    panel.store.network_state = network.Snapshot.from_json(
+        {"transport": {"state": "failed", "detail": "<b>tor</b> not found"}})
+    panel._tasks_expanded = False
+    panel.store.network_changed.emit()
+    [notice] = _rows(panel, NoticeRow)
+    assert notice.text._full == "Diplomacy Network: transport failed (<b>tor</b> not found)"
+    assert "&lt;b&gt;tor" in notice.toolTip()
+    notice.clicked.emit()
+    assert panel._screen == "network"
+
+    panel.store.network_state = network.Snapshot.from_json(
+        {"transport": {"state": "ready", "detail": ""}})
+    panel.store.network_changed.emit()
+    assert _rows(panel, NoticeRow) == []
+
+    # Settings that cannot be read outrank what the daemon says, and a settle that
+    # finds them so redraws the line.
+    appconfig.set_bool(network.ENABLED_KEY, True)
+    panel.store._settle_agents()
+    [notice] = _rows(panel, NoticeRow)
+    assert notice.text._full == "Diplomacy Network: the daemon is not answering"
+    appconfig.path().write_text("{", encoding="utf-8")
+    panel.store._settle_agents()
+    [notice] = _rows(panel, NoticeRow)
+    assert notice.text._full == (
+        f"Diplomacy Network: {appconfig.path()} cannot be read as settings")
+
+
 def test_a_pipeline_asks_cancel_says_what_asks_for_it_again(panel):
     from PySide6.QtWidgets import QPushButton
 

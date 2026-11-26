@@ -261,7 +261,7 @@ enum AgentProbes {
     ///
     /// The pre-registry identity mechanism, kept for the two questions a pid cannot answer:
     /// agents this applet has no record of at all (`AgentState.synthesizeUntracked`), and
-    /// records whose agent has no pid to match — a spawn whose pid file has not landed.
+    /// records whose agent has no pid to match - a spawn whose pid file has not landed.
     ///
     /// It cannot tell two runs on one PR apart and it matches any session that merely
     /// mentions the number, which is why it decides nothing that a pid can decide.
@@ -426,8 +426,8 @@ enum AgentProbes {
     ///
     /// A terminal reports the tty it opened; `ps` reports the one the agent ended up on.
     /// For a run this applet spawned they are the same, because the spawn captures the
-    /// window's tty as it opens it. For a run it did not — one the operator opened by
-    /// hand — the only tty known is the agent's own, read out of
+    /// window's tty as it opens it. For a run it did not - one the operator opened by
+    /// hand - the only tty known is the agent's own, read out of
     /// the process table, and on a box whose shells wrap themselves in tmux that tty
     /// belongs to no window at all. Its screen is then unreadable for as long as the
     /// session lives, which resolves to RUNNING, and RUNNING holds a bay of the
@@ -588,7 +588,9 @@ enum AgentProbes {
     static func gather(records: [AgentState.RunRecord], now: TimeInterval,
                        keys: Set<String>, directory: String,
                        merged: Observation<Set<String>>,
-                       tokens: Observation<Bool>)
+                       tokens: Observation<Bool>,
+                       network: Observation<[String: AgentState.NetworkTask]>
+                           = .unavailable(DiplomacyNetwork.switchedOff))
         -> (evidence: AgentState.Evidence, attached: Observation<[String]>) {
         let dump = psDump(now: now)
         let table = note("processes", processTable(dump))
@@ -610,7 +612,8 @@ enum AgentProbes {
             sessions: note("agent sessions",
                            agentSessions(records, directory: directory, now: now)),
             activity: note("turn reports", AgentRegistry.activity(records)),
-            tokensLeft: tokens)
+            tokensLeft: tokens,
+            network: network)
         return (evidence, scanned.attached)
     }
 

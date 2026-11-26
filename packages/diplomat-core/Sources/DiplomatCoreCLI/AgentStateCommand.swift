@@ -24,10 +24,14 @@ import Foundation
 ///   "records": [ {"runId": …, "dispatchedAt": …, "pid": …, …} ],
 ///   "evidence": { "processes": {"status": "present", "value": {"4242": {…}}},
 ///                 "mergedPrs": {"status": "present", "value": ["o/r#12"]},
-///                 "liveAgents": {"status": "present", "value": {"o/r#404": "pts/3"}}, … } }
+///                 "liveAgents": {"status": "present", "value": {"o/r#404": "pts/3"}}, … },
+///   "networkSnapshot": { "offers": [ {"taskId": …, "state": "claimed", …} ], … } }
 /// ```
+/// `networkSnapshot`, when present, is the daemon's raw answer (`null` for none) and
+/// replaces `evidence.network`, so the snapshot decoder and the evidence built from it
+/// are diffed too.
 /// Output: the resolved rows in display order, every record's verdict whether drawn or
-/// not, every projection, and the records as the pipeline left them — so a stillness
+/// not, every projection, and the records as the pipeline left them - so a stillness
 /// clock written by the wrong step is a diff.
 enum AgentStateCommand {
     static func run(_ obj: [String: Any]) {
@@ -36,7 +40,9 @@ enum AgentStateCommand {
         // Absent means the operator's switch is off, which is the Python default too —
         // a payload that forgot the key must not silently get a deadline of zero.
         let deadline = (obj["deadline"] as? NSNumber)?.doubleValue
-        let evidence = decodeEvidence(obj["evidence"] as? [String: Any] ?? [:])
+        var evidence = decodeEvidence(obj["evidence"] as? [String: Any] ?? [:])
+        let snapshot = (obj["networkSnapshot"] as? [String: Any]).map(NetworkSnapshot.init)
+        if obj["networkSnapshot"] != nil { evidence.network = NetworkEvidence.tasks(snapshot) }
         let records = (obj["records"] as? [[String: Any]] ?? []).map(decodeRecord)
         // Absent is no roots: every synthesized run links to github.com.
         let roots = (obj["roots"] as? [[String: Any]] ?? []).compactMap { r -> PRRef.LocalRepo? in
@@ -53,7 +59,8 @@ enum AgentStateCommand {
         }
         func verdict(_ s: AgentState.Resolution) -> [String: Any] {
             ["state": s.state.rawValue, "reason": s.reason, "wedged": s.wedged,
-             "expired": s.expired, "lapsed": s.lapsed, "reported": s.reported]
+             "expired": s.expired, "lapsed": s.lapsed, "reported": s.reported,
+             "spent": s.spent]
         }
         let out: [String: Any] = [
             "rows": t.rows.map { r, s in verdict(s).merging(["runId": r.runID]) { $1 } },
@@ -65,6 +72,13 @@ enum AgentStateCommand {
             // machine that behaves differently depending on which applet is running.
             "reapable": t.reapable.map(\.runID).sorted(),
             "closeOnRetire": t.closeOnRetire.map(\.runID).sorted(),
+            "withdrawable": t.withdrawable.map(\.runID).sorted(),
+            "withdrawOnForget": t.records.filter {
+                AgentState.withdrawOnForget($0, evidence: evidence) != nil
+            }.map(\.runID).sorted(),
+            "network": network(evidence.network),
+            "networkSnapshot": snapshot.map(dump) ?? NSNull(),
+            "networkRunning": NetworkAdmit.running(snapshot),
             "freeSlots": t.freeSlots,
             "inFlight": inFlight,
             // Three timing constants, so the parity diff covers the NUMBERS and not
@@ -77,7 +91,7 @@ enum AgentStateCommand {
                           "quietTimeout": AgentState.quietTimeout,
                           "spawnGrace": AgentState.spawnGrace],
             "records": t.records.map { r -> [String: Any] in
-                ["runId": r.runID,
+                ["runId": r.runID, "network": r.network.map { $0 as Any } ?? NSNull(),
                  "untracked": r.untracked, "released": r.released, "source": r.source,
                  "pid": r.pid.map { $0 as Any } ?? NSNull(), "tty": r.tty,
                  "dispatchedAt": r.dispatchedAt,
@@ -91,6 +105,71 @@ enum AgentStateCommand {
             die("could not serialise agent state", 1)
         }
         emit(data)
+    }
+
+    // MARK: - The network
+    //
+    // The evidence and the snapshot as this side read them, member for member, so a
+    // field one decoder drops or renames is a diff.
+
+    private static func network(_ o: Observation<[String: AgentState.NetworkTask]>) -> [String: Any] {
+        guard let tasks = o.value else { return ["unavailable": o.reason] }
+        return ["present": tasks.mapValues { t -> [String: Any] in
+            ["state": t.state, "executor": t.executor, "executorHere": t.executorHere,
+             "ok": t.ok, "reason": t.reason, "notTaking": t.notTaking, "capped": t.capped]
+        }]
+    }
+
+    private static func dump(_ s: NetworkSnapshot) -> [String: Any] {
+        func opt<T>(_ v: T?) -> Any { v.map { $0 as Any } ?? NSNull() }
+        func service(_ v: NetworkSnapshot.Service) -> [String: Any] {
+            ["state": v.state, "detail": v.detail]
+        }
+        return [
+            "updatedAt": opt(s.updatedAt), "pid": opt(s.pid), "startedAt": opt(s.startedAt),
+            "pk": s.pk, "onion": s.onion,
+            "transport": service(s.transport), "model": service(s.model),
+            "docker": ["state": s.docker.state, "image": s.docker.image,
+                       "detail": s.docker.detail],
+            "admit": ["slots": s.admit.slots, "at": opt(s.admit.at),
+                      "reason": s.admit.reason],
+            "pools": s.pools.map { p -> [String: Any] in
+                ["id": p.id, "path": p.path, "identity": p.identity, "hash": p.hash,
+                 "left": p.left, "joining": p.joining, "joinFailed": p.joinFailed,
+                 "returning": p.returning, "unseated": p.unseated,
+                 "notTaking": p.notTaking,
+                 "members": p.members.map { m -> [String: Any] in
+                     ["pk": m.pk, "self": m.isSelf, "maxAcceptedH": opt(m.maxAcceptedH),
+                      "lastSeen": opt(m.lastSeen), "reachable": m.reachable]
+                 },
+                 "tasks": p.tasks.map { t -> [String: Any] in
+                     ["taskId": t.taskId, "kind": t.kind, "item": t.item, "title": t.title,
+                      "identity": t.identity, "hours": opt(t.hours), "state": t.state,
+                      "offeredBy": t.offeredBy, "offeredHere": t.offeredHere,
+                      "executor": t.executor, "executorHere": t.executorHere,
+                      "claimedAt": opt(t.claimedAt), "leaseUntil": opt(t.leaseUntil),
+                      "deadline": opt(t.deadline)]
+                 }]
+            },
+            "runs": s.runs.map { r -> [String: Any] in
+                ["runId": r.runId, "taskId": r.taskId, "pool": r.pool, "peer": r.peer,
+                 "container": r.container, "state": r.state,
+                 "startedAt": opt(r.startedAt), "endedAt": opt(r.endedAt),
+                 "exit": opt(r.exit)]
+            },
+            "offers": opt(s.offers?.map { o -> [String: Any] in
+                ["taskId": o.taskId, "pool": o.pool, "kind": o.kind, "item": o.item,
+                 "title": o.title, "state": o.state, "reason": o.reason,
+                 "executor": o.executor, "executorHere": opt(o.executorHere),
+                 "offeredAt": opt(o.offeredAt), "attempt": o.attempt, "requests": o.requests, "refused": o.refused,
+                 "outcome": opt(o.outcome.map { out -> [String: Any] in
+                     ["ok": out.ok, "summary": out.summary, "usd": opt(out.usd),
+                      "tokens": opt(out.tokens), "runner": out.runner, "model": out.model,
+                      "capped": out.capped]
+                 }),
+                 "endedAt": opt(o.endedAt), "notTaking": o.notTaking]
+            }),
+        ]
     }
 
     // MARK: - Decoding
@@ -154,7 +233,23 @@ enum AgentStateCommand {
                 }
                 return out
             },
-            tokensLeft: decodeObs(d["tokensLeft"]) { ($0 as? JSONInput.Flag)?.on })
+            tokensLeft: decodeObs(d["tokensLeft"]) { ($0 as? JSONInput.Flag)?.on },
+            network: decodeObs(d["network"]) { v in
+                guard let m = v as? [String: Any] else { return nil }
+                var out: [String: AgentState.NetworkTask] = [:]
+                for (task, raw) in m {
+                    guard let t = raw as? [String: Any] else { continue }
+                    out[task] = AgentState.NetworkTask(
+                        state: t["state"] as? String ?? "",
+                        executor: t["executor"] as? String ?? "",
+                        executorHere: JSONInput.flag(t["executorHere"]),
+                        ok: JSONInput.flag(t["ok"]),
+                        reason: t["reason"] as? String ?? "",
+                        notTaking: t["notTaking"] as? String ?? "",
+                        capped: JSONInput.flag(t["capped"]))
+                }
+                return out
+            })
     }
 
     private static func decodeRecord(_ d: [String: Any]) -> AgentState.RunRecord {
@@ -173,6 +268,7 @@ enum AgentStateCommand {
             quietSince: AgentRegistry.number(d["quietSince"]),
             reapRefusedAt: AgentRegistry.number(d["reapRefusedAt"]),
             untracked: JSONInput.flag(d["untracked"]),
-            released: JSONInput.flag(d["released"]))
+            released: JSONInput.flag(d["released"]),
+            network: (d["network"] as? String).flatMap { $0.isEmpty ? nil : $0 })
     }
 }

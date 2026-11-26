@@ -22,15 +22,20 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 
 import pytest
 
+from dataclasses import replace
+
 from diplomat_runtime import agentstate as A
+from diplomat_runtime import network as N
 
 # The scenario table itself, so the two languages are pinned against exactly the
 # cases the Python side already asserts rather than a second, drifting copy.
 from test_agent_state import (
-    AT_PROMPT, CASES, PAST_DEADLINE, RELEASED_UNSEEN, T0, WORKING, ev, proc, rec,
+    AT_PROMPT, CASES, NO_DAEMON, PAST_DEADLINE, PEER, RELEASED_UNSEEN, T0, TASK, WORKING,
+    ev, net, offer, proc, rec,
 )
 
 CORE_BIN = os.environ.get("DIPLOMAT_CORE_BIN")
@@ -44,14 +49,19 @@ pytestmark = pytest.mark.skipif(
 LIMIT = 2
 
 
+#: No ``networkSnapshot`` in the payload at all, as against a daemon that gave none.
+_NO_SNAPSHOT = object()
+
+
 def _payload(records, evidence, now=T0, limit=LIMIT,
-             deadline=A.RUN_DEADLINE) -> dict:
+             deadline=A.RUN_DEADLINE, snapshot=_NO_SNAPSHOT) -> dict:
     return {
         "now": now,
         "limit": limit,
         "deadline": deadline,
         "records": [r.to_json() for r in records],
         "evidence": evidence.to_json(),
+        **({} if snapshot is _NO_SNAPSHOT else {"networkSnapshot": snapshot}),
     }
 
 
@@ -64,13 +74,60 @@ def _swift(payload: dict) -> dict:
     return json.loads(proc_.stdout)
 
 
+def _dump(s: N.Snapshot) -> dict:
+    """The snapshot as this side read it, member for member, in the shape the CLI
+    prints its own reading in."""
+    return {
+        "updatedAt": s.updated_at, "pid": s.pid, "startedAt": s.started_at,
+        "pk": s.pk, "onion": s.onion,
+        "transport": {"state": s.transport.state, "detail": s.transport.detail},
+        "model": {"state": s.model.state, "detail": s.model.detail},
+        "docker": {"state": s.docker.state, "image": s.docker.image,
+                   "detail": s.docker.detail},
+        "admit": {"slots": s.admit.slots, "at": s.admit.at, "reason": s.admit.reason},
+        "pools": [{
+            "id": p.id, "path": p.path, "identity": p.identity, "hash": p.hash,
+            "left": p.left, "joining": p.joining, "joinFailed": p.join_failed,
+            "returning": p.returning, "unseated": p.unseated,
+            "notTaking": p.not_taking,
+            "members": [{"pk": m.pk, "self": m.is_self, "maxAcceptedH": m.max_accepted_h,
+                         "lastSeen": m.last_seen, "reachable": m.reachable}
+                        for m in p.members],
+            "tasks": [{"taskId": t.task_id, "kind": t.kind, "item": t.item,
+                       "title": t.title, "identity": t.identity, "hours": t.hours,
+                       "state": t.state, "offeredBy": list(t.offered_by),
+                       "offeredHere": t.offered_here, "executor": t.executor,
+                       "executorHere": t.executor_here, "claimedAt": t.claimed_at,
+                       "leaseUntil": t.lease_until, "deadline": t.deadline}
+                      for t in p.tasks]} for p in s.pools],
+        "runs": [{"runId": r.run_id, "taskId": r.task_id, "pool": r.pool, "peer": r.peer,
+                  "container": r.container, "state": r.state, "startedAt": r.started_at,
+                  "endedAt": r.ended_at, "exit": r.exit} for r in s.runs],
+        "offers": None if s.offers is None else [{
+            "taskId": o.task_id, "pool": o.pool, "kind": o.kind, "item": o.item,
+            "title": o.title, "state": o.state, "reason": o.reason,
+            "executor": o.executor, "executorHere": o.executor_here,
+            "offeredAt": o.offered_at,
+            "attempt": o.attempt, "requests": o.requests, "refused": o.refused,
+            "outcome": None if o.outcome is None else {
+                "ok": o.outcome.ok, "summary": o.outcome.summary, "usd": o.outcome.usd,
+                "tokens": o.outcome.tokens, "runner": o.outcome.runner,
+                "model": o.outcome.model, "capped": o.outcome.capped},
+            "endedAt": o.ended_at, "notTaking": o.not_taking} for o in s.offers],
+    }
+
+
 def _python(records, evidence, now=T0, limit=LIMIT,
-            deadline=A.RUN_DEADLINE) -> dict:
+            deadline=A.RUN_DEADLINE, snapshot=_NO_SNAPSHOT) -> dict:
+    parsed = N.Snapshot.from_json(snapshot) if isinstance(snapshot, dict) else None
+    if snapshot is not _NO_SNAPSHOT:
+        evidence = replace(evidence, network=N.tasks(parsed))
     t = A.tick(records, evidence, now, limit, deadline)
 
     def verdict(s: A.Resolution) -> dict:
         return {"state": s.state, "reason": s.reason, "wedged": s.wedged,
-                "expired": s.expired, "lapsed": s.lapsed, "reported": s.reported}
+                "expired": s.expired, "lapsed": s.lapsed, "reported": s.reported,
+                "spent": s.spent}
 
     return {
         "rows": [{"runId": r.run_id, **verdict(s)} for r, s in t.rows],
@@ -79,6 +136,14 @@ def _python(records, evidence, now=T0, limit=LIMIT,
         "retirable": sorted(r.run_id for r in t.retirable),
         "reapable": sorted(r.run_id for r in t.reapable),
         "closeOnRetire": sorted(r.run_id for r in t.close_on_retire),
+        "withdrawable": sorted(r.run_id for r in t.withdrawable),
+        "withdrawOnForget": sorted(r.run_id for r in t.records
+                                   if A.withdraw_on_forget(r, evidence) is not None),
+        "network": ({"present": {task: seen.to_json()
+                                 for task, seen in evidence.network.value.items()}}
+                    if evidence.network.ok else {"unavailable": evidence.network.reason}),
+        "networkSnapshot": None if parsed is None else _dump(parsed),
+        "networkRunning": N.running(parsed),
         "freeSlots": t.free_slots,
         "constants": {"runDeadline": A.RUN_DEADLINE,
                       "quietTimeout": A.QUIET_TIMEOUT,
@@ -95,7 +160,7 @@ def _python(records, evidence, now=T0, limit=LIMIT,
         # retrying a window it cannot close, and would go on retiring the run. pid, tty,
         # dispatchedAt and source are what a released record inherits from the run it
         # replaces, and the pid is its identity from then on.
-        "records": [{"runId": r.run_id,
+        "records": [{"runId": r.run_id, "network": r.network,
                      "untracked": r.untracked, "released": r.released,
                      "source": r.source,
                      "pid": r.pid, "tty": r.tty, "dispatchedAt": r.dispatched_at,
@@ -117,7 +182,8 @@ def _python_decoding(payload: dict) -> dict:
     return _python([A.RunRecord.from_json(r) for r in payload["records"]],
                    A.Evidence.from_json(payload["evidence"]),
                    now=payload["now"], limit=payload["limit"],
-                   deadline=payload["deadline"])
+                   deadline=payload["deadline"],
+                   snapshot=payload.get("networkSnapshot", _NO_SNAPSHOT))
 
 
 #: Values a hand-written payload puts where a JSON boolean belongs. `1` and `1.0` are
@@ -457,3 +523,410 @@ def test_a_case_the_two_disagree_on_would_actually_fail(mixed_results):
     tampered = json.loads(json.dumps(python))
     tampered["rows"][0]["reason"] += " (tampered)"
     assert swift != tampered
+
+
+# MARK: - The network
+#
+# The scenario table above already runs every network verdict through both resolvers.
+# What is left is what a single hand-built observation cannot reach: the daemon's
+# snapshot as each side DECODES it, the evidence each builds from it, and the
+# projections over a book that holds local and network runs together.
+
+ISSUE_TASK = "github.com/o/r#issues:issue-9@octocat"
+AUDIT_TASK = "github.com/o/r#audit:job-0b77ab9a731995c3@octocat"
+POOLED_TASK = "github.com/o/r#conflicts:pr-5@octocat"
+#: This machine's own key in :func:`_snapshot`.
+SELF = "aaaabbbbccccdddd"
+HOURS_SHORT = "this machine takes jobs of at most 12 h and this one needs 24"
+
+
+def _snapshot() -> dict:
+    """The README's snapshot with every member populated but an offer's own
+    ``executorHere``: one pool, a live run for :data:`TASK`, and an offer here by each
+    of the three roads plus one in the pool."""
+    return {
+        "updatedAt": 1794000300, "daemon": {"pid": 4321, "startedAt": 1794000000},
+        "identity": {"pk": SELF, "onion": "abc.onion"},
+        "transport": {"state": "ready", "detail": ""},
+        "docker": {"state": "building", "image": "dn:1", "detail": "layer 3"},
+        "model": {"state": "missing", "detail": "no credential"},
+        "admit": {"slots": 2, "at": 1794000290, "reason": ""},
+        "pools": [{
+            "id": "github.com/o/r", "path": "/w/r", "identity": "octocat", "hash": "h1",
+            "left": False, "joining": False, "joinFailed": "", "returning": False,
+            "unseated": False, "notTaking": "",
+            "members": [
+                {"pk": SELF, "self": True, "maxAcceptedH": 24, "lastSeen": 1794000299,
+                 "reachable": True},
+                {"pk": PEER, "self": False, "maxAcceptedH": 12, "lastSeen": 1794000200,
+                 "reachable": False}],
+            "tasks": [{
+                "taskId": ISSUE_TASK, "kind": "issues", "item": "issue-9",
+                "title": "Fix #9", "identity": "octocat", "hours": 12, "state": "claimed",
+                "offeredBy": [SELF], "offeredHere": True, "executor": SELF,
+                "executorHere": True, "claimedAt": 1794000100, "leaseUntil": 1794007300,
+                "deadline": 1794043300}]}],
+        "runs": [
+            {"runId": "run-1", "taskId": TASK, "pool": "github.com/o/r", "peer": PEER,
+             "container": "dn-h1-p1", "state": "running", "startedAt": 1794000150,
+             "endedAt": 0, "exit": 0},
+            {"runId": "run-0", "taskId": AUDIT_TASK, "pool": "github.com/o/r",
+             "peer": PEER, "container": "dn-h1-p1", "state": "finished",
+             "startedAt": 1794000000, "endedAt": 1794000100, "exit": 0}],
+        "offers": [
+            {"taskId": TASK, "pool": "github.com/o/r", "kind": "review", "item": "pr-337",
+             "title": "Auto · Review · #337", "state": "claimed", "reason": "",
+             "executor": PEER, "offeredAt": 1794000050, "attempt": 1, "requests": 4,
+             "refused": 1},
+            {"taskId": ISSUE_TASK, "pool": "github.com/o/r", "kind": "issues",
+             "item": "issue-9", "title": "Fix #9", "state": "claimed", "reason": "",
+             "executor": "9999888877776666", "offeredAt": 1794000060, "attempt": 2,
+             "requests": 0, "refused": 0},
+            {"taskId": AUDIT_TASK, "pool": "github.com/o/r", "kind": "audit",
+             "item": "job-0b77ab9a731995c3", "title": "Audit", "state": "done",
+             "reason": "", "executor": SELF, "offeredAt": 1794000000, "attempt": 1,
+             "requests": 9, "refused": 0,
+             "outcome": {"ok": True, "summary": "clean", "usd": 0.42, "tokens": 12345,
+                         "runner": "claude", "model": "opus", "capped": True},
+             "endedAt": 1794000100},
+            {"taskId": POOLED_TASK, "pool": "github.com/o/r", "kind": "conflicts",
+             "item": "pr-5", "title": "Conflicts · #5", "state": "pooled", "reason": "",
+             "executor": "", "offeredAt": 1794000070, "attempt": 1, "requests": 0,
+             "refused": 0, "notTaking": HOURS_SHORT}],
+    }
+
+
+def _networked():
+    """A book of local and network runs together, under :func:`_snapshot`: a network
+    run per verdict the snapshot can give, one whose PR merged while pooled, one the
+    snapshot never held, and a local run beside them holding the only bay."""
+    records = [
+        rec(run_id="local", pid=1, dispatched_at=T0 - 300, pr_number=301),
+        net(run_id="claimed-here", dispatched_at=T0 - 400),
+        net(run_id="claimed-by-pool", dispatched_at=T0 - 500, pr_number=9,
+            network=ISSUE_TASK),
+        net(run_id="done", dispatched_at=T0 - 600, pr_number=None, network=AUDIT_TASK),
+        net(run_id="pooled", dispatched_at=T0 - 700, pr_number=5, network=POOLED_TASK,
+            source=A.SOURCE_PANEL),
+        net(run_id="merged-while-pooled", dispatched_at=T0 - 800, pr_number=305,
+            network=POOLED_TASK),
+        net(run_id="never-held", dispatched_at=T0 - 900, pr_number=306,
+            network="github.com/o/r#review:pr-306@octocat"),
+        net(run_id="just-offered", dispatched_at=T0 - 3, pr_number=307,
+            network="github.com/o/r#review:pr-307@octocat"),
+    ]
+    evidence = ev(processes={1: proc(elapsed=300)}, tails={"pts/3": WORKING},
+                  merged={305}, live_agents={337: "pts/9", 404: "pts/8"})
+    return records, evidence
+
+
+@pytest.fixture(scope="module")
+def networked_results():
+    records, evidence = _networked()
+    return (_swift(_payload(records, evidence, snapshot=_snapshot())),
+            _python(records, evidence, snapshot=_snapshot()))
+
+
+def test_a_book_of_local_and_network_runs_agrees(networked_results):
+    swift, python = networked_results
+    assert swift == python
+
+
+def test_the_network_fixture_reaches_what_it_claims_to(networked_results):
+    """Anti-vacuity: an agreement over a fixture that decoded to nothing is no
+    agreement."""
+    _swift_out, python = networked_results
+    assert {run: v["reason"] for run, v in python["states"].items()} == {
+        "local": "pid 1 alive; working",
+        "claimed-here": "running on this machine",
+        "claimed-by-pool": "running on this machine",
+        "done": "finished on this machine, its reported cost capped",
+        "pooled": f"in the pool, not taken here: {HOURS_SHORT}",
+        "merged-while-pooled": "PR #305 is merged",
+        "never-held": "the network holds no such offer",
+        "just-offered": "offered 3s ago, not in the pool yet",
+        "untracked:o/r#404": "found in process table; no screen for tty pts/8",
+    }
+    assert python["capLoad"] == ["local", "untracked:o/r#404"]
+    assert python["withdrawable"] == ["merged-while-pooled"]
+    assert python["withdrawOnForget"] == [
+        "claimed-by-pool", "claimed-here", "merged-while-pooled", "pooled"]
+    assert python["retirable"] == ["done", "merged-while-pooled", "never-held"]
+    assert (python["reapable"], python["closeOnRetire"]) == ([], [])
+    assert python["inFlight"] == {
+        "o/r#301": True, "o/r#337": True, "o/r#9": True, "o/r#5": True,
+        "o/r#305": False, "o/r#306": False, "o/r#307": True, "o/r#404": True}
+    assert python["networkRunning"] == 1
+    assert python["networkSnapshot"] == {
+        **{k: v for k, v in _snapshot().items()
+           if k not in ("daemon", "identity", "offers")},
+        "pid": 4321, "startedAt": 1794000000, "pk": SELF, "onion": "abc.onion",
+        "offers": [{"outcome": None, "endedAt": None, "executorHere": None,
+                    "notTaking": "", **o} for o in _snapshot()["offers"]],
+    }
+    assert [r["network"] for r in python["records"]][:3] == [None, TASK, ISSUE_TASK]
+
+
+#: What the daemon package's bench answered `GET /state` with (see
+#: ``test_network_parity.py``).
+with open(os.path.join(os.path.dirname(__file__), "daemon_snapshots.json"),
+          encoding="utf-8") as _f:
+    DAEMON = json.load(_f)
+
+
+def _offered(snapshot: dict):
+    """A run booked for each offer of ``snapshot``, and one it never held, looked at as
+    the snapshot was written."""
+    tasks = [o["taskId"] for o in snapshot["offers"]] + ["github.com/acme/widgets#review:pr-7@x"]
+    records = [net(run_id=f"offer-{n}", dispatched_at=snapshot["updatedAt"] - 600,
+                   pr_number=n + 1, network=task) for n, task in enumerate(tasks)]
+    return records, ev(), snapshot["updatedAt"]
+
+
+@pytest.mark.parametrize("name", list(DAEMON))
+def test_a_snapshot_of_the_stand_in_daemon_is_read_the_same_by_both(name, kolkata):
+    records, evidence, now = _offered(DAEMON[name])
+    payload = _payload(records, evidence, now=now, snapshot=DAEMON[name])
+    assert _swift(payload) == _python_decoding(payload)
+
+
+def test_the_stand_in_daemons_snapshots_are_read_for_what_they_say(kolkata):
+    def read(name: str) -> dict:
+        records, evidence, now = _offered(DAEMON[name])
+        return _python(records, evidence, now=now, snapshot=DAEMON[name])
+
+    def first(name: str) -> tuple[str, str]:
+        verdict = read(name)["states"]["offer-0"]
+        return verdict["state"], verdict["reason"]
+
+    assert first("joining") == (A.FAILED, "the network holds no such offer")
+    held = DAEMON["requester-pooled"]["offers"][0]["notTaking"]
+    assert held and first("requester-pooled") == (
+        A.STARTING, f"in the pool, not taken here: {held}")
+    other = DAEMON["requester-claimed"]["offers"][0]["executor"][:8]
+    assert len(other) == 8 and first("requester-claimed") == (A.RUNNING, f"running on {other}")
+    assert first("requester-done") == (A.FINISHED, f"finished on {other}")
+    assert first("too-long") == (
+        A.STARTING, "in the pool, not taken here: this machine takes jobs of at most 12 h "
+                    "and this one needs 24")
+    left = DAEMON["left-until"]["offers"][0]
+    until = left["leftUntil"]
+    assert left["notTaking"].endswith(time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(until)))
+    assert first("left-until") == (
+        A.STARTING, "in the pool, not taken here: this machine failed at it or gave it back, "
+                    "and leaves it to the others until "
+                    + time.strftime("%H:%M", time.gmtime(until + 5.5 * 3600)))
+    assert first("capped") == (A.FINISHED, "finished on this machine, its reported cost capped")
+    assert DAEMON["capped"]["offers"][0]["outcome"]["capped"] is True
+    assert "capped" not in DAEMON["requester-done"]["offers"][0]["outcome"]
+    runs = read("executor-finished")["networkSnapshot"]["runs"]
+    assert [r["state"] for r in runs] == ["finished"] and "log" not in runs[0]
+    assert "log" not in DAEMON["executor-finished"]["runs"][0]
+    assert read("executor-running")["networkRunning"] == 1
+    waiting, refused = (read(name)["networkSnapshot"]["pools"][0]
+                        for name in ("joining", "join-failed"))
+    assert (waiting["joining"], waiting["joinFailed"], len(waiting["members"])) == (True, "", 1)
+    assert (refused["joining"], refused["joinFailed"], len(refused["members"])) == (
+        False, "that invite is no longer good", 1)
+    assert DAEMON["requester-pooled"]["pools"][0]["joining"] is False
+
+
+def _spoil(edit) -> dict:
+    snapshot = _snapshot()
+    edit(snapshot)
+    return snapshot
+
+
+#: The daemon's answer, damaged one way at a time. Both decoders read each the same.
+_SPOILT_SNAPSHOTS = {
+    "no answer": None,
+    "not an object": ["offers"],
+    "empty": {},
+    "no offers list": _spoil(lambda s: s.pop("offers")),
+    "offers of the wrong type": _spoil(lambda s: s.update(offers={"t": 1})),
+    "no offers at all": _spoil(lambda s: s.update(offers=[])),
+    "sections of the wrong type": _spoil(lambda s: s.update(
+        daemon=7, identity=["pk"], transport="ready", docker=None, model=3,
+        admit="2", pools={"id": "p"}, runs="none", updatedAt="soon")),
+    "numbers that are not": _spoil(lambda s: (
+        s["admit"].update(slots=True, at="now"),
+        s["daemon"].update(pid=1e300, startedAt=False),
+        s["offers"][0].update(attempt="1", requests=2.9, refused=1e19, endedAt=True,
+                              offeredAt="then"),
+        s["offers"][2]["outcome"].update(usd="0.42", tokens=True),
+        s["runs"][0].update(exit=12.5, startedAt="then"),
+        s["pools"][0]["tasks"][0].update(hours=12.0, claimedAt=None),
+        s["pools"][0]["members"][0].update(maxAcceptedH=True, lastSeen="x"))),
+    "flags that are not": _spoil(lambda s: (
+        s["pools"][0].update(left=1, joining=1, returning="true", unseated=1),
+        s["pools"][0]["members"][0].update(self=1, reachable="yes"),
+        s["pools"][0]["tasks"][0].update(offeredHere=1.0, executorHere=1),
+        s["offers"][0].update(executorHere=0), s["offers"][3].update(executorHere="yes"),
+        s["offers"][2]["outcome"].update(ok=1, capped=1))),
+    "text that is not": _spoil(lambda s: (
+        s["identity"].update(pk=5, onion=None),
+        s["transport"].update(state=True, detail=["x"]),
+        s["offers"][0].update(state=3, executor=None, pool=1, kind=None, item=[],
+                              title=False, reason={"why": "x"}),
+        s["runs"][0].update(state=None, taskId=9, log=False),
+        s["offers"][3].update(notTaking=["x"]),
+        s["pools"][0].update(path=1, identity=None, hash=[], notTaking=5, joinFailed=["x"]),
+        s["pools"][0]["tasks"][0].update(offeredBy=["a", 2, None], kind=4))),
+    "rows without their identity": _spoil(lambda s: (
+        s["offers"].extend([{"state": "done"}, "x", 3, {"taskId": ""}, {"taskId": 5}]),
+        s["runs"].extend([{"taskId": TASK, "state": "running"}, None, {"runId": ""}]),
+        s["pools"].extend([{"path": "/no/id"}, [], {"id": ""}]),
+        s["pools"][0]["members"].extend([{"self": True}, 4]),
+        s["pools"][0]["tasks"].extend([{"kind": "x"}, "t"]))),
+    "an outcome of the wrong type": _spoil(lambda s: s["offers"][2].update(outcome=[True])),
+    "a finished run and no flag": _spoil(lambda s: (
+        s["runs"][0].update(state="finished"),
+        s["pools"][0]["tasks"][0].update(executorHere=False))),
+    "the offers' own word on where they run": _spoil(lambda s: (
+        s["offers"][0].update(executorHere=False),
+        s["offers"][1].update(executorHere=False),
+        s["offers"][2].update(executorHere=False),
+        s["offers"][3].update(state="claimed", executor=PEER, executorHere=True))),
+    "offers that say why they ended": _spoil(lambda s: (
+        s["offers"][0].update(state="failed", reason="the container exited 137"),
+        s["offers"][3].update(state="cancelled", reason="merged"))),
+    "a pool this machine left": _spoil(lambda s: s["pools"][0].update(left=True)),
+    "a pool whose invite waits for its maker": _spoil(
+        lambda s: s["pools"][0].update(joining=True)),
+    "a pool whose last invite came to nothing": _spoil(
+        lambda s: s["pools"][0].update(joinFailed="no-seat")),
+    "a pool this machine is returning to": _spoil(
+        lambda s: s["pools"][0].update(returning=True)),
+    "a pool that has no seat for this machine": _spoil(
+        lambda s: s["pools"][0].update(returning=True, unseated=True)),
+    "a pool whose jobs this machine does not take": _spoil(lambda s: (
+        s["pools"][0].update(notTaking="docker is down: no engine"),
+        s["offers"][3].update(notTaking="docker is down: no engine"))),
+    "rows as an earlier daemon wrote them": _spoil(lambda s: (
+        s["pools"][0].pop("notTaking"), s["offers"][3].pop("notTaking"),
+        s["pools"][0].pop("joining"), s["pools"][0].pop("joinFailed"),
+        s["pools"][0].pop("returning"), s["pools"][0].pop("unseated"),
+        s["offers"][2]["outcome"].pop("capped"),
+        s["runs"][0].update(log="/l/1"), s["runs"][1].update(log=""))),
+    "the same task offered twice": _spoil(lambda s: s["offers"].append(
+        {"taskId": TASK, "state": "done", "executor": SELF, "outcome": {"ok": True}})),
+    "members nobody asked for": _spoil(lambda s: (
+        s.update(extra={"k": [1, 2]}), s["offers"][0].update(more=True))),
+}
+
+
+@pytest.mark.parametrize("snapshot", _SPOILT_SNAPSHOTS.values(),
+                         ids=list(_SPOILT_SNAPSHOTS))
+def test_a_damaged_snapshot_is_read_the_same_by_both(snapshot):
+    records, evidence = _networked()
+    payload = _payload(records, evidence, snapshot=snapshot)
+    assert _swift(payload) == _python_decoding(payload)
+
+
+def test_only_a_snapshot_with_an_offers_list_says_anything_about_a_run():
+    """Anti-vacuity for the table above, and the rule it protects: of the damaged
+    snapshots, the ones that lost their offers leave every network run unknown, and
+    only the one that truly lists none fails them."""
+    records, evidence = _networked()
+
+    def states(name: str) -> set[str]:
+        out = _python(records, evidence, snapshot=_SPOILT_SNAPSHOTS[name])
+        return {v["state"] for run, v in out["states"].items()
+                if run not in ("local", "untracked:o/r#404", "merged-while-pooled")}
+
+    for silent in ("no answer", "not an object", "empty", "no offers list",
+                   "offers of the wrong type"):
+        assert states(silent) == {A.UNKNOWN}, silent
+    assert states("no offers at all") == {A.FAILED, A.STARTING}
+    here = _python(records, evidence, snapshot=_SPOILT_SNAPSHOTS["a finished run and no flag"])
+    assert here["states"]["claimed-here"]["reason"] == "running on eeeeffff"
+    assert here["networkRunning"] == 0
+
+
+def test_the_spoilt_snapshots_that_carry_the_offers_own_fields_reach_them():
+    """Anti-vacuity for the three rows of the table that set an offer's own word, its
+    reason and a pool's ``left``."""
+    records, evidence = _networked()
+
+    def read(name: str) -> dict:
+        return _python(records, evidence, snapshot=_SPOILT_SNAPSHOTS[name])
+
+    told = read("the offers' own word on where they run")["states"]
+    assert {run: told[run]["reason"] for run in (
+        "claimed-here", "claimed-by-pool", "done", "pooled")} == {
+        "claimed-here": "running on eeeeffff",
+        "claimed-by-pool": "running on 99998888",
+        "done": "finished on aaaabbbb, its reported cost capped",
+        "pooled": "running on this machine"}
+    why = read("offers that say why they ended")["states"]
+    assert (why["claimed-here"]["reason"], why["pooled"]["reason"]) == (
+        "refused by the network: the container exited 137",
+        "withdrawn from the network: merged")
+    held = read("a pool whose jobs this machine does not take")
+    assert held["networkSnapshot"]["pools"][0]["notTaking"] == "docker is down: no engine"
+    assert held["states"]["pooled"]["reason"] == \
+        "in the pool, not taken here: docker is down: no engine"
+    earlier = read("rows as an earlier daemon wrote them")
+    assert (earlier["states"]["pooled"]["reason"], earlier["states"]["done"]["reason"]) == (
+        "in the pool", "finished on this machine")
+    assert "log" not in earlier["networkSnapshot"]["runs"][0]
+    assert read("a pool this machine left")["networkSnapshot"]["pools"][0]["left"] is True
+    assert read("flags that are not")["networkSnapshot"]["pools"][0]["left"] is False
+
+    def join(name: str) -> tuple[bool, str]:
+        pool = read(name)["networkSnapshot"]["pools"][0]
+        return pool["joining"], pool["joinFailed"]
+
+    assert join("a pool whose invite waits for its maker") == (True, "")
+    assert join("a pool whose last invite came to nothing") == (False, "no-seat")
+    assert join("flags that are not") == (False, "") == join("text that is not")
+    assert join("rows as an earlier daemon wrote them") == (False, "")
+
+    def seat(name: str) -> tuple[bool, bool]:
+        pool = read(name)["networkSnapshot"]["pools"][0]
+        return pool["returning"], pool["unseated"]
+
+    assert seat("a pool this machine is returning to") == (True, False)
+    assert seat("a pool that has no seat for this machine") == (True, True)
+    assert seat("flags that are not") == (False, False) == seat(
+        "rows as an earlier daemon wrote them")
+
+
+@pytest.mark.parametrize("value", [7, "", None, True, ["t"], {"taskId": "t"}],
+                         ids=repr)
+def test_a_task_id_that_is_not_text_is_read_the_same_by_both(value):
+    """A record whose ``network`` did not survive its trip is a local run on both
+    sides, judged by its pid."""
+    payload = _payload([rec()], ev(processes={4242: proc()}, tails={"pts/3": WORKING},
+                                   network=NO_DAEMON))
+    payload["records"][0]["network"] = value
+    swift, python = _swift(payload), _python_decoding(payload)
+    assert swift == python
+    assert python["states"]["r1"]["reason"] == "pid 4242 alive; working"
+    assert python["capLoad"] == ["r1"]
+
+
+def test_a_record_carrying_a_removed_meshs_keys_is_read_the_same_by_both():
+    """The keys a removed mesh wrote into the book name no network run."""
+    payload = _payload([rec()], ev(processes={4242: proc()}, tails={"pts/3": WORKING},
+                                   network=NO_DAEMON))
+    payload["records"][0].update(placement="mesh-peer", node="brick",
+                                 workKey="review:github.com/o/r#337@abc",
+                                 claimSeenAt=T0 - 1)
+    swift, python = _swift(payload), _python_decoding(payload)
+    assert swift == python
+    assert python["states"]["r1"]["reason"] == "pid 4242 alive; working"
+    assert python["records"][0]["network"] is None
+
+
+@pytest.mark.parametrize("value", [None, [], "claimed", {TASK: "claimed"},
+                                   {TASK: {"state": 3, "executorHere": 1, "ok": "yes"}},
+                                   {TASK: {"state": "pooled", "notTaking": "x"}},
+                                   {TASK: {"state": "pooled", "notTaking": 4}},
+                                   {TASK: {"state": "done", "ok": True, "capped": True}},
+                                   {TASK: {"state": "done", "ok": True, "capped": 1}}],
+                         ids=repr)
+def test_network_evidence_that_did_not_decode_is_read_the_same_by_both(value):
+    payload = _payload([net()], ev(network=offer("claimed", PEER, here=True)))
+    payload["evidence"]["network"]["value"] = value
+    assert _swift(payload) == _python_decoding(payload)

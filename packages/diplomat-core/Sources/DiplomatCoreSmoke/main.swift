@@ -1675,7 +1675,7 @@ check(AgentDispatchGate.decide(source: .panel, banned: false, agentOnPR: false,
 check(AgentDispatchGate.decide(source: .auto, banned: false, agentOnPR: false,
                                atCapacity: true, unaffordable: true,
                                lowDisk: true) == .lowDisk,
-      "the disk outranks capacity and the budget — a freed bay frees no space")
+      "the disk outranks capacity and the budget - a freed bay frees no space")
 check(AgentDispatchGate.decide(source: .auto, banned: false, agentOnPR: true,
                                atCapacity: false,
                                lowDisk: true) == .inFlight,
@@ -1837,6 +1837,16 @@ check(AgentDispatchGate.budgetDecide([], floor: 20).affordable,
 let tie = AgentDispatchGate.budgetDecide(windows(30, 30, 10, 10), floor: 20)
 check(tie.window == windowFirst, "the first-listed ceiling wins an exact tie")
 check(tie.unit == AgentDispatchGate.unitPct, "a rate limit decides in percentages")
+let beyond = AgentDispatchGate.budgetDecide(windows(50, nil, 100.5, nil), floor: 20)
+check(beyond.affordable && !beyond.measured && beyond.needed == 20,
+      "a task priced above the whole window prices nothing: the floor answers")
+let whole = AgentDispatchGate.budgetDecide(windows(50, nil, 100, nil), floor: 20)
+check(!whole.affordable && whole.measured && whole.needed == 100,
+      "…and one priced at exactly the window still holds the work")
+let dear = AgentDispatchGate.budgetDecide([("key", 120, 100.5)], floor: 20,
+                                          unit: AgentDispatchGate.unitUsd)
+check(dear.affordable && dear.measured && dear.needed == 100.5,
+      "money has no whole window: a hundred dollars and more is a price like any other")
 
 // The same arithmetic in the other currency. Nothing in the gate may assume a
 // percentage: a $255 balance is not 255% of anything.
@@ -2204,7 +2214,7 @@ do {
         mergedPRs: .present([]), liveAgents: .present([:])),
         roots: [], now: now, limit: 2)
     check(t.capLoad == ["auto"],
-      "the cap counts automatic agents — not a click")
+      "the cap counts automatic agents - not a click")
     check(t.freeSlots == 1, "one of two bays filled")
     check(t.inFlight(item: "o/r#337"), "and the PR they are both on reads in-flight")
     check(!t.inFlight(item: "o/other#337"), "…while #337 in another repo does not")
@@ -3689,6 +3699,7 @@ do {
 print("pipeline linear teams assertions passed")
 
 try await gitlabSmoke()
+try networkSmoke()
 
 // ---- Golden prompts (cross-platform parity) ----
 // Every prompt mode both front-ends can assemble is compared byte-for-byte against a

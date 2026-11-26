@@ -12,10 +12,11 @@ Safe to run beside a live applet.
 
 from __future__ import annotations
 
+import dataclasses
 import time
 
-from diplomat_runtime import agentregistry, agentstate, apiwatch, review
-from . import probes
+from diplomat_runtime import agentregistry, agentstate, apiwatch, network, review
+from . import diplomacynetwork, probes
 
 
 def run() -> int:
@@ -28,6 +29,10 @@ def run() -> int:
     tokens = (probes.tokens_left(agentregistry.runners_of(records))
               if deadline is not None else None)
     evidence = probes.gather(records, now, tokens=tokens)
+    networked = diplomacynetwork.enabled()
+    evidence = dataclasses.replace(evidence, network=(
+        network.tasks(diplomacynetwork.state()) if networked
+        else agentstate.Observation.unavailable(diplomacynetwork.SWITCHED_OFF)))
     t = agentstate.tick(records, evidence, now, limit, deadline, tuple(review.repo_roots()))
 
     print(f"registry: {agentregistry.runs_path()}")
@@ -42,7 +47,8 @@ def run() -> int:
                       ("merged PRs", evidence.merged_prs),
                       ("agent scan", evidence.live_agents),
                       ("agent sessions", evidence.sessions),
-                      ("token budget", evidence.tokens_left)):
+                      ("token budget", evidence.tokens_left),
+                      *([("network", evidence.network)] if networked else [])):
         print(f"  {name:<15} {_describe(obs)}")
     read, seen = probes.marker_stats()
     if read:

@@ -161,14 +161,17 @@ class ElidedLabel(QLabel):
 
     Custom-painted so the grid never miscomputes a wrapped height (which made
     rows overlap); font size + colour are explicit because QPainter.drawText
-    ignores the stylesheet pen.
+    ignores the stylesheet pen. The text is painted plain, never as HTML, and asks for
+    no width however long it is.
     """
 
     elide = Qt.TextElideMode.ElideRight
 
-    def __init__(self, text: str, font_px: int, color: str) -> None:
+    def __init__(self, text: str, font_px: int, color: str,
+                 mode: Qt.TextElideMode | None = None) -> None:
         super().__init__()
         self._full = text
+        self._mode = self.elide if mode is None else mode
         self._color = QColor(color)
         f = self.font()
         f.setPixelSize(font_px)
@@ -182,16 +185,18 @@ class ElidedLabel(QLabel):
         self._full = text
         self.update()
 
+    def elided(self) -> str:
+        return self.fontMetrics().elidedText(self._full, self._mode, self.width())
+
     def paintEvent(self, event) -> None:  # noqa: N802
         from PySide6.QtGui import QPainter
 
         painter = QPainter(self)
         painter.setPen(self._color)
-        elided = self.fontMetrics().elidedText(self._full, self.elide, self.width())
         painter.drawText(
             self.rect(),
             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-            elided,
+            self.elided(),
         )
         painter.end()
 
@@ -403,6 +408,24 @@ class SectionHeader(ClickableFrame):
         self._chev.setText("▾" if expanded else "▸")
 
 
+class NoticeRow(ClickableFrame):
+    """One line saying something does not work; it opens the screen that shows it."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(2, 0, 2, 0)
+        row.setSpacing(6)
+        row.addWidget(GlyphLabel("⚠", 14, "#FF3B30", font_px=11))
+        self.text = ElidedLabel(text, 10, "#FF3B30")
+        row.addWidget(self.text, 1)
+        chevron = QLabel("›")
+        chevron.setStyleSheet(muted(10))
+        row.addWidget(chevron)
+        self.setToolTip(plain_tooltip(text))
+
+
 class ActivityRow(QFrame):
     """One line in the activity feed: action glyph + detail + source badge + time."""
 
@@ -497,7 +520,8 @@ class QueuedTaskRow(QFrame):
     )
 
     def __init__(self, *, task_id: str, label: str, glyph: str, hex_color: str,
-                 paused: bool, cancellable: bool = False, cancel_help: str | None = None) -> None:
+                 paused: bool, cancellable: bool = False, refusal: str = "",
+                 cancel_help: str | None = None) -> None:
         super().__init__()
         self._task_id = task_id
         self._press: QPointF | None = None
@@ -525,6 +549,10 @@ class QueuedTaskRow(QFrame):
         )
         status.setStyleSheet(muted(9))
         col.addWidget(status)
+        if refusal:
+            self.refusal = ElidedLabel(f"not offered: {refusal}", 9, "#FF9500")
+            self.refusal.setToolTip(plain_tooltip(refusal))
+            col.addWidget(self.refusal)
         row.addLayout(col, 1)
 
         if cancellable:
@@ -677,6 +705,55 @@ class RunningTaskRow(QFrame):
         row.addLayout(col, 1)
 
 
+class NetworkTaskRow(ClickableFrame):
+    """A Diplomacy Network job: offered to a pool, run in a container on whichever
+    machine claimed it. It has no window, so the row opens the Network screen."""
+
+    #: Carries the run id.
+    forget_requested = Signal(str)
+
+    _HELP = "Open the Network screen."
+    _FORGET_HELP = "Withdraw this job from the pool and remove it from the list."
+
+    def __init__(self, *, run_id: str, label: str, detail: str, glyph: str,
+                 hex_color: str) -> None:
+        super().__init__()
+        self._run_id = run_id
+        self.setToolTip(self._HELP)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet(
+            "NetworkTaskRow { background-color: rgba(128,128,128,0.06);"
+            " border-radius: 6px; }"
+        )
+        row = QHBoxLayout(self)
+        row.setContentsMargins(6, 6, 6, 6)
+        row.setSpacing(8)
+        row.addWidget(IconChip(glyph, hex_color, 22, active=True),
+                      0, Qt.AlignmentFlag.AlignVCenter)
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        col.addWidget(ElidedLabel(label, 10, "#d8dbde"))
+        self.status = QLabel(f"{glyphs.G_NETWORK} {detail}")
+        self.status.setTextFormat(Qt.TextFormat.PlainText)
+        self.status.setStyleSheet(f"color: {glyphs.AGENT_LIVE}; font-size: 9px;")
+        col.addWidget(self.status)
+        row.addLayout(col, 1)
+        self.forget = QPushButton("forget", self)
+        self.forget.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.forget.setToolTip(self._FORGET_HELP)
+        self.forget.setStyleSheet(
+            f"QPushButton {{ color: {glyphs.MUTED}; background-color: transparent;"
+            " border: none; border-radius: 8px; padding: 2px 7px;"
+            " font-size: 9px; font-weight: 600; }"
+            "QPushButton:hover { color: #FF3B30; }"
+        )
+        self.forget.clicked.connect(self._forget)
+        row.addWidget(self.forget, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    def _forget(self) -> None:
+        self.forget_requested.emit(self._run_id)
+
+
 class StartingTaskRow(QFrame):
     """A queued task whose dispatch is under way — clicked, or reached by the drain —
     waiting on a terminal spawn that takes seconds.
@@ -693,9 +770,13 @@ class StartingTaskRow(QFrame):
         "already, like any automatic agent."
     )
 
-    def __init__(self, *, label: str, glyph: str, hex_color: str) -> None:
+    OFFERING_HELP = ("The daemon has not answered this job's offer. Diplomat asks it "
+                     "again until it does.")
+
+    def __init__(self, *, label: str, glyph: str, hex_color: str,
+                 offering: bool = False) -> None:
         super().__init__()
-        self.setToolTip(self._HELP)
+        self.setToolTip(self.OFFERING_HELP if offering else self._HELP)
         self.setStyleSheet(
             "StartingTaskRow { background-color: rgba(128,128,128,0.06);"
             " border-radius: 6px; }"
@@ -710,9 +791,9 @@ class StartingTaskRow(QFrame):
         col = QVBoxLayout()
         col.setSpacing(1)
         col.addWidget(ElidedLabel(label, 10, "#d8dbde"))
-        status = QLabel(f"{glyphs.G_STARTING} starting")
-        status.setStyleSheet(f"color: {glyphs.AGENT_LIVE}; font-size: 9px;")
-        col.addWidget(status)
+        self.status = QLabel(OFFERING_TEXT if offering else f"{glyphs.G_STARTING} starting")
+        self.status.setStyleSheet(f"color: {glyphs.AGENT_LIVE}; font-size: 9px;")
+        col.addWidget(self.status)
         row.addLayout(col, 1)
 
 
@@ -895,14 +976,30 @@ def hline() -> QFrame:
     return line
 
 
-def dispatch_status_text(verdict: str, terminal_title: str) -> str:
+OFFERING_TEXT = "Offering to the pool…"
+
+
+def dispatch_status_text(verdict: str, terminal_title: str, *,
+                         network: bool = False) -> str:
     """The wizard status line for one ``Store.dispatch_agent`` verdict - shared by
     all four wizards so refusals read identically everywhere (macOS twin:
-    ``statusText(for:terminal:)``)."""
-    from diplomat_runtime import autofix
+    ``statusText(for:terminal:)``). ``network``: the job went to the Diplomacy Network,
+    which opens no terminal."""
+    from datetime import datetime
 
+    from diplomat_runtime import autofix
+    from diplomat_runtime.models import Fmt
+
+    from . import diplomacynetwork
+
+    sentence = getattr(verdict, "sentence", None)
+    if sentence:
+        return f"Not offered: {sentence}"
+    if verdict == diplomacynetwork.VERDICT_OFFERING:
+        return OFFERING_TEXT
     if verdict == "spawned":
-        return f"Launched {terminal_title}"
+        return (f"Offered to the pool · {Fmt.clock(datetime.now().astimezone())}" if network
+                else f"Launched {terminal_title}")
     if verdict == autofix.VERDICT_IN_FLIGHT:
         return "An agent is already on this PR - see its session above."
     if verdict == autofix.VERDICT_BANNED:
@@ -1339,9 +1436,13 @@ class SliderSetting(QWidget):
         return self._slider.maximum()
 
 
-def settings_card(glyph: str, title: str, tint: str) -> tuple[QWidget, QVBoxLayout, Pill]:
+def settings_card(glyph: str, title: str, tint: str, *,
+                  foreign_title: bool = False) -> tuple[QWidget, QVBoxLayout, Pill]:
     """One block of Settings: a tinted glyph, a caps title, a state pill, and the
     rows under them on a soft card.
+
+    ``foreign_title``: a title this program did not write (a pool id an invite named),
+    elided in the middle to fit.
 
     Returns the host, the layout to add rows to, and the pill — which starts empty
     and hidden, so a card with nothing to report simply has none.
@@ -1361,12 +1462,22 @@ def settings_card(glyph: str, title: str, tint: str) -> tuple[QWidget, QVBoxLayo
     badge = GlyphLabel(glyph, 17, tint, 9)
     badge.setStyleSheet(f"background-color: {tint_bg(tint, 0.16)}; border-radius: 5px;")
     head.addWidget(badge)
-    label = QLabel(title)
-    label.setStyleSheet(
-        "color: palette(mid); font-size: 10px; font-weight: 800; letter-spacing: 1px;"
-    )
-    head.addWidget(label)
-    head.addStretch(1)
+    if foreign_title:
+        label = ElidedLabel(title, 10, host.palette().mid().color().name(),
+                            Qt.TextElideMode.ElideMiddle)
+        font = label.font()
+        font.setWeight(QFont.Weight.ExtraBold)
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1)
+        label.setFont(font)
+        head.addWidget(label, 1)
+    else:
+        label = QLabel(title)
+        label.setTextFormat(Qt.TextFormat.PlainText)
+        label.setStyleSheet(
+            "color: palette(mid); font-size: 10px; font-weight: 800; letter-spacing: 1px;"
+        )
+        head.addWidget(label)
+        head.addStretch(1)
     pill = Pill("")
     head.addWidget(pill)
     outer.addLayout(head)

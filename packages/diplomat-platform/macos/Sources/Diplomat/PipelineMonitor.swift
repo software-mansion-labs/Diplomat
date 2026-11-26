@@ -212,7 +212,8 @@ extension Store {
     /// before the switch went off) and that is not queued, running, cooling down after an
     /// attempt or concluded by one or a Cancel (`ReviewReconcile.decide`). A queued Linear
     /// fix whose repo or text changed is queued again as the same attempt: its agent cannot
-    /// read Linear. Not private: the self-test hands it composed results.
+    /// read Linear. Not one that is starting or that the network carries: a second ask would
+    /// be a second fix run. Not private: the self-test hands it composed results.
     ///
     /// With the master switch off it queues and withdraws nothing (a sync switched off
     /// midway emits no effect). Only a `judged` result, a sync's own (`pipelineRan`) begun in
@@ -254,7 +255,7 @@ extension Store {
                 guard pipelineAsking(effect) else { continue }
                 guard var ask = pipelineAsk(effect) else { continue }
                 if case .fixLinear = effect, let old = requestedWork.first(where: { $0.key == ask.key }),
-                   !startingTasks.contains(where: { $0.id == ask.key }),
+                   !startingTasks.contains(where: { $0.id == ask.key }), old.offered.isEmpty,
                    old.repo != ask.repo || Store.pipelineLinear(old) != Store.pipelineLinear(ask) {
                     forgetRequested(old.key)
                     dropQueuedTask(old.key)
@@ -302,13 +303,19 @@ extension Store {
         let gone = Set(Store.pipelineWithdrawn(requestedWork, by: result, handed: handed, fix: pipelineFix,
                                                fastTrack: pipelineFastTrack))
             .subtracting(startingTasks.map(\.id))
+        var carried = Set<String>()
         for entry in requestedWork where gone.contains(entry.key) {
             forgetRequested(entry.key)
             dropQueuedTask(entry.key)
+            if !entry.offered.isEmpty {
+                carried.insert(entry.offered)
+                continue
+            }
             AuditLog.log("panel", "queue-drop",
                          "\(entry.label(roots: roots.count)) - the pipeline no longer owes it, not run")
         }
         if !gone.isEmpty { refreshAudit() }
+        if !carried.isEmpty { Task { await withdrawUnowed(carried) } }
     }
 
     /// The keys of the pipeline's `asks` no longer owed: one a sync queued while its kind's

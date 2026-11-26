@@ -97,11 +97,86 @@ enum AppConfig {
 
     /// The whole file, or `[:]` when it's absent, unreadable or corrupt — a truncated
     /// or hand-edited file must degrade to defaults, never break a spawn.
-    static func read() -> [String: Any] {
-        guard let data = try? Data(contentsOf: url),
-              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else { return [:] }
-        return obj
+    static func read() -> [String: Any] { parsed() ?? [:] }
+
+    /// `[:]` when no file ever was. Nil when one is there but is no JSON object, or went
+    /// missing less than `NetworkSettings.configGoneGrace` ago (an editor saving by rename
+    /// leaves none for a moment); nil means keep what was last read. Python twin:
+    /// `appconfig.read_known`.
+    static func parsed() -> [String: Any]? {
+        let path = url.path
+        let (object, absent) = load()
+        if let object {
+            readPathsLock.lock()
+            readPaths.insert(path)
+            goneSince[path] = nil
+            readPathsLock.unlock()
+            return object
+        }
+        if absent, wasThere {
+            readPathsLock.lock()
+            let since = goneSince[path] ?? clock()
+            goneSince[path] = since
+            readPathsLock.unlock()
+            if clock() - since >= NetworkSettings.configGoneGrace { forget() }
+        }
+        return absent && !wasThere ? [:] : nil
+    }
+
+    private static var readPaths: Set<String> = []
+    private static var goneSince: [String: TimeInterval] = [:]
+    private static var forgottenCount = 0
+    private static let readPathsLock = NSLock()
+    /// Monotonic; a self-test moves it by hand.
+    static var clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+
+    static var forgottenConfigs: Int {
+        readPathsLock.lock()
+        defer { readPathsLock.unlock() }
+        return forgottenCount
+    }
+
+    private static func forget() {
+        if switchRecord?["config"] as? String == url.path {
+            do { try FileManager.default.removeItem(at: switchRecordURL) } catch {
+                // A record left behind keeps the config unknown: retry next read.
+                guard (error as? CocoaError)?.code == .fileNoSuchFile else { return }
+            }
+        }
+        readPathsLock.lock()
+        readPaths.remove(url.path)
+        goneSince[url.path] = nil
+        forgottenCount += 1
+        readPathsLock.unlock()
+    }
+
+    private static var wasThere: Bool {
+        readPathsLock.lock()
+        let read = readPaths.contains(url.path)
+        readPathsLock.unlock()
+        return read || switchRecord?["config"] as? String == url.path
+    }
+
+    private static func load() -> (object: [String: Any]?, absent: Bool) {
+        let data: Data
+        do { data = try Data(contentsOf: url) } catch {
+            return (nil, (error as? CocoaError)?.code == .fileReadNoSuchFile)
+        }
+        return ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any], false)
+    }
+
+    private static func editable() -> [String: Any]? {
+        let (object, absent) = load()
+        return object ?? (absent ? [:] : nil)
+    }
+
+    static var unreadable: Bool { parsed() == nil }
+
+    static var goneNote: String { "\(url.path) is gone: settings are the defaults" }
+
+    static var unreadableNote: String {
+        "\(url.path) cannot be read as settings: nothing is saved over it, and the "
+            + "Diplomacy Network switch stays as it was last read"
     }
 
     static func string(_ key: String) -> String { read()[key] as? String ?? "" }
@@ -119,20 +194,20 @@ enum AppConfig {
 
     /// Read-modify-write, atomically (Foundation writes to a temp file and renames), so a
     /// process reading concurrently never sees a torn file. Keys the file already holds
-    /// survive a normal write; a file that failed to parse (see `read`) is rewritten from
-    /// defaults, so a *corrupt* file loses the other keys — each then falls back to its
-    /// own default, the same degradation an absent file gets. Never throws into the UI:
-    /// an unwritable HOME is the `false` it returns, which a caller may ignore.
+    /// survive the write; no setter here writes over an unparseable file, which would
+    /// lose them. Never throws into the UI: that file, like an unwritable HOME, returns
+    /// `false`.
     @discardableResult
     static func set(_ key: String, _ value: String) -> Bool {
-        var obj = read()
+        guard var obj = editable() else { return false }
         if value.isEmpty { obj.removeValue(forKey: key) } else { obj[key] = value }
         return write(obj)
     }
 
     /// `set` for an edit that may touch any keys, such as `MachineExclusions.edits`.
     static func update(_ edit: ([String: Any]) -> [String: Any]) -> Bool {
-        write(edit(read()))
+        guard let obj = editable() else { return false }
+        return write(edit(obj))
     }
 
     /// The stored repo roots, trimmed, blank entries dropped: `repoRoots` when it lists
@@ -152,7 +227,7 @@ enum AppConfig {
     /// can never disagree. An empty list removes both.
     @discardableResult
     static func setRepoRoots(_ paths: [String]) -> Bool {
-        var obj = read()
+        guard var obj = editable() else { return false }
         obj.removeValue(forKey: repoRootKey)
         if paths.isEmpty { obj.removeValue(forKey: repoRootsKey) } else { obj[repoRootsKey] = paths }
         return write(obj)
@@ -179,7 +254,7 @@ enum AppConfig {
     /// `set` for a number, which has no "empty means remove" spelling of its own.
     @discardableResult
     static func setInt(_ key: String, _ value: Int) -> Bool {
-        var obj = read()
+        guard var obj = editable() else { return false }
         obj[key] = value
         return write(obj)
     }
@@ -255,7 +330,7 @@ enum AppConfig {
     /// `set` for a flag.
     @discardableResult
     static func setBool(_ key: String, _ value: Bool) -> Bool {
-        var obj = read()
+        guard var obj = editable() else { return false }
         obj[key] = value
         return write(obj)
     }
@@ -264,7 +339,7 @@ enum AppConfig {
     /// in half-steps).
     @discardableResult
     static func setDouble(_ key: String, _ value: Double) -> Bool {
-        var obj = read()
+        guard var obj = editable() else { return false }
         obj[key] = value
         return write(obj)
     }
@@ -282,6 +357,48 @@ enum AppConfig {
     /// Whether automatic work is held back when the rate-limit window is too low to
     /// afford it.
     static var autoBudgetGate: Bool { bool(autoBudgetGateKey, fallback: true) }
+
+    /// The daemon reads this key too, and exits unless it is `true`.
+    static var networkEnabled: Bool { bool(NetworkSettings.enabledKey, fallback: false) }
+
+    /// The switch as last read, for a start while the config is unreadable. The Linux
+    /// applet keeps the same file.
+    static var switchRecordURL: URL {
+        url.deletingLastPathComponent().appendingPathComponent("network-switch.json")
+    }
+
+    private static var switchRecord: [String: Any]? {
+        (try? Data(contentsOf: switchRecordURL))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+    }
+
+    static var switchRecorded: Bool {
+        guard let record = switchRecord,
+              record["config"] as? String == url.path,
+              let on = record[NetworkSettings.enabledKey] as? NSNumber,
+              CFGetTypeID(on) == CFBooleanGetTypeID() else { return false }
+        return on.boolValue
+    }
+
+    static func recordSwitch(_ on: Bool) {
+        let data = try? JSONSerialization.data(
+            withJSONObject: ["config": url.path, NetworkSettings.enabledKey: on],
+            options: [.prettyPrinted, .sortedKeys])
+        try? data?.write(to: switchRecordURL, options: .atomic)
+    }
+
+    static var networkEnabledLastRead: Bool { unreadable ? switchRecorded : networkEnabled }
+
+    static var settingsUnknown: String {
+        unreadable ? NetworkSettings.unknown(path: url.path) : ""
+    }
+
+    static func networkHours(_ key: String) -> Int {
+        NetworkSettings.hours(json: read()[key])
+    }
+
+    /// Whether a job here may reach its adb server; the daemon reads this key per job.
+    static var networkDevices: Bool { bool(NetworkSettings.devicesKey, fallback: false) }
 
     /// How sure the gate must be that a task fits before it starts one, as a
     /// percentage, snapped to a level with a quantile behind it.

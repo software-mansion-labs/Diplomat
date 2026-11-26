@@ -185,7 +185,7 @@ def _jsonable(value: Any) -> Any:
         return sorted(value)
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
-    if isinstance(value, (ProcInfo, SessionState)):
+    if isinstance(value, (ProcInfo, SessionState, NetworkTask)):
         return value.to_json()
     return value
 
@@ -421,6 +421,10 @@ class RunRecord:
     #: does not re-book it as untracked. It holds no bay and blocks no dispatch; it is
     #: kept for the stillness backstop and until its agent leaves.
     released: bool = False
+    #: The task id of the Diplomacy Network offer carrying this run; ``None`` for a run
+    #: spawned here. Such a run has no pid, tty or window here: the daemon says what
+    #: became of it (:attr:`Evidence.network`).
+    network: str | None = None
 
     @property
     def item(self) -> str | None:
@@ -429,8 +433,16 @@ class RunRecord:
         the repo."""
         return item_key_from_url(self.pr_url) if self.pr_number is not None else None
 
+    @property
+    def runs_here(self) -> bool:
+        """Whether its process, screen and window here are evidence about it."""
+        return self.network is None
+
     def to_json(self) -> dict:
+        """Omits ``network`` for a local run, so its record is what an applet without the
+        network writes."""
         return {
+            **({} if self.network is None else {"network": self.network}),
             "runId": self.run_id, "dispatchedAt": self.dispatched_at,
             "prNumber": self.pr_number, "prUrl": self.pr_url, "kind": self.kind,
             "label": self.label, "source": self.source,
@@ -461,7 +473,52 @@ class RunRecord:
             reap_refused_at=_number(obj.get("reapRefusedAt")),
             untracked=_flag(obj.get("untracked")),
             released=_flag(obj.get("released")),
+            network=_text(obj.get("network")) or None,
         )
+
+
+NET_POOLED = "pooled"
+NET_CLAIMED = "claimed"
+NET_DONE = "done"
+NET_FAILED = "failed"
+NET_CANCELLED = "cancelled"
+NET_OVER = frozenset({NET_DONE, NET_FAILED, NET_CANCELLED})
+
+
+@dataclass(frozen=True)
+class NetworkTask:
+    """What the daemon says became of one offered task (:func:`network.tasks`)."""
+
+    #: A ``NET_*`` constant.
+    state: str
+    #: The key of the machine that claimed it; "" while nobody has.
+    executor: str = ""
+    executor_here: bool = False
+    #: Whether the executor reported the work done and well. Only read of ``done``.
+    ok: bool = False
+    #: The daemon's sentence on a ``failed`` or ``cancelled`` offer, or "".
+    reason: str = ""
+    #: The daemon's sentence on why this machine does not take its own ``pooled``
+    #: offer, or "".
+    not_taking: str = ""
+    #: Whether the executor lowered what the job said it used to what it measured.
+    capped: bool = False
+
+    def to_json(self) -> dict:
+        return {"state": self.state, "executor": self.executor,
+                "executorHere": self.executor_here, "ok": self.ok,
+                "reason": self.reason, "notTaking": self.not_taking,
+                "capped": self.capped}
+
+    @staticmethod
+    def from_json(obj: dict) -> "NetworkTask":
+        return NetworkTask(state=_text(obj.get("state")),
+                           executor=_text(obj.get("executor")),
+                           executor_here=_flag(obj.get("executorHere")),
+                           ok=_flag(obj.get("ok")),
+                           reason=_text(obj.get("reason")),
+                           not_taking=_text(obj.get("notTaking")),
+                           capped=_flag(obj.get("capped")))
 
 
 @dataclass(frozen=True)
@@ -509,6 +566,11 @@ class Evidence:
     #: limit this applet can read, which is an ordinary machine and not a broken probe.
     tokens_left: Observation = field(
         default_factory=lambda: Observation.unavailable("not probed"))
+    #: Task id → the daemon's word on that offer. UNAVAILABLE when the daemon did not
+    #: answer: never the same as a snapshot naming no offers, which says every task it
+    #: does not name is gone.
+    network: Observation = field(
+        default_factory=lambda: Observation.unavailable("not probed"))
 
     def to_json(self) -> dict:
         return {"activity": self.activity.to_json(),
@@ -518,7 +580,8 @@ class Evidence:
                 "mergedPrs": self.merged_prs.to_json(),
                 "liveAgents": self.live_agents.to_json(),
                 "sessions": self.sessions.to_json(),
-                "tokensLeft": self.tokens_left.to_json()}
+                "tokensLeft": self.tokens_left.to_json(),
+                "network": self.network.to_json()}
 
     @staticmethod
     def from_json(obj: dict) -> "Evidence":
@@ -548,6 +611,10 @@ class Evidence:
             tokens_left=Observation.from_json(
                 obj.get("tokensLeft"),
                 lambda v: v if isinstance(v, bool) else None),
+            network=Observation.from_json(
+                obj.get("network"),
+                lambda v: ({str(k): NetworkTask.from_json(t) for k, t in v.items()
+                            if isinstance(t, dict)} if isinstance(v, dict) else None)),
         )
 
 
@@ -598,8 +665,12 @@ class Resolution:
     #: Whether the agent's own runner said its turn was over and went well: a CLI's
     #: ``idle`` turn report, or a session that went idle without failing. Every other
     #: ending (an exit, a gone pid, a backstop) is inferred, and says nothing about
-    #: whether the agent finished what it set out to do.
+    #: whether the agent finished what it set out to do. A run the network carried is
+    #: reported when its executor's outcome says it went well.
     reported: bool = False
+    #: Whether the network gave this run's offer up with its attempts used. Every other
+    #: failed network run never ran: withdrawn, refused, or unknown to the daemon.
+    spent: bool = False
 
     @property
     def occupying(self) -> bool:
@@ -784,6 +855,10 @@ def resolve_one(record: RunRecord, evidence: Evidence, now: float,
 
     The first rung skips an untracked run: a landed PR does not make its agent leave,
     so the next scan would only re-book it.
+
+    A run the network carries (:attr:`RunRecord.network`) takes the first rung and then
+    :func:`network_verdict` alone: nothing below is evidence about an agent in a
+    container on whichever machine claimed it, and no clock here ends one.
     """
     def done(state: str, reason: str) -> Resolution:
         return Resolution(record.run_id, state, reason)
@@ -792,6 +867,12 @@ def resolve_one(record: RunRecord, evidence: Evidence, now: float,
             and not record.untracked):
         if record.item in evidence.merged_prs.value:
             return done(MERGED, f"PR #{record.pr_number} is merged")
+
+    if record.network is not None:
+        out = done(*network_verdict(record.network, evidence.network,
+                                    now - record.dispatched_at))
+        return replace(out, reported=out.state == FINISHED,
+                       spent=network_spent(record.network, evidence.network))
 
     if evidence.sentinels.ok and record.run_id in evidence.sentinels.value:
         return done(FINISHED, "completion sentinel present")
@@ -834,7 +915,49 @@ def deadline_applies(record: RunRecord) -> bool:
     and the drift would be silent — a reading about the wrong accounts still reads True
     or False.
     """
-    return not record.untracked and record.source == SOURCE_AUTO
+    return (not record.untracked and record.runs_here
+            and record.source == SOURCE_AUTO)
+
+
+def network_verdict(task: str, network: Observation, age: float) -> tuple[str, str]:
+    """The state of a run the network carries, and the line saying where it is.
+
+    The daemon's word is the whole of the evidence: an unread snapshot leaves the run
+    UNKNOWN. A task the snapshot does not name gets :data:`SPAWN_GRACE` to appear, since
+    the offer and the snapshot are written at different instants; past it the offer
+    never reached the pool.
+    """
+    if not network.ok:
+        return UNKNOWN, f"the network could not be asked: {network.reason or 'unavailable'}"
+    seen = network.value.get(task)
+    if seen is None:
+        if age <= SPAWN_GRACE:
+            return STARTING, f"offered {age:.0f}s ago, not in the pool yet"
+        return FAILED, "the network holds no such offer"
+    place = ("this machine" if seen.executor_here
+             else seen.executor[:8] if seen.executor else "the network")
+    why = f": {seen.reason}" if seen.reason else ""
+    if seen.state == NET_POOLED:
+        return STARTING, "in the pool" + (
+            f", not taken here: {seen.not_taking}" if seen.not_taking else "")
+    if seen.state == NET_CLAIMED:
+        return RUNNING, f"running on {place}"
+    if seen.state == NET_DONE:
+        capped = ", its reported cost capped" if seen.capped else ""
+        return ((FINISHED, f"finished on {place}{capped}") if seen.ok
+                else (FAILED, f"failed on {place}{capped}"))
+    if seen.state == NET_FAILED:
+        return FAILED, f"refused by the network{why}"
+    if seen.state == NET_CANCELLED:
+        return FAILED, f"withdrawn from the network{why}"
+    return UNKNOWN, f"the network reports {seen.state}"
+
+
+def network_spent(task: str, network: Observation) -> bool:
+    """Whether the daemon ended the offer of ``task`` with its attempts used."""
+    seen = network.value.get(task) if network.ok else None
+    return seen is not None and (
+        seen.state == NET_FAILED or (seen.state == NET_DONE and not seen.ok))
 
 
 def past_deadline(record: RunRecord, tokens: Observation, now: float,
@@ -1111,7 +1234,7 @@ def adopt_ttys(records: list[RunRecord], processes: Observation,
     held = {r.tty for r in records if r.tty}
     out = []
     for r in records:
-        if r.tty:
+        if r.tty or not r.runs_here:
             out.append(r)
             continue
         proc = table.get(r.pid) if r.pid is not None else None
@@ -1137,10 +1260,9 @@ def synthesize_untracked(records: list[RunRecord], live_agents: Observation,
     the book could not be read, and one whose run had no pid and ended beside another
     record on its PR. Not another run this applet ended, whose agent goes to a released
     record (:func:`release_ended`), nor a window a backstop failed to close, whose run
-    is kept. They are found the old way - the prompt's ``PR #<n> in <owner>/<repo>`` in
-    the process table - which is why they are a *fallback* and not the identity
-    mechanism: that scan cannot tell two runs on one PR apart, so at most one record per
-    PR is made.
+    is kept. They are found by the prompt's ``PR #<n> in <owner>/<repo>`` in the process
+    table, which is why they are a *fallback* and not the identity mechanism: that scan
+    cannot tell two runs on one PR apart, so at most one record per PR is made.
 
     One is made once and then kept in the book like any other run, because the
     stillness backstop measures a screen against the last one seen and a record
@@ -1201,7 +1323,8 @@ def release_ended(records: list[RunRecord], states: dict[str, Resolution],
     run id carries its pid, and without one it is not released. Not a run a backstop
     ended, whose window is being closed. And only while the released record resolves to
     a live agent, or to one the stillness backstop ends at once, so that its window is
-    closed.
+    closed. And never a run the network carried: an agent the scan sees on its PR was
+    not that run's.
     """
     live = evidence.live_agents.value if evidence.live_agents.ok else {}
     count: dict[str, int] = {}
@@ -1212,7 +1335,8 @@ def release_ended(records: list[RunRecord], states: dict[str, Resolution],
     out = []
     for r in records:
         v = states.get(r.run_id)
-        if (v is None or v.state not in ENDED or v.wedged or v.expired
+        if (not r.runs_here
+                or v is None or v.state not in ENDED or v.wedged or v.expired
                 or r.item not in live
                 or (r.pid is None and count[r.item] != 1)):
             continue
@@ -1254,10 +1378,12 @@ def cap_load(records: list[RunRecord], states: dict[str, Resolution]) -> set[str
     """The run ids holding a bay of this device's automatic-task cap.
 
     Counted by who triggered a run: a panel click is the operator's own act and spends
-    none of the automatic cap. A released agent spends none: its task ended.
+    none of the automatic cap. A released agent spends none: its task ended. Nor does a
+    run the network carries: the bay it takes is on whichever machine claimed it, and
+    the daemon counts that one (:func:`network.admit`).
     """
     return {r.run_id for r in records
-            if r.source == SOURCE_AUTO and not r.released
+            if r.source == SOURCE_AUTO and r.runs_here and not r.released
             and r.run_id in states and states[r.run_id].occupying}
 
 
@@ -1327,16 +1453,44 @@ def close_on_retire(records: list[RunRecord],
                     states: dict[str, Resolution]) -> list[RunRecord]:
     """The automatic runs whose own runner reported the turn over
     (:attr:`Resolution.reported`): their window is closed as they retire, their work
-    being on GitHub or in a report. A panel run is the operator's session, and an
-    untracked agent's ``auto`` is the cap's assumption, not a dispatch.
+    being on GitHub or in a report. A panel run is the operator's session, an
+    untracked agent's ``auto`` is the cap's assumption, not a dispatch, and a run the
+    network carried has no window here.
 
     Unlike :func:`reapable`, a close that reaches nothing withholds no retirement: the
     record a live agent is released to (:func:`release_ended`) is the stillness
     backstop's.
     """
     return [r for r in records
-            if not r.untracked and r.source == SOURCE_AUTO
+            if not r.untracked and r.source == SOURCE_AUTO and r.runs_here
             and r.run_id in states and states[r.run_id].reported]
+
+
+def _outstanding(record: RunRecord, evidence: Evidence) -> bool:
+    """Whether the network is still carrying this run's task, as far as the evidence
+    says. An unread snapshot counts as still carrying it: a withdrawal the daemon has
+    no use for costs one refused request, and a task left in a pool is an agent started
+    on work nobody wants."""
+    if record.network is None:
+        return False
+    if not evidence.network.ok:
+        return True
+    seen = evidence.network.value.get(record.network)
+    return seen is not None and seen.state not in NET_OVER
+
+
+def withdrawable(records: list[RunRecord], states: dict[str, Resolution],
+                 evidence: Evidence) -> list[RunRecord]:
+    """The runs whose offer is withdrawn: their PR merged while the network still
+    carried the task. Each is also :func:`retirable`, and is withdrawn before it is
+    forgotten."""
+    return [r for r in records
+            if r.run_id in states and states[r.run_id].state == MERGED
+            and _outstanding(r, evidence)]
+
+
+def withdraw_on_forget(record: RunRecord, evidence: Evidence) -> str | None:
+    return record.network if _outstanding(record, evidence) else None
 
 
 def free_slots(limit: int, occupied: int) -> int:
@@ -1370,6 +1524,8 @@ class Tick:
     free_slots: int
     #: The instant every verdict below was resolved against.
     now: float = 0.0
+    #: The runs whose offer is withdrawn. See :func:`withdrawable`.
+    withdrawable: list[RunRecord] = field(default_factory=list)
 
     def in_flight(self, item: str) -> bool:
         return in_flight(self.records, self.states, item)
@@ -1402,4 +1558,5 @@ def tick(records: list[RunRecord], evidence: Evidence, now: float, limit: int,
                 cap_load=load, retirable=retirable(records, states),
                 reapable=reapable(records, states),
                 close_on_retire=close_on_retire(records, states),
+                withdrawable=withdrawable(records, states, evidence),
                 free_slots=free_slots(limit, len(load)), now=now)

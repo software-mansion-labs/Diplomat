@@ -1,0 +1,11 @@
+{
+  "name": "diplomacy-network",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Joins this machine to a peer-to-peer network over Tor: one shared task pool per linked repository, every task run in a docker container, every forge action made by the requester.",
+  "scripts": {
+    "daemon": "node src/daemon.js",
+    "test": "node test/run-all.mjs"
+  }
+}

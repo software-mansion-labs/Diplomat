@@ -422,8 +422,10 @@ public enum AgentRegistry {
         return (try? data.write(to: runsPath(), options: .atomic)) != nil
     }
 
+    /// `network` only when set, so a local run's record is what an applet without the
+    /// network writes.
     private static func encode(_ r: AgentState.RunRecord) -> [String: Any] {
-        [
+        var out: [String: Any] = [
             "runId": r.runID, "dispatchedAt": r.dispatchedAt,
             "prNumber": r.prNumber.map { $0 as Any } ?? NSNull(),
             "prUrl": r.prURL, "kind": r.kind, "label": r.label, "source": r.source,
@@ -436,6 +438,8 @@ public enum AgentRegistry {
             "untracked": r.untracked,
             "released": r.released,
         ]
+        if let task = r.network { out["network"] = task }
+        return out
     }
 
     private static func decode(_ d: [String: Any]) -> AgentState.RunRecord? {
@@ -455,7 +459,8 @@ public enum AgentRegistry {
             quietSince: number(d["quietSince"]),
             reapRefusedAt: number(d["reapRefusedAt"]),
             untracked: JSONInput.flag(d["untracked"]),
-            released: JSONInput.flag(d["released"]))
+            released: JSONInput.flag(d["released"]),
+            network: (d["network"] as? String).flatMap { $0.isEmpty ? nil : $0 })
     }
 
     // Python twin: `agentstate._number` / `_integer`. One rule, because the parsers

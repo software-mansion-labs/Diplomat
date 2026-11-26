@@ -187,7 +187,7 @@ public struct ReviewConfig: Codable, Equatable {
     public var effLeaveReviews: Bool { leaveReviews && canLeaveReviews }
     public var effReplyToReviews: Bool { replyToReviews && canReplyToReviews }
     public var effFinalPass: Bool { finalPass && canFinalPass }
-    private var effVerdict: Bool { (finalPass || automaticVerdict == true) && canFinalPass }
+    public var effVerdict: Bool { (finalPass || automaticVerdict == true) && canFinalPass }
     // A real verdict (finalPass) outranks a soft approval — when we're submitting APPROVE /
     // request-changes there's no separate soft-approve review.
     public var effSoftApprove: Bool { softApprove && canSoftApprove && !effVerdict }

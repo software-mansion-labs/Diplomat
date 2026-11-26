@@ -230,6 +230,9 @@ struct AllocatorInstall: Decodable, Equatable {
     /// What went wrong, when the installer says (a restart whose old daemon never exited,
     /// a start beside a daemon that does not answer).
     var error: String?
+    /// What a Diplomacy Network `--stop-daemon` ended in the store its daemon left.
+    var endedOffers = 0
+    var endedRuns = 0
 
     init() {}
 
@@ -250,12 +253,17 @@ struct AllocatorInstall: Decodable, Equatable {
         version = try? c.decode(String.self, forKey: .version)
         outdated = (try? c.decode(Bool.self, forKey: .outdated)) ?? false
         drift = (try? c.decode([String].self, forKey: .drift)) ?? []
+        let ended = try? c.nestedContainer(keyedBy: EndedKeys.self, forKey: .ended)
+        endedOffers = (try? ended?.decode(Int.self, forKey: .offers)) ?? 0
+        endedRuns = (try? ended?.decode(Int.self, forKey: .runs)) ?? 0
     }
 
     private enum CodingKeys: String, CodingKey {
         case mcpRegistered, skillInstalled, ruleInstalled, claudeMdInjected, daemonRunning
-        case installed, version, outdated, drift, error
+        case installed, version, outdated, drift, error, ended
     }
+
+    private enum EndedKeys: String, CodingKey { case offers, runs }
 
     /// This reply, keeping `previous`'s install status when the reply does not report
     /// one, so a reply without `installed` never reads as "not installed".

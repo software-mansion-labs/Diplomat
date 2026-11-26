@@ -1273,6 +1273,18 @@ def test_no_quota_reading_is_no_opinion_not_a_refusal():
     assert autofix.budget_decide([], 20.0).affordable
 
 
+def test_a_task_priced_above_the_whole_window_prices_nothing():
+    beyond = autofix.budget_decide(_windows(50.0, None, 100.5, None), 20.0)
+    assert (beyond.affordable, beyond.measured, beyond.needed) == (True, False, 20.0)
+    assert not autofix.budget_decide(_windows(19.0, None, 7.3e10, None), 20.0).affordable
+    whole = autofix.budget_decide(_windows(50.0, None, 100.0, None), 20.0)
+    assert (whole.affordable, whole.measured, whole.needed) == (False, True, 100.0)
+    # Money has no whole window.
+    dear = autofix.budget_decide([("key", 120.0, 100.5)], 20.0, autofix.UNIT_USD)
+    assert (dear.affordable, dear.measured, dear.needed) == (True, True, 100.5)
+    assert autofix.WHOLE_WINDOW_PCT == 100.0
+
+
 def test_a_window_exactly_at_what_a_task_needs_is_affordable():
     """The boundary is >=, not >: a task that fits precisely is a task that fits,
     and the alternative is a machine that can never spend its last measured slice."""

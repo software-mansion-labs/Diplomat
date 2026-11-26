@@ -287,8 +287,8 @@ enum QueueTest {
         check("more agents up than the cap allows is zero slots, never negative",
               store.freeAutoSlots == 0)
 
-        // 10. Starting a task takes seconds — a `ps` scan, an AppleScript
-        //    terminal — and for all of them it belongs to neither list.
+        // 10. Starting a task takes seconds - a `ps` scan, an AppleScript
+        //    terminal - and for all of them it belongs to neither list.
         //    Held in neither, "execute now" reads as the click DELETING the row: it
         //    goes on the press, and a session appears in its place later, which is
         //    indistinguishable from a task that was dropped.

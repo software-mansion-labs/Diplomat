@@ -28,8 +28,11 @@ on use, so a change lands on the next spawn. ``DIPLOMAT_CONFIG`` relocates the f
 
 from __future__ import annotations
 
+import errno
+import json
 import math
 import os
+import time
 from pathlib import Path
 
 # The gate's own default + range for the task cap, and the shared atomic writer.
@@ -85,6 +88,13 @@ REMOTE_MACHINE_EXCLUDE_UNTIL = "remoteMachineExcludeUntil"
 #: machine's spare cores count this much, any other's the rest. Only reorders machines.
 REMOTE_MACHINE_ARM_BIAS = "remoteMachineArmBias"
 
+#: Beside the config: the Diplomacy Network switch as the config was last read.
+SWITCH_RECORD = "network-switch.json"
+#: Seconds a config that was there may be gone and still be one being saved: the
+#: Diplomacy Network daemon's own tolerance, ``CONFIG_UNREADABLE_POLLS`` reads
+#: ``CONFIG_POLL_MS`` apart. Twin of ``NetworkSettings.configGoneGrace``.
+CONFIG_GONE_GRACE_S = 5.0
+
 DEFAULT_DEVICE_IDLE_FREE_MINUTES = 5
 MAX_DEVICE_IDLE_FREE_MINUTES = 60
 DEFAULT_DEVICE_IDLE_LEASED_MINUTES = 30
@@ -106,7 +116,103 @@ def path() -> Path:
 def read() -> dict:
     """The whole file, or ``{}`` when it's absent, unreadable or not a JSON object —
     a truncated or hand-edited file must degrade to defaults, never break a spawn."""
-    return read_object(path()) or {}
+    data = read_known()
+    return {} if data is None else data
+
+
+_unreadable_reads = 0
+_read_paths: set[str] = set()
+#: Path → when a config that was there was first found gone, on :data:`_clock`.
+_gone_since: dict[str, float] = {}
+_forgotten = 0
+_clock = time.monotonic
+
+
+def unreadable_reads() -> int:
+    """How many reads in this process found the file unknown (:func:`read_known`). One
+    that moved between two looks at it means a setting read in between was a default,
+    the file being caught in a rewrite, however it reads at either look."""
+    return _unreadable_reads
+
+
+def _load() -> tuple[dict | None, bool]:
+    """The file as a JSON object, else ``None``; and whether there is no file."""
+    try:
+        data = json.loads(path().read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, True
+    except (OSError, ValueError):
+        return None, False
+    return (data if isinstance(data, dict) else None), False
+
+
+def _was_there(where: Path) -> bool:
+    return (str(where) in _read_paths
+            or (read_object(where.with_name(SWITCH_RECORD)) or {}).get("config") == str(where))
+
+
+def forgotten_configs() -> int:
+    return _forgotten
+
+
+def _forget(where: Path) -> None:
+    """From now on ``where`` reads as never there."""
+    global _forgotten
+    record = where.with_name(SWITCH_RECORD)
+    if (read_object(record) or {}).get("config") == str(where):
+        try:
+            record.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return  # a record that stays keeps the config unknown: try again next read
+    _read_paths.discard(str(where))
+    _gone_since.pop(str(where), None)
+    _forgotten += 1
+
+
+def read_known() -> dict | None:
+    """The whole file, ``{}`` when there is none and never was, or ``None``: one is
+    there and cannot be read as a JSON object, or one was there and has been gone for
+    less than :data:`CONFIG_GONE_GRACE_S` - an editor that saves by renaming a new file
+    into place leaves none for a moment. Gone longer, it reads as never there. ``None``
+    says nothing: a caller that must not take a default for an answer keeps what it
+    last read."""
+    global _unreadable_reads
+    where = path()
+    data, absent = _load()
+    if data is not None:
+        _read_paths.add(str(where))
+        _gone_since.pop(str(where), None)
+        return data
+    if absent and _was_there(where):
+        since = _gone_since.setdefault(str(where), _clock())
+        if _clock() - since >= CONFIG_GONE_GRACE_S:
+            _forget(where)
+    if absent and not _was_there(where):
+        return {}
+    _unreadable_reads += 1
+    return None
+
+
+def unreadable_note() -> str:
+    return (f"{path()} cannot be read as settings: nothing is saved over it, and the "
+            "Diplomacy Network switch stays as it was last read")
+
+
+def gone_note() -> str:
+    return f"{path()} is gone: settings are the defaults"
+
+
+def _editable() -> dict:
+    """The file's keys, for a read-modify-write. Raises ``OSError`` for a file that is
+    there and cannot be parsed: a write would drop every key it holds."""
+    data, absent = _load()
+    if data is None and not absent:
+        raise OSError(errno.EINVAL,
+                      "the settings file cannot be read, and is not written over",
+                      str(path()))
+    return data or {}
 
 
 def get(key: str, default: str = "") -> str:
@@ -128,11 +234,10 @@ def get_int(key: str, default: int) -> int:
 
 def set_value(key: str, value: str) -> None:
     """Read-modify-write one key (empty value removes it), atomically, so a process
-    reading concurrently never sees a torn file. Keys the file already holds survive a
-    normal write; a file that failed to parse (see :func:`read`) is rewritten from
-    defaults, so a *corrupt* file loses the other keys — each then falls back to its
-    own default, which is the same degradation an absent file gets."""
-    data = read()
+    reading concurrently never sees a torn file. Keys the file already holds survive
+    the write. A file that is there and cannot be parsed is not written over: this
+    raises ``OSError``, as every setter here does (:func:`_editable`)."""
+    data = _editable()
     if value:
         data[key] = value
     else:
@@ -154,7 +259,7 @@ def get_dict(key: str) -> dict:
 
 def set_list(key: str, value: list) -> None:
     """:func:`set_value` for an array: empty removes the key."""
-    data = read()
+    data = _editable()
     if value:
         data[key] = list(value)
     else:
@@ -164,7 +269,7 @@ def set_list(key: str, value: list) -> None:
 
 def set_dict(key: str, value: dict) -> None:
     """:func:`set_value` for an object: empty removes the key."""
-    data = read()
+    data = _editable()
     if value:
         data[key] = dict(value)
     else:
@@ -188,7 +293,7 @@ def repo_roots() -> list[str]:
 def set_repo_roots(paths: list[str]) -> None:
     """Store the repo roots (none removes the key), dropping the legacy
     :data:`REPO_ROOT` in the same write so it can never shadow a later clear."""
-    data = read()
+    data = _editable()
     kept = [p.strip() for p in paths if p.strip()]
     if kept:
         data[REPO_ROOTS] = kept
@@ -209,14 +314,14 @@ def get_bool(key: str, default: bool) -> bool:
 def set_int(key: str, value: int) -> None:
     """Read-modify-write one integer key, atomically — :func:`set_value` for a
     number, which has no "empty means remove" spelling of its own."""
-    data = read()
+    data = _editable()
     data[key] = int(value)
     write_atomic(path(), data)
 
 
 def set_bool(key: str, value: bool) -> None:
     """:func:`set_int` for a flag."""
-    data = read()
+    data = _editable()
     data[key] = bool(value)
     write_atomic(path(), data)
 
@@ -224,7 +329,7 @@ def set_bool(key: str, value: bool) -> None:
 def set_float(key: str, value: float) -> None:
     """:func:`set_int` for a fractional number (the budget floor is a percentage
     the UI offers in half-steps)."""
-    data = read()
+    data = _editable()
     data[key] = float(value)
     write_atomic(path(), data)
 

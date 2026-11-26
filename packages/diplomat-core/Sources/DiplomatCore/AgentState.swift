@@ -136,7 +136,7 @@ public enum AgentState {
     /// process table is one `ps` pass reused for several seconds, so it can predate the
     /// pid file naming what to look for. Past this the run is judged on the evidence
     /// there is: a known pid the table does not hold has ended, and a run with no pid
-    /// file at all never ran (`.failed`) — this applet staged that path itself, so
+    /// file at all never ran (`.failed`) - this applet staged that path itself, so
     /// nothing but the command writes it.
     ///
     /// The same window bounds `AgentSpawner.spawn`'s own wait for the file, measured
@@ -288,6 +288,10 @@ public enum AgentState {
         /// not re-book it as untracked. It holds no bay and blocks no dispatch; it is
         /// kept for the stillness backstop and until its agent leaves.
         public var released: Bool
+        /// The task id of the Diplomacy Network offer carrying this run; `nil` for one
+        /// spawned here. Such a run has no pid, tty or window here: the daemon says what
+        /// became of it (`Evidence.network`).
+        public var network: String?
 
         public init(runID: String, dispatchedAt: TimeInterval, prNumber: Int? = nil,
                     prURL: String = "", kind: String = "", label: String = "",
@@ -295,7 +299,8 @@ public enum AgentState {
                     ledgerKey: String = "", pid: Int? = nil, tty: String = "",
                     quietDigest: String = "", quietSince: TimeInterval? = nil,
                     reapRefusedAt: TimeInterval? = nil,
-                    untracked: Bool = false, released: Bool = false) {
+                    untracked: Bool = false, released: Bool = false,
+                    network: String? = nil) {
             self.runID = runID
             self.dispatchedAt = dispatchedAt
             self.prNumber = prNumber
@@ -311,10 +316,51 @@ public enum AgentState {
             self.reapRefusedAt = reapRefusedAt
             self.untracked = untracked
             self.released = released
+            self.network = network
         }
 
         /// This run's `PRRef.itemKey`; nil for a run about no PR.
         public var item: String? { prNumber == nil ? nil : PRRef.itemKey(url: prURL) }
+
+        /// Whether this device spawned the agent, so its process, screen and window are
+        /// evidence.
+        public var runsHere: Bool { network == nil }
+    }
+
+    /// What the daemon says became of one offered task (`NetworkEvidence.tasks`).
+    public struct NetworkTask: Equatable {
+        public static let pooled = "pooled"
+        public static let claimed = "claimed"
+        public static let done = "done"
+        public static let failed = "failed"
+        public static let cancelled = "cancelled"
+        public static let over: Set<String> = [done, failed, cancelled]
+
+        /// One of the constants above.
+        public var state: String
+        /// The key of the machine that claimed it; "" while nobody has.
+        public var executor: String
+        public var executorHere: Bool
+        /// Whether the executor reported success; read only for `done`.
+        public var ok: Bool
+        /// The daemon's reason for a `failed` or `cancelled` offer.
+        public var reason: String
+        /// Why this machine does not take its own `pooled` offer; "" when it may.
+        public var notTaking: String
+        /// Whether the executor lowered the job's reported usage to what it measured.
+        public var capped: Bool
+
+        public init(state: String, executor: String = "", executorHere: Bool = false,
+                    ok: Bool = false, reason: String = "", notTaking: String = "",
+                    capped: Bool = false) {
+            self.state = state
+            self.executor = executor
+            self.executorHere = executorHere
+            self.ok = ok
+            self.reason = reason
+            self.notTaking = notTaking
+            self.capped = capped
+        }
     }
 
     /// Everything the outside world had to say this tick, each part able to say it had
@@ -349,6 +395,9 @@ public enum AgentState {
         /// publishes no limit this applet can read, which is an ordinary machine and not
         /// a broken probe.
         public var tokensLeft: Observation<Bool>
+        /// Task id → the daemon's word on that offer. `.unavailable` says nothing about
+        /// any run; a snapshot naming no offers says every unnamed task is gone.
+        public var network: Observation<[String: NetworkTask]>
 
         /// Defaults are `.unavailable` rather than empty, so a caller that forgets to
         /// wire a probe gets rows reading "unknown" instead of a machine that
@@ -360,7 +409,8 @@ public enum AgentState {
                     liveAgents: Observation<[String: String]> = .unavailable("not probed"),
                     sessions: Observation<[String: SessionState]> = .unavailable("not probed"),
                     activity: Observation<[String: TurnReport]> = .unavailable("not probed"),
-                    tokensLeft: Observation<Bool> = .unavailable("not probed")) {
+                    tokensLeft: Observation<Bool> = .unavailable("not probed"),
+                    network: Observation<[String: NetworkTask]> = .unavailable("not probed")) {
             self.processes = processes
             self.sentinels = sentinels
             self.tails = tails
@@ -369,6 +419,7 @@ public enum AgentState {
             self.sessions = sessions
             self.activity = activity
             self.tokensLeft = tokensLeft
+            self.network = network
         }
     }
 
@@ -415,8 +466,12 @@ public enum AgentState {
         /// Whether the agent's own runner said its turn was over and went well: a CLI's
         /// `idle` turn report, or a session that went idle without failing. Every other
         /// ending (an exit, a gone pid, a backstop) is inferred, and says nothing about
-        /// whether the agent finished what it set out to do.
+        /// whether the agent finished what it set out to do. A network run is reported
+        /// when its executor's outcome went well.
         public var reported: Bool = false
+        /// Whether the network gave this run's offer up with its attempts used
+        /// (`networkSpent`).
+        public var spent: Bool = false
 
         public var occupying: Bool { AgentState.occupying.contains(state) && !lapsed }
     }
@@ -510,7 +565,7 @@ public enum AgentState {
     /// Split out of `resolve` because it is the one input that is a memory rather than
     /// an observation: absence is only measurable against a memory of presence, and
     /// this way `resolve` stays a function of its arguments alone. What is remembered is
-    /// a digest rather than the screen itself — the book is
+    /// a digest rather than the screen itself - the book is
     /// rewritten every tick and read by other processes, so storing every watched pane's
     /// contents in it would be both large and pointless.
     ///
@@ -625,6 +680,10 @@ public enum AgentState {
     ///
     /// The first rung skips an untracked run: a landed PR does not make its agent leave,
     /// so the next scan would only re-book it.
+    ///
+    /// A network run (`RunRecord.network`) takes the first rung, then `networkVerdict`
+    /// alone: nothing below is evidence about a container on another machine, and no
+    /// clock here ends one.
     public static func resolveOne(_ record: RunRecord, evidence: Evidence,
                                   now: TimeInterval,
                                   deadline: TimeInterval? = nil) -> Resolution {
@@ -634,6 +693,14 @@ public enum AgentState {
         if !record.untracked, let merged = evidence.mergedPRs.value,
            let item = record.item, merged.contains(item), let pr = record.prNumber {
             return done(.merged, "PR #\(pr) is merged")
+        }
+        if let task = record.network {
+            let (state, detail) = networkVerdict(task: task, network: evidence.network,
+                                                 age: now - record.dispatchedAt)
+            var out = done(state, detail)
+            out.reported = state == .finished
+            out.spent = networkSpent(task: task, network: evidence.network)
+            return out
         }
         if let sentinels = evidence.sentinels.value, sentinels.contains(record.runID) {
             return done(.finished, "completion sentinel present")
@@ -676,7 +743,50 @@ public enum AgentState {
     /// nothing about the rung. Two spellings of the same set would drift, and the drift
     /// would be silent — a reading about the wrong accounts still reads true or false.
     public static func deadlineApplies(_ record: RunRecord) -> Bool {
-        !record.untracked && record.source == AgentDispatchGate.Source.auto.rawValue
+        !record.untracked && record.runsHere
+            && record.source == AgentDispatchGate.Source.auto.rawValue
+    }
+
+    /// A network run's state and its one-line detail, from the daemon's word alone. An
+    /// unread snapshot leaves it `.unknown`. A task the snapshot does not name gets
+    /// `spawnGrace` to appear, since offer and snapshot are written at different
+    /// instants; past it the offer never reached the pool.
+    public static func networkVerdict(task: String,
+                                      network: Observation<[String: NetworkTask]>,
+                                      age: TimeInterval) -> (RunState, String) {
+        guard let tasks = network.value else {
+            let why = network.reason.isEmpty ? "unavailable" : network.reason
+            return (.unknown, "the network could not be asked: \(why)")
+        }
+        guard let seen = tasks[task] else {
+            if age <= spawnGrace {
+                return (.starting, "offered \(secs(age)) ago, not in the pool yet")
+            }
+            return (.failed, "the network holds no such offer")
+        }
+        let place = seen.executorHere ? "this machine"
+            : seen.executor.isEmpty ? "the network" : String(seen.executor.prefix(8))
+        let why = seen.reason.isEmpty ? "" : ": \(seen.reason)"
+        switch seen.state {
+        case NetworkTask.pooled:
+            return (.starting, "in the pool"
+                + (seen.notTaking.isEmpty ? "" : ", not taken here: \(seen.notTaking)"))
+        case NetworkTask.claimed: return (.running, "running on \(place)")
+        case NetworkTask.done:
+            let capped = seen.capped ? ", its reported cost capped" : ""
+            return seen.ok ? (.finished, "finished on \(place)\(capped)")
+                : (.failed, "failed on \(place)\(capped)")
+        case NetworkTask.failed: return (.failed, "refused by the network\(why)")
+        case NetworkTask.cancelled: return (.failed, "withdrawn from the network\(why)")
+        default: return (.unknown, "the network reports \(seen.state)")
+        }
+    }
+
+    /// Whether the daemon ended the offer of `task` with its attempts used.
+    public static func networkSpent(task: String,
+                                    network: Observation<[String: NetworkTask]>) -> Bool {
+        guard let seen = network.value?[task] else { return false }
+        return seen.state == NetworkTask.failed || (seen.state == NetworkTask.done && !seen.ok)
     }
 
     /// How long this run has been going, once that is long enough to call it over — nil
@@ -794,12 +904,12 @@ public enum AgentState {
 
     /// A run this applet booked but has no pid for.
     ///
-    /// Two things produce one. A spawn whose shell has not written its pid file yet —
+    /// Two things produce one. A spawn whose shell has not written its pid file yet -
     /// the ordinary first seconds of a run. And a spawn whose terminal opened a window
     /// and never ran the command in it, so the file is not late but absent.
     ///
     /// The agent's own prompt in the process table is asked first. It cannot tell two
-    /// runs on one PR apart, which is exactly why it is a fallback and not the identity —
+    /// runs on one PR apart, which is exactly why it is a fallback and not the identity -
     /// but "an agent for this PR is up" is positive evidence that the command ran.
     private static func resolveWithoutPid(_ record: RunRecord, evidence: Evidence,
                                           now: TimeInterval, age: TimeInterval,
@@ -818,7 +928,7 @@ public enum AgentState {
         }
         // This applet opened the terminal and named the pid path itself, and the inner
         // shell writes it before the agent (`AgentSpawner.shellCommand`). So an absent
-        // file past the grace is the run's OWN report that its command never ran — not
+        // file past the grace is the run's OWN report that its command never ran - not
         // an inference from what the terminal looks like, which is why it survives a
         // terminal that changes how it fails.
         return done(.failed, "its terminal never ran the command "
@@ -997,7 +1107,7 @@ public enum AgentState {
         let scan = liveAgents.value ?? [:]
         let held = Set(records.map(\.tty).filter { !$0.isEmpty })
         return records.map { r in
-            guard r.tty.isEmpty else { return r }
+            guard r.tty.isEmpty, r.runsHere else { return r }
             let found: String
             if let pid = r.pid, let proc = table[pid] {
                 found = proc.tty
@@ -1025,10 +1135,10 @@ public enum AgentState {
     /// operator opened by hand, a run whose row the operator dismissed, every agent when the book could not be read, and one whose
     /// run had no pid and ended beside another record on its PR. Not another run this
     /// applet ended, whose agent goes to a released record (`releaseEnded`), nor a window
-    /// a backstop failed to close, whose run is kept. They are found the old way — the
-    /// prompt's `PR #<n> in <owner>/<repo>` in the process table — which is why they
-    /// are a *fallback* and not the identity mechanism: that scan cannot tell two runs
-    /// on one PR apart, so at most one record per PR is made.
+    /// a backstop failed to close, whose run is kept. They are found by the prompt's
+    /// `PR #<n> in <owner>/<repo>` in the process table, which is why they are a
+    /// *fallback* and not the identity mechanism: that scan cannot tell two runs on one
+    /// PR apart, so at most one record per PR is made.
     ///
     /// One is made once and then kept in the book like any other run, because the
     /// stillness backstop measures a screen against the last one seen and a record
@@ -1094,7 +1204,8 @@ public enum AgentState {
     /// edit made it a dispatch), its run ID carries its pid, and without one it is not
     /// released. Not a run a backstop ended, whose window is being closed. And only while
     /// the released record resolves to a live agent, or to one the stillness backstop
-    /// ends at once, so that its window is closed.
+    /// ends at once, so that its window is closed. And never a network run: an agent the
+    /// scan sees on its PR was not that run's.
     public static func releaseEnded(_ records: [RunRecord], states: [String: Resolution],
                                     evidence: Evidence, now: TimeInterval,
                                     deadline: TimeInterval? = nil) -> [(RunRecord, Resolution)] {
@@ -1104,7 +1215,8 @@ public enum AgentState {
         var taken = Set(records.map(\.runID))
         var out: [(RunRecord, Resolution)] = []
         for r in records {
-            guard let v = states[r.runID], ended.contains(v.state), !v.wedged, !v.expired,
+            guard r.runsHere,
+                  let v = states[r.runID], ended.contains(v.state), !v.wedged, !v.expired,
                   let item = r.item, live[item] != nil,
                   r.pid != nil || count[item] == 1 else { continue }
             var runID = "untracked:\(item)"
@@ -1148,10 +1260,11 @@ public enum AgentState {
     ///
     /// Counted by who triggered a run: a panel click is the operator's own act and
     /// spends none of the automatic budget. A released agent spends none: its task ended.
+    /// Nor does a network run: its bay is on the machine that claimed it (`NetworkAdmit`).
     public static func capLoad(records: [RunRecord],
                                states: [String: Resolution]) -> Set<String> {
         Set(records.filter { r in
-            guard r.source == AgentDispatchGate.Source.auto.rawValue,
+            guard r.source == AgentDispatchGate.Source.auto.rawValue, r.runsHere,
                   !r.released, let s = states[r.runID] else { return false }
             return s.occupying
         }.map(\.runID))
@@ -1225,8 +1338,9 @@ public enum AgentState {
 
     /// The automatic runs whose own runner reported the turn over
     /// (`Resolution.reported`): their window is closed as they retire, their work being
-    /// on GitHub, on GitLab or in a report. A panel run is the operator's session, and an
-    /// untracked agent's `auto` is the cap's assumption, not a dispatch.
+    /// on GitHub, on GitLab or in a report. A panel run is the operator's session, an
+    /// untracked agent's `auto` is the cap's assumption, not a dispatch, and a network
+    /// run has no window here.
     ///
     /// Unlike `reapable`, a close that reaches nothing withholds no retirement: the
     /// record a live agent is released to (`releaseEnded`) is the stillness backstop's.
@@ -1234,9 +1348,31 @@ public enum AgentState {
                                      states: [String: Resolution]) -> [RunRecord] {
         records.filter { r in
             guard !r.untracked, r.source == AgentDispatchGate.Source.auto.rawValue,
-                  let s = states[r.runID] else { return false }
+                  r.runsHere, let s = states[r.runID] else { return false }
             return s.reported
         }
+    }
+
+    /// Whether the network still carries this run's task. An unread snapshot counts as
+    /// yes: a needless withdrawal costs one refused request, a task left in a pool an
+    /// agent on work nobody wants.
+    private static func outstanding(_ record: RunRecord, _ evidence: Evidence) -> Bool {
+        guard let task = record.network else { return false }
+        guard let tasks = evidence.network.value else { return true }
+        return tasks[task].map { !NetworkTask.over.contains($0.state) } ?? false
+    }
+
+    /// The runs whose PR merged while the network still carries their task. Each is
+    /// also `retirable`, and is withdrawn before it is forgotten.
+    public static func withdrawable(records: [RunRecord], states: [String: Resolution],
+                                    evidence: Evidence) -> [RunRecord] {
+        records.filter { states[$0.runID]?.state == .merged && outstanding($0, evidence) }
+    }
+
+    /// The task to withdraw when the operator forgets this run; `nil` when the network
+    /// holds nothing of it.
+    public static func withdrawOnForget(_ record: RunRecord, evidence: Evidence) -> String? {
+        outstanding(record, evidence) ? record.network : nil
     }
 
     /// Bays of the cap with nothing in them. Clamped, because a lowered cap and
@@ -1250,7 +1386,7 @@ public enum AgentState {
     /// Everything one pass of evidence produced. What a caller reads instead of
     /// re-deriving any of it.
     public struct Tick {
-        /// The records as the pipeline left them — ttys adopted, stillness clocks
+        /// The records as the pipeline left them - ttys adopted, stillness clocks
         /// advanced, untracked agents synthesized, ended runs' live agents released. The
         /// caller persists these.
         public var records: [RunRecord]
@@ -1264,6 +1400,8 @@ public enum AgentState {
         /// Of those, the automatic ones whose runner reported them done — whose window
         /// is closed as they retire. See `closeOnRetire(records:states:)`.
         public var closeOnRetire: [RunRecord]
+        /// The runs whose offer is withdrawn. See `withdrawable(records:states:evidence:)`.
+        public var withdrawable: [RunRecord]
         public var freeSlots: Int
         /// The instant every verdict below was resolved against.
         public var now: TimeInterval = 0
@@ -1303,6 +1441,8 @@ public enum AgentState {
                     capLoad: load, retirable: retirable(records: recs, states: states),
                     reapable: reapable(records: recs, states: states),
                     closeOnRetire: closeOnRetire(records: recs, states: states),
+                    withdrawable: withdrawable(records: recs, states: states,
+                                               evidence: evidence),
                     freeSlots: freeSlots(limit: limit, occupied: load.count), now: now)
     }
 }

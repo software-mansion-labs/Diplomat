@@ -102,11 +102,13 @@ export function listenSingleton({ server, socketPath, log, onListening }) {
       }
       try { fs.unlinkSync(socketPath); } catch {}
       takeoverLock = lockFd;
-      server.listen(socketPath, () => {
+      // `onListening` is still registered by the failed listen; prepended, the release
+      // runs before it.
+      server.prependOnceListener('listening', () => {
         releaseTakeoverLock(lockPath, takeoverLock);
         takeoverLock = null;
-        onListening();
       });
+      server.listen(socketPath);
       return;
     }
     startFailed(log, 'server error', String(e));
@@ -114,28 +116,71 @@ export function listenSingleton({ server, socketPath, log, onListening }) {
   server.listen(socketPath, onListening);
 }
 
+/// Holds the socket while something changes a state dir in a daemon's place: it answers
+/// 503 and keeps the startup lock, so a daemon starting meanwhile exits. Resolves to a
+/// release function, or null when a daemon serves or is taking the socket.
+export async function holdSocket(socketPath) {
+  const lockPath = `${socketPath}.lock`;
+  const lock = acquireTakeoverLock(lockPath);
+  if (lock == null) return null;
+  const server = http.createServer((req, res) => {
+    res.writeHead(503, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'no daemon is running: its state is being changed' }));
+  });
+  const listen = () => new Promise((resolve) => {
+    server.once('error', (e) => resolve(e));
+    server.listen(socketPath, () => resolve(null));
+  });
+  let failed = await listen();
+  // A socket nobody answers on is a dead daemon's: removed under the lock, as a
+  // daemon's start does.
+  if (failed?.code === 'EADDRINUSE' && !(await socketHealthy(socketPath))) {
+    try { fs.unlinkSync(socketPath); } catch {}
+    failed = await listen();
+  }
+  if (failed) {
+    releaseTakeoverLock(lockPath, lock);
+    if (failed.code === 'EADDRINUSE') return null;
+    throw failed;
+  }
+  return () => new Promise((resolve) => {
+    server.close(() => {
+      releaseTakeoverLock(lockPath, lock);
+      resolve();
+    });
+    server.closeAllConnections();
+  });
+}
+
 /// What a jsonServer handler returns for a route it does not serve.
 export const NO_ROUTE = Symbol('no route');
 
-/// Reads a JSON request body (capped at 1 MB) and answers with handle(route, body)'s
-/// result, or the statusCode/message of what it throws. `route` is "METHOD /path".
-export function jsonServer(handle) {
+/// Reads a JSON request body and answers with handle(route, body)'s result, or the
+/// statusCode/message of what it throws. `route` is "METHOD /path". A body over `maxBody`
+/// characters is drained unkept and answered 413 `tooLarge`.
+export function jsonServer(handle, { notJson = 'invalid json', maxBody = 1_000_000, tooLarge = 'request body too large' } = {}) {
   return http.createServer((req, res) => {
     const send = (code, obj) => {
       res.writeHead(code, { 'content-type': 'application/json' });
       res.end(JSON.stringify(obj));
     };
     let body = '';
+    let over = false;
     // A StringDecoder, so a multi-byte character split across two 'data' chunks is
     // reassembled rather than turned into U+FFFD.
     req.setEncoding('utf8');
     req.on('data', (c) => {
+      if (over) return;
       body += c;
-      if (body.length > 1_000_000) req.destroy();
+      if (body.length > maxBody) {
+        over = true;
+        body = '';
+      }
     });
     req.on('end', async () => {
+      if (over) return send(413, { error: tooLarge });
       let p = {};
-      try { p = body ? JSON.parse(body) : {}; } catch { return send(400, { error: 'invalid json' }); }
+      try { p = body ? JSON.parse(body) : {}; } catch { return send(400, { error: notJson }); }
       try {
         const result = await handle(`${req.method} ${req.url}`, p);
         if (result === NO_ROUTE) return send(404, { error: `unknown route ${req.url}` });

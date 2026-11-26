@@ -83,6 +83,10 @@ def apiwatch_poll_secs() -> float:
     return max(5.0, secs)
 
 
+#: Under two minutes: the daemon takes no task once its last admit is that old.
+NETWORK_CYCLE_SECS = 30
+
+
 class DiplomatApp:
     #: Set by :meth:`quit`, which a second Ctrl-C can otherwise re-enter.
     _quitting = False
@@ -173,6 +177,15 @@ class DiplomatApp:
         # uninstall (see Store.ensure_allocator_installed_async).
         self.store.ensure_allocator_installed_async()
         self.store.publish_spawn_terminal()
+
+        # The network cycle always runs; it no-ops while the switch is off.
+        self.store.retire_legacy_node_async()
+        if self.store.network_enabled:
+            self.store.start_network_async()
+        self.network_timer = QTimer()
+        self.network_timer.setInterval(NETWORK_CYCLE_SECS * 1000)
+        self.network_timer.timeout.connect(self.store.run_network_cycle_async)
+        self.network_timer.start()
 
         # Optional prefill (also used for manual UI checks).
         prefill = os.environ.get("DIPLOMAT_PREFILL")

@@ -21,6 +21,7 @@ struct SettingsView: View {
             if store.configSaveFailed {
                 Text(AllocatorUI.saveError).font(.system(size: 10)).foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
             // Two columns, same layout as the main panel: who the agents are and what
             // they may do on the left; the panel, the watchers and the environment on
@@ -43,6 +44,7 @@ struct SettingsView: View {
                     commsSection
                     pipelineSection
                     allocatorSection
+                    networkSection
                     updateSection
                 }
                 .frame(width: MainRoot.columnWidth, alignment: .topLeading)
@@ -1344,6 +1346,16 @@ struct SettingsView: View {
     private static let allocatorDetail = AllocatorUI.summary + " Installs an MCP server, "
         + "a skill and an always-on rule. Reclaims a device when its agent dies or it sits "
         + "idle past the limits on the Devices screen."
+
+    // MARK: diplomacy network
+
+    private var networkSection: some View {
+        SettingsCard(symbol: NetworkText.symbol, title: "DIPLOMACY NETWORK", tint: .purple,
+                     pill: StatusPill(text: store.networkEnabled ? "on" : "off",
+                                      tint: store.networkEnabled ? .purple : .secondary)) {
+            NetworkSwitchRow(summary: NetworkText.settingsExplanation)
+        }
+    }
 
     // MARK: applet update
 

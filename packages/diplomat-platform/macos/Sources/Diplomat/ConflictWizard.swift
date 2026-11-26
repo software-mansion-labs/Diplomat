@@ -148,7 +148,7 @@ struct ConflictWizardView: View {
 
     private func spawn() {
         let cfg = config
-        // The SAME pipeline the auto-monitor rides — dedup, ban, tracking — only the
+        // The SAME pipeline the auto-monitor rides - dedup, ban, tracking - only the
         // trigger (this click) and its policies (foreground, none of the automatic-work
         // gates) differ. See `AgentDispatchGate`.
         let term = AgentSpawner.resolved(store.terminal)
@@ -157,7 +157,7 @@ struct ConflictWizardView: View {
                                  prURL: trackingPRURL, prNumber: specificNumber,
                                  authorLogin: nil,
                                  counter: nil, directory: cfg.checkout)
-        status = "Launching \(term.title)…"
+        status = store.dispatchingText(terminal: term.title)
         Task {
             status = statusText(for: await store.dispatchAgent(job, source: .panel),
                                 terminal: term.title)

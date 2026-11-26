@@ -111,7 +111,7 @@ struct AuditWizardView: View {
 
     private func spawn() {
         let cfg = config
-        // The SAME pipeline the auto-monitor rides — only the trigger (this click) and
+        // The SAME pipeline the auto-monitor rides - only the trigger (this click) and
         // its policies (foreground, none of the automatic-work gates) differ. Audits
         // aren't PR-scoped, so there is no dedup key. See `AgentDispatchGate`.
         let term = AgentSpawner.resolved(store.terminal)
@@ -119,8 +119,9 @@ struct AuditWizardView: View {
                                  label: trackingLabel, prompt: cfg.buildPrompt(),
                                  prURL: nil, prNumber: nil,
                                  authorLogin: nil,
-                                 counter: nil, directory: cfg.checkout)
-        status = "Launching \(term.title)…"
+                                 counter: nil, directory: cfg.checkout,
+                                 allows: .init(audit: cfg))
+        status = store.dispatchingText(terminal: term.title)
         Task {
             status = statusText(for: await store.dispatchAgent(job, source: .panel),
                                 terminal: term.title)

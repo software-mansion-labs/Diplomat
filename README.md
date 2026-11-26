@@ -60,6 +60,15 @@ drive the gate that holds automatic work before the limit runs out. [More](docs/
 
 <img alt="Telemetry" src="docs/img/telemetry.png" />
 
+### Diplomacy Network - a pool per repository, shared with the machines you invite
+
+Switched on, Diplomat machines that work on the same repository share one pool of jobs over Tor.
+Whichever has room takes a job and runs it in a locked-down docker container that holds no
+credential; everything it does on the forge is done by the machine that asked, in its operator's
+name, and only what that job needs. [More](docs/network.md)
+
+<img alt="The Network screen" src="docs/img/network.png" />
+
 ### Devices - one simulator per agent
 
 A bundled MCP server gives every agent a simulator or emulator of its own, so parallel agents never
@@ -90,8 +99,8 @@ macOS 26+ and Linux. It clones Diplomat into `~/.diplomat/checkout`, builds it, 
 updates it in place. You need git, a Swift toolchain (Xcode on macOS,
 [swiftly](https://swift.org/install) on Linux), python3 on Linux, and a logged-in
 [`gh`](https://cli.github.com). A GitLab repo root also needs [`glab`](https://gitlab.com/gitlab-org/cli)
-signed in to its host. Optional: Node.js for the device allocator, tmux for Ghostty
-windows or on Linux.
+signed in to its host. Optional: Node.js for the device allocator and the Diplomacy Network, `tor`
+and docker for the Diplomacy Network, tmux for Ghostty windows or on Linux.
 
 ```bash
 szpont --plan          # print what it would do, and do none of it
@@ -116,6 +125,7 @@ Everything here can be changed in Settings (⚙︎).
 | Automatic agents running at once | **2** (1-16) |
 | Hold automatic work when the limit runs low | **on**: 95% confidence; until a task can be priced, keeps 20% of a window (or $1 of credit once Hermes has billed a task) |
 | Give up on an automatic run after 4 h | **on** |
+| Offer every job to the Diplomacy Network | **off** |
 | Agent runner | **Claude Code** (or OpenCode, Hermes) |
 | Comms (Slack watcher) | **off** |
 | Pipeline: rating, fix PRs, fast track, merges with admin rights | **off**, each switch |
@@ -158,7 +168,8 @@ CI if the prompts drift apart.
 | [`diplomat-platform`](packages/diplomat-platform) | the macOS SwiftUI app and the Linux PySide6 applet |
 | [`device-allocator`](packages/device-allocator/README.md) | the one-device-per-agent MCP server and its daemon |
 | [`remote-machines`](packages/remote-machines/README.md) | the MCP server that lists the machines an agent can offload work to over SSH, and their live load |
-| [`daemon-core`](packages/daemon-core/README.md) | what those two share: the socket daemon, its client, and their install into Claude Code |
+| [`diplomacy-network`](packages/diplomacy-network/README.md) | the Diplomacy Network daemon: pools over Tor, jobs in containers, forge actions in the requester's name |
+| [`daemon-core`](packages/daemon-core/README.md) | what those three share: the socket daemon and its client, and for the two MCP servers their install into Claude Code |
 | [`szpont`](packages/szpont/README.md) / [`szpont-npm`](packages/szpont-npm/README.md) | the `szpont` launcher on PyPI and npm |
 </details>
 
@@ -166,4 +177,5 @@ CI if the prompts drift apart.
 
 [The panel](docs/panel.md) · [Actions](docs/actions.md) · [Automatic work](docs/automation.md) ·
 [Settings](docs/settings.md) · [Telemetry](docs/telemetry.md) · [Comms](docs/comms.md) ·
-[Pipeline](docs/pipeline.md) · [Devices](docs/devices.md) · [Development](docs/development.md)
+[Pipeline](docs/pipeline.md) · [Devices](docs/devices.md) · [Diplomacy Network](docs/network.md) ·
+[Development](docs/development.md)

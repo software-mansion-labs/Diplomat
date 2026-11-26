@@ -125,6 +125,18 @@ jobs:
               swift run Diplomat
             test -s "$RUNNER_TEMP/$mode.png"
           done
+      # The Network screen: a daemon with every service ready, three pools (one of them
+      # left) and a task in each state; one still starting, with no pool yet; one whose
+      # services failed; no daemon answering; a setting that did not save; the switch
+      # off. Then the whole panel over the failed services.
+      - name: Headless network-screen render
+        working-directory: packages/diplomat-platform/macos
+        run: |
+          for mode in network-screen network-screen-starting network-screen-failed network-screen-down network-screen-unsaved network-screen-off network-panel; do
+            DIPLOMAT_RENDER=$mode DIPLOMAT_RENDER_OUT="$RUNNER_TEMP/$mode.png" \
+              swift run Diplomat
+            test -s "$RUNNER_TEMP/$mode.png"
+          done
       # The shared-helper self-tests that a runner can host. All pure logic, and none
       # of them touches the runner's real state: OSA_TEST runs bare AppleScript
       # expressions (no `tell application`, so no Automation permission), and
@@ -152,6 +164,9 @@ jobs:
       # its feed, Comms log, run book and config scratch; nothing it queues is drained.
       # PIPELINE_TEST does the same with composed sync results, the core's tick stood
       # in for, so it runs no gh, claude or Linear.
+      # NETWORK_TEST offers jobs to a stand-in daemon on a scratch socket, with a
+      # stand-in installer and process table, and keeps its feed, run book and config
+      # scratch; it starts no daemon and signals no process.
       # REOPEN_TEST hosts the panel in windows it never orders in, re-run on a scratch
       # home and no checkout, so the checks its Settings and Devices screens run find nothing.
       #
@@ -216,6 +231,7 @@ jobs:
           DIPLOMAT_QUEUE_TEST=1 swift run Diplomat
           DIPLOMAT_COMMS_TEST=1 swift run Diplomat
           DIPLOMAT_PIPELINE_TEST=1 swift run Diplomat
+          DIPLOMAT_NETWORK_TEST=1 swift run Diplomat
           DIPLOMAT_SWEEP_TEST=1 swift run Diplomat
           DIPLOMAT_QUOTA_TEST=1 swift run Diplomat
           DIPLOMAT_APIWATCH_TEST=1 swift run Diplomat
@@ -462,4 +478,25 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Discovery, probe, daemon, MCP and installer tests
+        run: npm test
+
+  # The Diplomacy Network daemon. Its default run stands in a loopback transport for Tor,
+  # a fake forge for GitHub and GitLab and a fake docker for the engine, so nothing leaves
+  # the runner; git itself runs for real.
+  node-diplomacy-network:
+    name: Node (diplomacy network) · protocol, transport, requester, executor, daemon tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/diplomacy-network
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: packages/diplomacy-network/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Protocol, transport, requester, executor and daemon tests
         run: npm test

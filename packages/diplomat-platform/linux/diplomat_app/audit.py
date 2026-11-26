@@ -36,13 +36,16 @@ class AuditConfig(RepoConfig):
         """A whole-repo audit needs no user input, so it is always spawnable."""
         return True
 
-    def build_prompt(self) -> str:
-        # Single-sourced in Swift (DiplomatCore) via the diplomat-core CLI.
-        from diplomat_runtime import promptcore
-
-        return promptcore.build_prompt({
+    def prompt_payload(self) -> dict:
+        return {
             "kind": "audit",
             "fixIssues": self.fix_issues,
             "openPRs": self.open_prs,
             **listed_payload((), self.home),
-        })
+        }
+
+    def build_prompt(self) -> str:
+        # Single-sourced in Swift (DiplomatCore) via the diplomat-core CLI.
+        from diplomat_runtime import promptcore
+
+        return promptcore.build_prompt(self.prompt_payload())

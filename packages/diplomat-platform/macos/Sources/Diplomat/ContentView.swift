@@ -5,26 +5,28 @@ import DiplomatCore
 struct ContentView: View {
     @EnvironmentObject var store: Store
     @State private var query = ""
-    /// Which of the seven screens the body shows: Actions ("main"), Devices, Machines, Comms,
-    /// Pipeline, Telemetry or Settings.
+    /// Which of the eight screens the body shows: Actions ("main"), Devices, Machines,
+    /// Network, Comms, Pipeline, Telemetry or Settings.
     @State private var screen: PanelScreen
 
-    enum PanelScreen { case main, devices, machines, comms, pipeline, telemetry, settings }
+    enum PanelScreen { case main, devices, machines, network, comms, pipeline, telemetry, settings }
 
-    /// `showSettings` / `showTelemetry` / `showDevices` / `showMachines` / `showComms` /
-    /// `showPipeline` seed the initial screen — used by the headless render to snapshot those
+    /// `showSettings` / `showTelemetry` / `showDevices` / `showMachines` / `showNetwork` /
+    /// `showComms` / `showPipeline` seed the initial screen - used by the headless render to snapshot those
     /// screens in context.
     /// Defaults to the main view.
     /// `seedPendingUnban` seeds the inline un-ban confirmation for a login (render only).
     /// `seedMutedAudit` pre-mutes Activity filter categories so the filtered feed can be
     /// snapshotted (render only).
     init(showSettings: Bool = false, showTelemetry: Bool = false, showDevices: Bool = false,
-         showMachines: Bool = false, showComms: Bool = false, showPipeline: Bool = false,
+         showMachines: Bool = false, showNetwork: Bool = false, showComms: Bool = false,
+         showPipeline: Bool = false,
          seedPendingUnban: String? = nil, seedMutedAudit: Set<AuditCategory> = []) {
         _screen = State(initialValue: showSettings ? .settings
                                     : showTelemetry ? .telemetry
                                     : showDevices ? .devices
                                     : showMachines ? .machines
+                                    : showNetwork ? .network
                                     : showComms ? .comms
                                     : showPipeline ? .pipeline : .main)
         _pendingUnban = State(initialValue: seedPendingUnban)
@@ -74,6 +76,9 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             case .machines:
                 MachinesScreen(isPresented: presenting(.machines))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            case .network:
+                NetworkScreen(isPresented: presenting(.network))
                     .frame(maxWidth: .infinity, alignment: .leading)
             case .telemetry:
                 TelemetryView(isPresented: presenting(.telemetry))
@@ -139,6 +144,7 @@ struct ContentView: View {
             }.buttonStyle(.borderless).tooltip("Refresh")
             devicesButton
             machinesButton
+            networkButton
             commsButton
             pipelineButton
             Button { withAnimation(.easeInOut(duration: 0.15)) { screen = screen == .telemetry ? .main : .telemetry } } label: {
@@ -254,6 +260,19 @@ struct ContentView: View {
         }
         .buttonStyle(.borderless)
         .tooltip("Machines")
+    }
+
+    private var networkButton: some View {
+        let open = screen == .network
+        return Button {
+            withAnimation(.easeInOut(duration: 0.15)) { screen = open ? .main : .network }
+        } label: {
+            Image(systemName: NetworkText.symbol)
+                .fontWeight(open ? .bold : .regular)
+                .foregroundStyle(open ? Color.accentColor : .primary)
+        }
+        .buttonStyle(.borderless)
+        .tooltip("Network")
     }
 
     // MARK: auto-fix monitor status pill
@@ -430,6 +449,7 @@ struct ContentView: View {
         case .merge:      return .green
         case .bans:       return .red
         case .comms:      return .blue
+        case .network:    return .teal
         case .system:     return .gray
         }
     }
@@ -447,6 +467,8 @@ struct ContentView: View {
         /// key, so the row keeps its identity across the change and animates into
         /// its new place instead of one row vanishing as another appears.
         case starting(Store.QueuedAgentTask)
+        /// A job whose offer the network has not answered yet.
+        case offering(Store.OfferingJob)
         /// An empty slot of the device's cap. Carries its position only, which is all
         /// that distinguishes one from another.
         case freeSlot(Int)
@@ -458,6 +480,7 @@ struct ContentView: View {
             case .session(let r): return "s-\(r.id)"
             case .queued(let q):  return "q-\(q.id)"
             case .starting(let q): return "q-\(q.id)"
+            case .offering(let o): return "o-\(o.id)"
             case .freeSlot(let i): return "free-\(i)"
             }
         }
@@ -466,7 +489,7 @@ struct ContentView: View {
             switch self {
             case .session(let r): return r.status
             case .queued:   return .queued
-            case .starting: return .starting
+            case .starting, .offering: return .starting
             case .freeSlot: return .free
             }
         }
@@ -484,6 +507,7 @@ struct ContentView: View {
     private var agentTaskItems: [AgentTaskItem] {
         let items = store.agentRows.map(AgentTaskItem.session)
             + store.startingTasks.map(AgentTaskItem.starting)
+            + store.networkOffering.map(AgentTaskItem.offering)
             + store.queuedTasks.map(AgentTaskItem.queued)
             + (0..<store.freeAutoSlots).map(AgentTaskItem.freeSlot)
         return items.enumerated()
@@ -497,7 +521,7 @@ struct ContentView: View {
     private var agentTaskList: some View {
         let items = agentTaskItems
         let queued = store.queuedTasks.count
-        let starting = store.startingTasks.count
+        let starting = store.startingTasks.count + store.networkOffering.count
         let free = store.freeAutoSlots
         // Built outside the ViewBuilder: a builder call is where the type-checker is
         // slowest, and CI's runner is slower than this machine.
@@ -512,6 +536,12 @@ struct ContentView: View {
                           expanded: $tasksExpanded,
                           icon: "antenna.radiowaves.left.and.right",
                           caption: caption.isEmpty ? nil : caption)
+            // First: with the network on, every row below waits on what this says is broken.
+            if let trouble = store.networkTrouble {
+                NetworkTroubleRow(text: trouble) {
+                    withAnimation(.easeInOut(duration: 0.15)) { screen = .network }
+                }
+            }
             if tasksExpanded {
                 // Split around the switch that governs the queue, which draws where the
                 // queue starts. `.queued` sorts last, so the two halves are the one
@@ -544,6 +574,7 @@ struct ContentView: View {
                 task: task,
                 tint: agentTaskTint(task.job.kind),
                 paused: store.isHeld(task),
+                refusal: store.networkJobRefusals[task.job.label],
                 onRun: { Task { await store.executeQueuedTask(task.id) } },
                 cancellable: task.job.requested,
                 onCancel: { store.cancelRequestedWork(task.id) },
@@ -551,6 +582,8 @@ struct ContentView: View {
             )
         case .starting(let task):
             StartingTaskRow(task: task, tint: agentTaskTint(task.job.kind))
+        case .offering(let held):
+            OfferingTaskRow(held: held, tint: agentTaskTint(held.job.kind))
         case .freeSlot:
             FreeSlotRow()
         }
@@ -559,8 +592,12 @@ struct ContentView: View {
     private func agentTaskTint(_ kind: String) -> Color { DiplomatUI.agentTaskTint(kind) }
 
     /// Click a row: focus its window. If focus fails the window is gone and the row is
-    /// dismissed by the store — nothing more to do here.
+    /// dismissed by the store - nothing more to do here.
     private func activate(_ row: Store.AgentRow) {
+        guard row.record.runsHere else {
+            withAnimation(.easeInOut(duration: 0.15)) { screen = .network }
+            return
+        }
         Task { _ = await store.activate(row) }
     }
 
@@ -811,7 +848,7 @@ struct ContentView: View {
 /// How an agent task's kind reads, wherever it is drawn. One mapping per axis, so a
 /// task does not change glyph or colour at the moment it stops being queued and
 /// starts being a session.
-private enum DiplomatUI {
+enum DiplomatUI {
     static func agentTaskIcon(_ kind: String) -> String {
         switch kind {
         case "conflicts": return "arrow.triangle.merge"
@@ -856,7 +893,11 @@ private struct AgentRunRow: View {
             // kept, or — for an agent it did not open — the agent's process, walked out to
             // whatever window is showing it. With neither, offering the click and doing
             // nothing would read as a session whose window had gone missing.
-            if !row.isFocusable {
+            if !row.record.runsHere {
+                Button(action: onTap) { content.contentShape(Rectangle()) }
+                    .buttonStyle(.plain)
+                    .tooltip(NetworkText.rowHelp)
+            } else if !row.isFocusable {
                 content.tooltip(AgentRunRow.noTerminalHelp)
             } else {
                 Button(action: onTap) { content.contentShape(Rectangle()) }
@@ -874,7 +915,8 @@ private struct AgentRunRow: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.borderless)
-                .tooltip("Stop tracking — remove from the list.")
+                .tooltip(row.record.runsHere ? "Stop tracking — remove from the list."
+                         : NetworkText.forgetHelp)
             }
         }
         .padding(6)
@@ -909,14 +951,26 @@ private struct AgentRunRow: View {
         HStack(spacing: 3) {
             AgentTaskStatusLabel(status: row.status)
             // WHY nothing is known: what to go and fix, a revoked automation permission
-            // say, is named only there.
-            if row.state == .unknown, !row.reason.isEmpty {
-                Text("· \(row.reason)")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+            // say, is named only there. A network run always says where it is: it has no
+            // window here to look in.
+            if !row.reason.isEmpty {
+                if !row.record.runsHere {
+                    TimelineView(.periodic(from: Date(), by: 30)) { ctx in
+                        why(NetworkText.rowDetail(row.reason, offeredAt: row.record.dispatchedAt,
+                                                  now: ctx.date))
+                    }
+                } else if row.state == .unknown {
+                    why(row.reason)
+                }
             }
         }
+    }
+
+    private func why(_ text: String) -> some View {
+        Text("· \(text)")
+            .font(.system(size: 9))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
     }
 }
 
@@ -968,6 +1022,30 @@ private struct AgentTaskStatusLabel: View {
     }
 }
 
+/// Drawn verbatim: part of the text is the daemon's.
+private struct NetworkTroubleRow: View {
+    let text: String
+    let open: () -> Void
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9))
+                Text(verbatim: text)
+                    .font(.system(size: 10))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right").font(.system(size: 8))
+            }
+            .foregroundStyle(.red)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .tooltip(text)
+    }
+}
+
 // MARK: - Queued agent-task row
 
 /// The switch above the queue: whether a free bay starts the next queued task.
@@ -1008,6 +1086,8 @@ private struct QueuedTaskRow: View {
     /// Its monitor is switched off, so nothing will start this by itself. Worth
     /// saying on the row: "queued" otherwise promises a start that is never coming.
     let paused: Bool
+    /// The network's refusal, when its reason is the job's own.
+    let refusal: String?
     let onRun: () -> Void
     /// False for a monitor's row: dropping one would put it straight back on the next
     /// poll, so the button would do nothing anyone could see.
@@ -1064,6 +1144,10 @@ private struct QueuedTaskRow: View {
                         Text("· monitor off").font(.system(size: 9))
                             .foregroundStyle(.secondary)
                     }
+                }
+                if let refusal {
+                    Text(verbatim: "not offered: \(refusal)").font(.system(size: 9))
+                        .foregroundStyle(.orange).lineLimit(1).tooltip(refusal)
                 }
             }
             Spacer(minLength: 4)
@@ -1146,6 +1230,26 @@ private struct StartingTaskRow: View {
         .padding(6)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.06)))
         .tooltip(StartingTaskRow.help)
+    }
+}
+
+private struct OfferingTaskRow: View {
+    let held: Store.OfferingJob
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 8) {
+            IconBadge(symbol: DiplomatUI.agentTaskIcon(held.job.kind), tint: tint)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(held.rowLabel).font(.caption).lineLimit(1)
+                Text(NetworkText.offering).font(.system(size: 9)).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 4)
+            ProgressView().controlSize(.small)
+        }
+        .padding(6)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.06)))
+        .tooltip(NetworkText.offeringHelp)
     }
 }
 
@@ -1383,8 +1487,8 @@ struct AuditRow: View {
         default:      return .secondary
         }
     }
-    private var icon: String {
-        switch entry.action {
+    static func icon(for action: String) -> String {
+        switch action {
         case "review", "review-req": return "checklist"
         case "review-reply":         return "arrowshape.turn.up.left.fill"
         case "conflicts":            return "arrow.triangle.merge"
@@ -1401,7 +1505,12 @@ struct AuditRow: View {
         case "allocator-install", "allocator-uninstall": return "shippingbox.fill"
         case "machine-pause", "machine-resume", "machine-exclude", "machine-include",
              "machines-install", "machines-uninstall", MachinesScan.action: return "server.rack"
-        case "merge-failed", "spawn-failed", "poll-failed", "warn":
+        case NetworkAudit.offer, NetworkAudit.claimed, NetworkAudit.done, NetworkAudit.withdraw,
+             NetworkAudit.join, NetworkAudit.invite, NetworkAudit.leave, NetworkAudit.start,
+             NetworkAudit.stop:
+            return NetworkText.symbol
+        case "merge-failed", "spawn-failed", "poll-failed", "warn", NetworkAudit.failed,
+             NetworkAudit.unavailable:
             return "exclamationmark.triangle.fill"
         case "poll-recovered":       return "checkmark.circle.fill"
         default:                     return "circle.fill"
@@ -1410,7 +1519,8 @@ struct AuditRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: icon).font(.system(size: 10)).foregroundStyle(sourceColor).frame(width: 16)
+            Image(systemName: Self.icon(for: entry.action)).font(.system(size: 10))
+                .foregroundStyle(sourceColor).frame(width: 16)
             Text(entry.detail).font(.system(size: 10)).lineLimit(2)
             Spacer(minLength: 4)
             Text(entry.source).font(.system(size: 8, weight: .bold)).foregroundStyle(sourceColor)

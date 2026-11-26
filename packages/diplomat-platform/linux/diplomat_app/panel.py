@@ -29,16 +29,17 @@ from PySide6.QtCore import QUrl
 import html
 import time
 
-from diplomat_runtime import activity, agentstate, autofix, review
+from diplomat_runtime import activity, agentstate, autofix, network, review
 from diplomat_runtime.models import Fmt
 from diplomat_runtime.prref import root_label
 from . import deviceallocator, glyphs
 from .commsview import CommsView
 from .devicesview import DevicesView
 from .machinesview import MachinesView
+from .networkview import NetworkView
 from .pipelineview import PipelineView
 from .settingsview import SettingsView
-from .store import Store, tool_by_id
+from .store import NetworkRun, Store, tool_by_id
 from .widgets import (
     ActionCard,
     ActivityRow,
@@ -46,6 +47,8 @@ from .widgets import (
     FreeSlotRow,
     GlyphLabel,
     IconChip,
+    NetworkTaskRow,
+    NoticeRow,
     QueueAutoRunRow,
     QueuedTaskRow,
     ResultRow,
@@ -199,6 +202,12 @@ def _running_detail(agent: autofix.RunningAgent) -> str:
     return " · ".join(parts)
 
 
+def _network_detail(agent: NetworkRun) -> str:
+    """The daemon's word for where a network run is, and how long since its offer."""
+    age = Fmt.duration(time.time() - agent.started_at)
+    return agent.reason if age == "just now" else f"{agent.reason} · offered {age} ago"
+
+
 def _device_detail(dev: dict, allocated: bool, idle_limit: int) -> str:
     """Rich text, idle time coloured toward ``idle_limit``, the leased idle limit."""
     if dev.get("status") == "repairing":
@@ -290,6 +299,16 @@ class Panel(QWidget):
         machines_scroll.setWidget(self.machines_view)
         self._screens["machines"] = self.body.addWidget(machines_scroll)
 
+        # Page: network (the Diplomacy Network's pools and daemon).
+        self.network_view = NetworkView(store)
+        self.network_view.done.connect(self._toggle_network)
+        network_scroll = QScrollArea()
+        network_scroll.setWidgetResizable(True)
+        network_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        network_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        network_scroll.setWidget(self.network_view)
+        self._screens["network"] = self.body.addWidget(network_scroll)
+
         # Page: telemetry (what the monitors cost and what they still owe).
         self.telemetry_view = TelemetryView(store)
         self.telemetry_view.done.connect(lambda: self._set_screen("main"))
@@ -338,6 +357,7 @@ class Panel(QWidget):
         store.devices_changed.connect(self._rebuild_devices)
         store.activity_changed.connect(self._rebuild_left_pane)
         store.tasks_changed.connect(self._rebuild_agent_tasks)
+        store.network_changed.connect(self._rebuild_agent_tasks)
 
         # Poll the device-allocator state file + the shared activity/ban files on a
         # light cadence (cheap file reads), and re-measure the running automatic
@@ -431,6 +451,10 @@ class Panel(QWidget):
         self.machines_btn = _icon_button(glyphs.G_MACHINES, "Machines")
         self.machines_btn.clicked.connect(self._toggle_machines)
         row.addWidget(self.machines_btn)
+
+        self.network_btn = _icon_button(glyphs.G_NETWORK, "Network")
+        self.network_btn.clicked.connect(self._toggle_network)
+        row.addWidget(self.network_btn)
 
         self.comms_btn = _icon_button(glyphs.G_COMMS, "Comms")
         self.comms_btn.clicked.connect(self._toggle_comms)
@@ -763,6 +787,7 @@ class Panel(QWidget):
         _clear_layout(self.tasks_col)
         queued = self.store.queued_tasks
         starting = self.store.starting_tasks
+        offering = self.store.network_offering
         free = self.store.free_auto_slots
         running = self.store.running_tasks
         parts = [f"{len(queued)} queued" if queued else "",
@@ -773,11 +798,18 @@ class Panel(QWidget):
         # would drop the count for as long as its spawn takes. Empty bays are not:
         # a device with nothing to do reads "0", not "2".
         header = SectionHeader(glyph=glyphs.G_TASKS, title="Agent tasks",
-                               count=len(running) + len(starting) + len(queued),
+                               count=(len(running) + len(starting) + len(offering)
+                                      + len(queued)),
                                caption=caption or None,
                                expanded=self._tasks_expanded)
         header.clicked.connect(self._toggle_tasks)
         self.tasks_col.addWidget(header)
+        # Drawn even when folded: every row below waits on this trouble.
+        trouble = self.store.network_trouble
+        if trouble:
+            notice = NoticeRow(trouble)
+            notice.clicked.connect(self._open_network)
+            self.tasks_col.addWidget(notice)
         if not self._tasks_expanded:
             return
         # Ranked together, then drawn in that one order. `sorted` is stable, so a
@@ -787,7 +819,17 @@ class Panel(QWidget):
         ranked: list[tuple[int, QWidget]] = []
         for agent in running:
             glyph, tint = _task_look(agent.kind)
-            ranked.append((agentstate.STATE_ORDER.index(agent.state), RunningTaskRow(
+            rank = agentstate.STATE_ORDER.index(agent.state)
+            if isinstance(agent, NetworkRun):
+                row = NetworkTaskRow(run_id=agent.run_id,
+                                     label=agent.label or f"#{agent.pr_number}",
+                                     detail=_network_detail(agent),
+                                     glyph=glyph, hex_color=tint)
+                row.clicked.connect(self._open_network)
+                row.forget_requested.connect(self.store.forget_network_run_async)
+                ranked.append((rank, row))
+                continue
+            ranked.append((rank, RunningTaskRow(
                 label=agent.label or f"#{agent.pr_number}",
                 detail=_running_detail(agent),
                 glyph=glyph,
@@ -803,6 +845,10 @@ class Panel(QWidget):
                 glyph=glyph,
                 hex_color=tint,
             )))
+        for held in offering:
+            glyph, tint = _task_look(held.job.kind)
+            ranked.append((starting_rank, StartingTaskRow(
+                label=held.row_label, glyph=glyph, hex_color=tint, offering=True)))
         for _rank, row in sorted(ranked, key=lambda pair: pair[0]):
             self.tasks_col.addWidget(row)
         for _ in range(free):
@@ -825,6 +871,7 @@ class Panel(QWidget):
                 # GitHub is owed: dropping it would put it straight back on the next
                 # poll, so the button would do nothing anyone could see.
                 cancellable=task.job.requested,
+                refusal=self.store.network_job_refusals.get(task.job.label, ""),
                 cancel_help=Store.pipeline_cancel_help(task.job),
             )
             row.run_requested.connect(
@@ -1023,7 +1070,7 @@ class Panel(QWidget):
 
     def _set_screen(self, name: str) -> None:
         """Flip the body to one of the screens: Actions ("main"), Devices, Machines,
-        Comms, Pipeline, Telemetry or Settings."""
+        Network, Comms, Pipeline, Telemetry or Settings."""
         self._screen = name
         self.body.setCurrentIndex(self._screens[name])
         self.devices_btn.set_state(
@@ -1037,6 +1084,10 @@ class Panel(QWidget):
             self.machines_view.opened()
         else:
             self.machines_view.closed()
+        if name == "network":
+            self.network_view.opened()
+        else:
+            self.network_view.closed()
         if name == "telemetry":
             # Re-fold on open. The screen is otherwise only repainted when a
             # sample lands (every 15 min), and the monitors append between those.
@@ -1058,6 +1109,12 @@ class Panel(QWidget):
 
     def _toggle_machines(self) -> None:
         self._set_screen("main" if self._screen == "machines" else "machines")
+
+    def _toggle_network(self) -> None:
+        self._set_screen("main" if self._screen == "network" else "network")
+
+    def _open_network(self) -> None:
+        self._set_screen("network")
 
     def _toggle_telemetry(self) -> None:
         self._set_screen("main" if self._screen == "telemetry" else "telemetry")
@@ -1249,12 +1306,15 @@ class Panel(QWidget):
             self.devices_view.opened()
         if self._screen == "machines":
             self.machines_view.opened()
+        if self._screen == "network":
+            self.network_view.opened()
         super().showEvent(event)
 
     def hideEvent(self, event) -> None:  # noqa: N802
-        # The Devices and Machines screens poll only while they are on screen.
+        # The Devices, Machines and Network screens poll only while they are on screen.
         self.devices_view.closed()
         self.machines_view.closed()
+        self.network_view.closed()
         # Reopening lands on the panel, not on Settings. A minimize is a spontaneous
         # hide and keeps the screen.
         if self._screen == "settings" and not event.spontaneous():

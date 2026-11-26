@@ -365,6 +365,21 @@ enum Render {
             // installed, no snapshot.
             let _ = seedMachinesScreen(s, store: store)
             ContentView(showMachines: true).environment(\.renderNow, machinesNow)
+        case "network-panel":
+            // The whole panel over the "network-screen-failed" seed.
+            let _ = seedNetworkScreen("network-screen-failed", store: store)
+            let _ = seedAutofix(store)
+            ContentView().frame(height: 580)
+        case let s where s.hasPrefix("network-screen"):
+            // Inside the panel, so the header's button is in the shot. Plain: every service
+            // ready, three pools (one left), members seen, unseen and unreachable, a task in
+            // each state, two runs here (one of a job offered here). "-starting": tor
+            // bootstrapping, image building, no pools. "-failed": no tor, no docker.
+            // "-down": the daemon not answering. "-off": the switch off. "-unsaved": plain,
+            // over a refused config.json change, hours set so this machine takes none of
+            // its own jobs.
+            let _ = seedNetworkScreen(s, store: store)
+            ContentView(showNetwork: true).environment(\.renderNow, machinesNow)
         case let s where s.hasPrefix("devices"):
             // Seed a synthetic device pool (and optionally sessions) so the Devices
             // section can be eyeballed: allocated iOS + booting Android (with held
@@ -916,7 +931,7 @@ enum Render {
                 prNumber: number, prURL: number.map { "https://github.com/x/pull/\($0)" } ?? "",
                 kind: kind, label: label, source: source.rawValue)
             record.untracked = untracked
-            // Every agent can be clicked — by the handle its spawn kept, or, for one
+            // Every agent can be clicked - by the handle its spawn kept, or, for one
             // nobody dispatched, by walking its own process out to the window showing it.
             record.tty = "ttys0\(number ?? 0)"
             let window = untracked ? nil
@@ -965,7 +980,7 @@ enum Render {
         // Pinned like the rows above, and for the same reason: the cap comes from the
         // shared config file, so an operator who raised theirs would change how many
         // empty bays this picture has. Two are held — the untracked agent and the one
-        // nothing is known about, both automatic — which leaves two free beside the one
+        // nothing is known about, both automatic - which leaves two free beside the one
         // the starting task has taken.
         store.autoTaskLimit = 5
         store.pinAutoTasksMeasured(2)
@@ -1280,6 +1295,165 @@ enum Render {
                                  format: "tablet", state: "available"),
             ]), at: Date())
         }
+        return true
+    }
+
+    /// The snapshot goes through the parser the daemon's answer does; no daemon is asked.
+    @MainActor
+    @discardableResult
+    static func seedNetworkScreen(_ mode: String, store: Store) -> Bool {
+        store.hasLoaded = true
+        guard !mode.hasSuffix("off") else {
+            store.networkEnabled = false
+            return true
+        }
+        store.networkEnabled = true
+        store.networkAnswered = !mode.hasSuffix("down")
+        store.networkRequiredMinimumH = 24
+        store.networkMaximumAcceptedH = 48
+        if mode.hasSuffix("unsaved") {
+            store.networkRequiredMinimumH = 72
+            _ = seedUnsaved(store)
+        }
+        let now = machinesNow.timeIntervalSince1970
+        let here = "a3f91c07d2e845b6c0aa17f3"
+        var doc: [String: Any] = [
+            "updatedAt": now - 2,
+            "daemon": ["pid": 48213, "startedAt": now - 3 * 3600],
+            "identity": ["pk": here, "onion": ""],
+            "transport": ["state": "bootstrapping", "detail": "tor is 45% through its bootstrap"],
+            "docker": ["state": "building", "image": "", "detail": "building the job image"],
+            "model": ["state": "ready", "detail": ""],
+            "devices": ["state": "off", "detail": ""],
+            "admit": ["slots": 4, "at": now - 6, "reason": ""],
+            "pools": [[String: Any]](), "runs": [[String: Any]](), "offers": [[String: Any]](),
+        ]
+        func at(_ secsAgo: Double) -> String {
+            MachinesSnapshot.isoString(Date(timeIntervalSince1970: now - secsAgo))
+        }
+        // Via JSON: the core reads a flag only from a JSON boolean.
+        func snapshot(_ doc: [String: Any]) -> NetworkSnapshot? {
+            NetworkSnapshot.parse(try? JSONSerialization.data(withJSONObject: doc))
+        }
+        guard !mode.hasSuffix("down") else { return true }
+        guard !mode.hasSuffix("failed") else {
+            doc["transport"] = ["state": "failed",
+                                "detail": "tor not found: no other machine is reached without it"]
+            doc["docker"] = ["state": "missing", "image": "",
+                             "detail": "docker not found: every job runs in a container"]
+            doc["admit"] = ["slots": 0, "at": now - 6, "reason": ""]
+            store.networkState = snapshot(doc)
+            return true
+        }
+        guard !mode.hasSuffix("starting") else {
+            store.auditEntries = [
+                AuditEntry(at: at(40), source: "panel", action: NetworkAudit.start,
+                           detail: "Started the Diplomacy Network daemon (ok: true)"),
+            ] + store.auditEntries
+            store.networkState = snapshot(doc)
+            return true
+        }
+        let (near, far) = ("5be20d9a44c1f7e0932b6d18", "c417aa02e96b3d5581f0a2c7")
+        func member(_ pk: String, hours: Int, seen: Double, reachable: Bool = true) -> [String: Any] {
+            ["pk": pk, "self": pk == here, "maxAcceptedH": hours, "lastSeen": now - seen,
+             "reachable": reachable]
+        }
+        func task(_ id: String, _ kind: String, _ title: String, _ state: String,
+                  offeredHere: Bool, executor: String = "") -> [String: Any] {
+            var t: [String: Any] = [
+                "taskId": id, "kind": kind, "item": title, "title": title, "identity": "latekvo",
+                "hours": 24, "state": state, "offeredBy": [offeredHere ? here : near],
+                "offeredHere": offeredHere, "executor": executor,
+                "executorHere": executor == here, "deadline": now + 20 * 3600,
+            ]
+            if state == "claimed" {
+                t["claimedAt"] = now - 1500
+                t["leaseUntil"] = now + 5700
+            }
+            return t
+        }
+        doc["identity"] = ["pk": here, "onion": "dn4q7wz2kx5h3ty6pbv8ma9cjrf2us1e.onion"]
+        doc["transport"] = ["state": "ready", "detail": ""]
+        doc["docker"] = ["state": "ready", "image": "diplomacy-network:4c1e9a", "detail": ""]
+        doc["devices"] = ["state": "ready", "detail": ""]
+        store.networkDevices = true
+        doc["admit"] = ["slots": 2, "at": now - 6, "reason": ""]
+        doc["pools"] = [
+            ["id": "github.com/software-mansion/argent", "path": "/Users/dev/argent",
+             "identity": "latekvo", "hash": "9f2c41d7",
+             "members": [member(here, hours: 48, seen: 0), member(near, hours: 24, seen: 35),
+                         member(far, hours: 12, seen: 5400, reachable: false)],
+             "tasks": [
+                task("t-review", "review", "Review · #512", "available", offeredHere: true),
+                task("t-own", "conflicts", "Resolve · #508", "claimed", offeredHere: true,
+                     executor: here),
+                task("t-away", "issues", "Issues · #431", "claimed", offeredHere: true,
+                     executor: near),
+                task("t-theirs", "review", "Review · #77", "claimed", offeredHere: false,
+                     executor: here),
+                task("t-done", "audit", "Audit · argent", "done", offeredHere: false,
+                     executor: near),
+                task("t-gone", "review-own", "Review · #498", "cancelled", offeredHere: true),
+                task("t-spent", "issues", "Issues · #440", "cancelled", offeredHere: true),
+             ]] as [String: Any],
+            ["id": "gitlab.com/acme/platform/api", "path": "/Users/dev/api", "identity": "ilatka",
+             "hash": "17b0e3aa",
+             "joining": !mode.hasSuffix("unsaved"),
+             // The daemon's longest reason.
+             "joinFailed": mode.hasSuffix("unsaved")
+                ? "the machine that made that invite came into the pool under this one, "
+                    + "before this one began the pool again, and no machine that came in under "
+                    + "this one can let it back in: use an invite of one that did not, or - if "
+                    + "this machine began that pool, so that every machine there came in under "
+                    + "it - have them join this one's pool, each by an invite this machine makes"
+                : "",
+             "notTaking": "this machine could not start a job of this pool: "
+                + "its repository could not be fetched",
+             "members": [member(here, hours: 48, seen: 0)],
+             "tasks": [[String: Any]]()] as [String: Any],
+            ["id": "github.com/latekvo/dotfiles", "path": "/Users/dev/dotfiles",
+             "identity": "latekvo", "hash": "c02d5b1e", "left": true,
+             "members": [[String: Any]](), "tasks": [[String: Any]]()] as [String: Any],
+        ]
+        func offer(_ id: String, _ kind: String, _ title: String, _ state: String,
+                   reason: String = "", executor: String = "",
+                   notTaking: String = "") -> [String: Any] {
+            ["taskId": id, "pool": "github.com/software-mansion/argent", "kind": kind,
+             "item": title, "title": title, "state": state, "reason": reason,
+             "executor": executor, "executorHere": executor == here,
+             "offeredAt": now - 2400, "attempt": state == "failed" ? 3 : 1,
+             "requests": 0, "refused": 0, "notTaking": notTaking]
+        }
+        doc["offers"] = [
+            offer("t-review", "review", "Review · #512", "pooled",
+                  notTaking: mode.hasSuffix("unsaved")
+                    ? "this machine takes jobs of at most 48 h and this one needs 72" : ""),
+            offer("t-own", "conflicts", "Resolve · #508", "claimed", executor: here),
+            offer("t-away", "issues", "Issues · #431", "claimed", executor: near),
+            offer("t-gone", "review-own", "Review · #498", "cancelled", reason: "merged"),
+            offer("t-spent", "issues", "Issues · #440", "failed",
+                  reason: "the container exited 137 on its third attempt"),
+        ]
+        doc["runs"] = [
+            ["runId": "run-own", "taskId": "t-own", "pool": "github.com/software-mansion/argent",
+             "peer": here, "container": "dn-9f2c41d7-a3f91c07", "state": "running",
+             "startedAt": now - 1500],
+            ["runId": "run-theirs", "taskId": "t-theirs",
+             "pool": "github.com/software-mansion/argent", "peer": near,
+             "container": "dn-9f2c41d7-5be20d9a", "state": "preparing", "startedAt": now - 20],
+        ]
+        store.auditEntries = [
+            AuditEntry(at: at(90), source: "auto", action: NetworkAudit.claimed,
+                       detail: "Resolve · #508 - running on this machine"),
+            AuditEntry(at: at(1500), source: "auto", action: NetworkAudit.offer,
+                       detail: "Resolve · #508 - offered to github.com/software-mansion/argent"),
+            AuditEntry(at: at(2400), source: "auto", action: NetworkAudit.unavailable,
+                       detail: "Holding auto work - the Diplomacy Network did not take "
+                           + "Review · #512: \(DiplomacyNetwork.notAnswering)"),
+            AuditEntry(at: at(3 * 3600), source: "panel", action: NetworkAudit.start,
+                       detail: "Started the Diplomacy Network daemon (ok: true)"),
+        ] + store.auditEntries
+        store.networkState = snapshot(doc)
         return true
     }
 

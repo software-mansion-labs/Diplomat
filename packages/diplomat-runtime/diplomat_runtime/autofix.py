@@ -463,6 +463,8 @@ def dispatch_decide(
     unaffordable: bool = False,
     outside_allowlist: bool = False,
     low_disk: bool = False,
+    paused: bool = False,
+    network: bool = False,
 ) -> str:
     """The one decision both interfaces obey, in fixed precedence: ban, then the
     auto-review allowlist, then in-flight, then (auto only) this device's free
@@ -488,16 +490,26 @@ def dispatch_decide(
     and pushes the machine toward ENOSPC, wherever its bay or its budget stands; a
     freed bay does not free space, so it is the hold the operator has to act on and
     the one the feed should name while several hold; and one ``statvfs`` is the
-    cheapest of the measurements."""
+    cheapest of the measurements.
+
+    Capacity arrives as its two halves: ``at_capacity`` is this device running its
+    cap, ``paused`` is the operator holding the work (a paused item, or the queue's
+    auto-run off). Either one is ``at_capacity``.
+
+    With ``network`` on another machine may run the job, so this device's disk, cap
+    and budget are not asked: they reach the daemon through :func:`network.admit`.
+    ``paused`` still holds: it is about the work, not the machine."""
     if banned:
         return VERDICT_BANNED
     if outside_allowlist:
         return VERDICT_NOT_ALLOWED
     if agent_on_pr:
         return VERDICT_IN_FLIGHT
+    if network:
+        return VERDICT_AT_CAPACITY if source == SOURCE_AUTO and paused else VERDICT_PROCEED
     if source == SOURCE_AUTO and low_disk:
         return VERDICT_LOW_DISK
-    if source == SOURCE_AUTO and at_capacity:
+    if source == SOURCE_AUTO and (at_capacity or paused):
         return VERDICT_AT_CAPACITY
     if source == SOURCE_AUTO and unaffordable:
         return VERDICT_UNAFFORDABLE
@@ -590,6 +602,9 @@ WINDOW_CREDITS = "orCredits"  # the OpenRouter account's credit balance
 #: from which ceiling was read and is carried so the feed can say which it meant.
 UNIT_PCT = "pct"
 UNIT_USD = "usd"
+#: All of a rate-limit window, in :data:`UNIT_PCT`: the most one task can be asked to
+#: fit inside.
+WHOLE_WINDOW_PCT = 100.0
 
 
 def clamp_budget_confidence(value: int) -> int:
@@ -685,6 +700,11 @@ def budget_decide(windows: list[tuple[str, float | None, float | None]],
     hand" — which is the whole of the answer on a machine whose ledger has not priced
     a task yet.
 
+    So does a rate limit whose task is priced above the whole window
+    (:data:`WHOLE_WINDOW_PCT`): no window could cover it, so nothing would start until
+    the counts behind the price left the ledger's lookback, and one outlier count is
+    enough to put it there.
+
     A ceiling with **no reading at all** is skipped, and a call where none has one is
     affordable. That is deliberate: a usage probe can be switched off
     (``DIPLOMAT_QUOTA_PROBE=0``, ``DIPLOMAT_SPEND_PROBE=0``), logged out, or simply
@@ -700,6 +720,8 @@ def budget_decide(windows: list[tuple[str, float | None, float | None]],
     for window, left, cost in windows:
         if left is None:
             continue
+        if unit == UNIT_PCT and cost is not None and cost > WHOLE_WINDOW_PCT:
+            cost = None
         needed = floor if cost is None else cost
         if tightest is not None and left - needed >= tightest.left - tightest.needed:
             continue  # an earlier ceiling is the binding one
@@ -974,6 +996,14 @@ class AgentJob:
     # None is whichever root is primary at spawn time, so a monitor job, which can wait
     # in the queue past a change of primary, names its root's path.
     checkout: str | None = None
+    # What the job's prompt allows, for its Diplomacy Network offer
+    # (:func:`network.offer_for`): the PR is the operator's own, a review may approve or
+    # request changes, work on their own PR may mark it ready, an issue fix or an audit
+    # opens PRs. Each is off unless the config behind the prompt granted it.
+    own_pr: bool = False
+    verdict: bool = False
+    mark_ready: bool = False
+    opens_prs: bool = False
 
     @property
     def item(self) -> str | None:
@@ -1022,6 +1052,9 @@ class RequestedWork:
     config: dict
     #: The item's root, as its ``LocalRepo.key``; "" in a row single-repo builds stored.
     repo: str = ""
+    #: The Diplomacy Network task this ask is offered as, "" while no offer carries it.
+    #: An offer is not a start: the ask stands until the work has run.
+    offered: str = ""
     #: Queued by the Pipeline screen's Start fix, not by a sync (``pipeline.withdrawn``).
     by_hand: bool = False
 
@@ -1085,9 +1118,13 @@ class RequestedWork:
         return f"{noun} · {named} · {self.config.get('depth', '')}"
 
     def to_json(self) -> dict:
-        return {"number": self.number, "url": self.url, "author": self.author,
-                "config": self.config, "repo": self.repo,
-                **({"byHand": True} if self.by_hand else {})}
+        row = {"number": self.number, "url": self.url, "author": self.author,
+               "config": self.config, "repo": self.repo}
+        if self.offered:
+            row["offered"] = self.offered
+        if self.by_hand:
+            row["byHand"] = True
+        return row
 
     @staticmethod
     def from_json(obj: dict) -> "RequestedWork | None":
@@ -1106,7 +1143,9 @@ class RequestedWork:
             return None
         return RequestedWork(number=number, url=str(obj.get("url", "")),
                              author=str(obj.get("author", "")), config=config,
-                             repo=str(obj.get("repo", "")), by_hand=obj.get("byHand") is True)
+                             repo=str(obj.get("repo", "")),
+                             offered=str(obj.get("offered", "")),
+                             by_hand=obj.get("byHand") is True)
 
 
 @dataclass(frozen=True)

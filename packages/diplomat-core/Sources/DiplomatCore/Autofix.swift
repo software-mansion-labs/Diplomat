@@ -25,7 +25,7 @@ public struct PRSnapshot: Equatable {
     /// Unaddressed Reviews" signal. Drives the offline-review reconcile so we don't
     /// dispatch a fix agent for a PR where the ball is with the reviewer. `threadsUnresolved` (raw count) still drives the edge-trigger.
     public let threadsIOwe: Int
-    /// Head commit sha (`headRefOid`) — the "which push" part of the ledger key
+    /// Head commit sha (`headRefOid`) - the "which push" part of the ledger key
     /// (`AutofixWork.ledgerKey`).
     public let headSha: String
 
@@ -180,16 +180,26 @@ public enum AgentDispatchGate {
     /// The disk leads both: an agent on a nearly full disk cannot finish whatever
     /// its bay or budget, and a freed bay frees no space, so it is the hold the feed
     /// should name.
+    ///
+    /// `paused` is the operator holding the work (a paused item, or auto-run off), and
+    /// reads as `.atCapacity`.
+    ///
+    /// With `network` another machine may run the job, so this device's disk, cap and
+    /// budget are not asked (they reach the daemon through `NetworkAdmit`); `paused`
+    /// still holds, being about the work and not the machine.
     public static func decide(source: Source, banned: Bool, agentOnPR: Bool,
                               atCapacity: Bool,
                               unaffordable: Bool = false,
                               outsideAllowlist: Bool = false,
-                              lowDisk: Bool = false) -> Verdict {
+                              lowDisk: Bool = false,
+                              paused: Bool = false,
+                              network: Bool = false) -> Verdict {
         if banned { return .banned }
         if outsideAllowlist { return .notAllowed }
         if agentOnPR { return .inFlight }
+        if network { return source == .auto && paused ? .atCapacity : .proceed }
         if source == .auto, lowDisk { return .lowDisk }
-        if source == .auto, atCapacity { return .atCapacity }
+        if source == .auto, atCapacity || paused { return .atCapacity }
         if source == .auto, unaffordable { return .unaffordable }
         return .proceed
     }
@@ -325,6 +335,8 @@ public enum AgentDispatchGate {
     /// which it meant.
     public static let unitPct = "pct"
     public static let unitUsd = "usd"
+    /// All of a rate-limit window, in `unitPct`.
+    public static let wholeWindowPct = 100.0
 
     /// The configured confidence, snapped to a level `budgetConfidenceZ` has a
     /// quantile for.
@@ -423,6 +435,10 @@ public enum AgentDispatchGate {
     /// hand" — which is the whole of the answer on a machine whose ledger has not
     /// priced a task yet.
     ///
+    /// So does a rate limit whose task is priced above the whole window
+    /// (`wholeWindowPct`): no window could cover it, so one outlier count in the ledger
+    /// would hold all work until it left the lookback.
+    ///
     /// A ceiling with **no reading at all** is skipped, and a call where none has one
     /// is affordable. That is deliberate: a usage probe can be switched off
     /// (`DIPLOMAT_QUOTA_PROBE=0`, `DIPLOMAT_SPEND_PROBE=0`), logged out, or simply
@@ -437,8 +453,9 @@ public enum AgentDispatchGate {
                                     floor: Double,
                                     unit: String = unitPct) -> Budget {
         var tightest: Budget?
-        for (window, left, cost) in windows {
+        for (window, left, priced) in windows {
             guard let left = left else { continue }
+            let cost = unit == unitPct && (priced ?? 0) > wholeWindowPct ? nil : priced
             let needed = cost ?? floor
             if let best = tightest, left - needed >= best.left - best.needed {
                 continue   // an earlier ceiling is the binding one
@@ -496,7 +513,7 @@ public enum AutofixWork {
 
     /// The telemetry ledger's identity for one unit of work:
     /// `<kind>:<host>/<owner>/<repo>#<n>@<sha>`, derived from the PR's own URL (the
-    /// Python twin must produce identical strings — see the parity tests). "" when the
+    /// Python twin must produce identical strings - see the parity tests). "" when the
     /// URL is not a PR's.
     ///
     /// The same shape WITHOUT `@sha` while the head sha is unknown: the work still

@@ -49,6 +49,8 @@ _HOSTED_REMOTE = re.compile(
     r"([\w.-]+(?:/[\w.-]+)*)/([\w.-]+?)(?:\.git)?/?$",
     re.IGNORECASE,
 )
+#: An ``https`` or ``http`` remote's scheme and port, where it names one (:func:`web_port`).
+_WEB_PORT = re.compile(r"^(https?)://(?:[^@/]+@)?[^/:@]+:([0-9]+)/", re.IGNORECASE)
 #: A host key of glab's ``hosts:`` map; its port is dropped, as a remote's is.
 _GLAB_HOST = re.compile(r"^\s+([A-Za-z0-9.-]+)(?::[0-9]+)?:\s*$")
 #: A host's ``ssh_host``, the host its SSH remotes name, quoted or not; port dropped.
@@ -195,6 +197,16 @@ def parse_remote(url: str, hosts: Mapping[str, str] = GITLAB_HOSTS
         else None
 
 
+def web_port(url: str) -> int | None:
+    """The port an ``https`` remote names other than 443, or an ``http`` one other than
+    80; ``None`` for any other remote. Twin of ``LocalRepo.webPort(remoteURL:)``."""
+    web = _WEB_PORT.match(url.strip())
+    if web is None:
+        return None
+    port = int(web.group(2))
+    return port if port != (443 if web.group(1).lower() == "https" else 80) else None
+
+
 def remote_config(path: str) -> str | None:
     """``git config --local --get-regexp '^remote\\..*\\.url$'`` of the checkout at
     ``path``, or ``None`` when it is no checkout or ``git`` failed. A checkout with no
@@ -205,15 +217,35 @@ def remote_config(path: str) -> str | None:
     though ``git -C`` would answer for a repository the folder sits inside."""
     if not os.path.exists(os.path.join(os.path.expanduser(path), ".git")):
         return None
+    out = _git_remotes(path)
+    return out.stdout if out is not None and out.returncode == 0 else None
+
+
+def _git_remotes(path: str) -> subprocess.CompletedProcess | None:
     try:
-        out = subprocess.run(
+        return subprocess.run(
             ["git", "-C", path, "config", "--local", "--get-regexp",
              r"^remote\..*\.url$"],
             capture_output=True, text=True, timeout=GIT_TIMEOUT,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    return out.stdout if out.returncode == 0 else None
+
+
+def checkout_remotes(path: str) -> str | None:
+    """:func:`remote_config` of ``path`` (``~`` expanded), telling what was read from
+    what was not: "" for a folder that is no checkout and for a checkout with no remote
+    (``git config --get-regexp`` exits 1 on no match), ``None`` for a path that is
+    missing or that ``git`` failed on."""
+    where = os.path.expanduser(path)
+    if not os.path.exists(where):
+        return None
+    if not os.path.exists(os.path.join(where, ".git")):
+        return ""
+    out = _git_remotes(where)
+    if out is None or out.returncode not in (0, 1):
+        return None
+    return out.stdout if out.returncode == 0 else ""
 
 
 def entries(path: str, remotes: str, only: tuple[str, ...] = (),
@@ -231,7 +263,7 @@ def entries(path: str, remotes: str, only: tuple[str, ...] = (),
         if only and key[len("remote."):-len(".url")] not in only:
             continue
         named.append((key[len("remote."):-len(".url")],
-                      LocalRepo(coords[1], coords[2], path, coords[0])))
+                      LocalRepo(coords[1], coords[2], path, coords[0], web_port(url))))
     ranked = sorted(range(len(named)),
                     key=lambda i: (named[i][1].is_gitlab, named[i][0] != "upstream",
                                    named[i][0] != "origin", i))
@@ -252,10 +284,12 @@ def _identity(repo: LocalRepo) -> str:
 @dataclass(frozen=True)
 class Checkout:
     """One path listed in Settings, and the repos it answers for: none when it is no
-    checkout or has no GitHub or GitLab remote."""
+    checkout or has no GitHub or GitLab remote. ``read`` is False for a path that could
+    not be read (:func:`checkout_remotes`), which may answer for repos all the same."""
 
     path: str
     repos: tuple[LocalRepo, ...]
+    read: bool = True
 
     @property
     def slug(self) -> str | None:
@@ -266,7 +300,9 @@ class Checkout:
 def inspect(path: str, hosts: Mapping[str, str] = GITLAB_HOSTS) -> Checkout:
     """``path`` (``~`` expanded) with its GitHub and GitLab remotes (:func:`entries`)."""
     where = os.path.expanduser(path)
-    return Checkout(path, tuple(entries(where, remote_config(where) or "", hosts=hosts)))
+    remotes = checkout_remotes(where)
+    return Checkout(path, tuple(entries(where, remotes or "", hosts=hosts)),
+                    read=remotes is not None)
 
 
 def resolve(paths: list[str]) -> list[Checkout]:

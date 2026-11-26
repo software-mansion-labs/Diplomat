@@ -8,7 +8,8 @@ a real display by grabbing the widget's own pixels:
 
 what ∈ {panel, lookup, wizard, issues, conflicts, audit, settings[-explain],
 devices, devices-screen[-remote[-away]|-off], machines-screen[-idle|-off],
-telemetry, comms, comms-panel, comms-empty, pipeline}.
+network-screen[-starting|-failed|-down|-unsaved|-off], network-panel, telemetry, comms, comms-panel,
+comms-empty, pipeline}.
 With DIPLOMAT_RENDER_LIVE=1 it fetches real data first; otherwise it uses a small
 synthetic fixture.
 """
@@ -232,6 +233,114 @@ def _machines_history(now: float, until: float) -> dict:
             at += 60
         out[mid] = rows
     return {"version": 1, "intervalMs": 60_000, "machines": out}
+
+
+def _network_screen_fixture(store: Store, mode: str) -> None:
+    """Plain: the daemon up, taking two more tasks, in two pools - one shared with a
+    reachable and an unreachable machine and holding a task in each state, one of this
+    machine alone. ``-starting``: the daemon not asked yet. ``-failed``: no tor and no
+    docker. ``-down``: the daemon not answering. ``-unsaved``: the plain screen over a
+    change the config refused (hours under which this machine takes none of its own
+    jobs). ``-off``: switched off.
+
+    A render never writes the shared config, so the switch, the devices setting and
+    the daemon's answer are patched onto the module that reads them."""
+    from diplomat_runtime import activity, network
+    from . import diplomacynetwork as dn
+
+    off = mode.endswith("-off")
+    dn.enabled = lambda: not off
+    dn.devices = lambda: mode == "network-screen"
+    store.network_answered = (None if off or mode.endswith("-starting")
+                              else not mode.endswith("-down"))
+    store.network_state = None
+    dn.state = lambda: store.network_state
+    store._note_network_state = lambda snapshot: None
+    store.audit_entries = [
+        activity.AuditEntry("2026-11-09T11:52:00Z", "auto", "network-claimed",
+                            "Auto · Review-req · #412 (@marta) - running on 9f3c1a77"),
+        activity.AuditEntry("2026-11-09T11:51:00Z", "auto", "network-offer",
+                            "Auto · Review-req · #412 (@marta) - offered to "
+                            "github.com/latekvo/diplomat"),
+        activity.AuditEntry("2026-11-09T11:30:00Z", "panel", "network-invite",
+                            "Made an invite to github.com/latekvo/diplomat"),
+        activity.AuditEntry("2026-11-09T09:00:00Z", "panel", "network-start",
+                            "Started the Diplomacy Network daemon (ok: true)"),
+    ] + store.audit_entries
+    now = MACHINES_NOW
+    if mode.endswith("-failed"):
+        store.network_state = network.Snapshot.from_json({
+            "updatedAt": now - 4, "daemon": {"pid": 4471, "startedAt": now - 120},
+            "identity": {"pk": "4be07d21c9aa", "onion": ""},
+            "transport": {"state": "failed",
+                          "detail": "tor not found: no other machine is reached without it"},
+            "docker": {"state": "missing", "image": "",
+                       "detail": "docker not found: every job runs in a container"},
+            "model": {"state": "ready", "detail": ""},
+            "devices": {"state": "off", "detail": ""},
+            "admit": {"slots": 0, "at": now - 9, "reason": ""}})
+    unsaved = mode.endswith("-unsaved")
+    if unsaved:
+        dn.required_minimum_h, dn.maximum_accepted_h = (lambda: 72), (lambda: 48)
+    if mode != "network-screen" and not unsaved:
+        return
+    me, peer, away = "4be07d21c9aa", "9f3c1a7755e0", "c41d90ab3e12"
+
+    def task(n, kind, title, state, **extra):
+        return {"taskId": f"t{n}", "kind": kind, "item": f"pr-{n}", "title": title,
+                "identity": "latekvo", "hours": 12, "state": state,
+                "offeredBy": [me], "offeredHere": True, **extra}
+
+    store.network_state = network.Snapshot.from_json({
+        "updatedAt": now - 4, "daemon": {"pid": 4471, "startedAt": now - 3 * 3600},
+        "identity": {"pk": me, "onion": "dipl7x2kq5examplev3hostq4m.onion"},
+        "transport": {"state": "ready", "detail": ""},
+        "docker": {"state": "ready", "image": "diplomat-job:3f9a", "detail": ""},
+        "model": {"state": "ready", "detail": ""},
+        "devices": {"state": "ready", "detail": ""},
+        "admit": {"slots": 2, "at": now - 9, "reason": ""},
+        "pools": [
+            {"id": "github.com/latekvo/diplomat", "path": "/src/diplomat",
+             "identity": "latekvo", "hash": "a1",
+             "members": [
+                 {"pk": me, "self": True, "maxAcceptedH": 12, "lastSeen": now - 4,
+                  "reachable": True},
+                 {"pk": peer, "self": False, "maxAcceptedH": 24, "lastSeen": now - 40,
+                  "reachable": True},
+                 {"pk": away, "self": False, "maxAcceptedH": 12,
+                  "lastSeen": now - 5 * 3600, "reachable": False}],
+             "tasks": [
+                 task(412, "review", "Review-req · #412 (@marta)", "claimed",
+                      executor=peer, claimedAt=now - 480, leaseUntil=now + 6720),
+                 task(398, "conflicts", "Conflicts · #398", "claimed",
+                      executor=me, executorHere=True, claimedAt=now - 1500,
+                      leaseUntil=now + 5700),
+                 task(405, "review-own", "Review · #405", "available"),
+                 {**task(377, "issues", "Issues · #377 · deep", "done", executor=peer),
+                  "offeredBy": [peer], "offeredHere": False},
+                 task(390, "review", "Review-req · #390 (@olek)", "cancelled")]},
+            {"id": "github.com/latekvo/prompt-bench", "path": "/src/prompt-bench",
+             "identity": "latekvo", "hash": "b2",
+             "joining": not unsaved,
+             # The daemon's longest reason.
+             "joinFailed": "the machine that made that invite came into the pool under this "
+                           "one, before this one began the pool again, and no machine that "
+                           "came in under this one can let it back in: use an invite of one "
+                           "that did not, or - if this machine began that pool, so that every "
+                           "machine there came in under it - have them join this one's pool, "
+                           "each by an invite this machine makes" if unsaved else "",
+             "notTaking": "this machine could not start a job of this pool: "
+                          "its repository could not be fetched",
+             "members": [{"pk": me, "self": True, "maxAcceptedH": 12,
+                          "lastSeen": now - 4, "reachable": True}],
+             "tasks": []}],
+        "runs": [{"runId": "r1", "taskId": "t398", "pool": "github.com/latekvo/diplomat",
+                  "peer": me, "container": "dn-r1", "state": "running",
+                  "startedAt": now - 1490}],
+        "offers": [{"taskId": "t405", "pool": "github.com/latekvo/diplomat",
+                    "kind": "review-own", "item": "pr-405", "state": "pooled",
+                    "notTaking": "this machine takes jobs of at most 48 h and this one "
+                                 "needs 72" if unsaved else ""}]})
 
 
 def _machines_screen_fixture(store: Store, mode: str) -> None:
@@ -1065,6 +1174,16 @@ def run(what: str, out: str) -> int:
         panel.machines_view.clock = lambda: MACHINES_NOW
         store.activity_changed.emit()
         panel._toggle_machines()
+    elif what.startswith("network-screen"):
+        _network_screen_fixture(store, what)
+        panel.network_view.clock = lambda: MACHINES_NOW
+        store.activity_changed.emit()
+        store.network_changed.emit()
+        panel._toggle_network()
+        if what.endswith("-unsaved"):
+            def refused() -> None:
+                raise OSError(28, "No space left on device")
+            panel.network_view._save(refused)
     elif what == "devices":
         _device_fixture(store)
         panel._rebuild_devices()
@@ -1077,7 +1196,10 @@ def run(what: str, out: str) -> int:
         panel._toggle_pipeline()
         panel.pipeline_view.select(selected)
         _show_whole(app, panel, panel.pipeline_view.graph_scroll)
-    else:  # panel, and comms-panel: the same, its ✉ header button showing a count
+    else:  # panel; comms-panel: the same, its ✉ header button showing a count;
+        # network-panel: the same, its task list showing the network's trouble
+        if what == "network-panel":
+            _network_screen_fixture(store, "network-screen-failed")
         _device_fixture(store)
         _left_pane_fixture(store)
         _queue_fixture(store)

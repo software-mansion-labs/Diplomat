@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 import pytest
 
@@ -400,6 +401,26 @@ def isolated_remote_machines(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolated_diplomacy_network(tmp_path, monkeypatch):
+    """Point the daemon's directory (its socket) at an empty dir and its package at a
+    missing one: otherwise a test that flips the switch asks the operator's daemon and
+    runs its installer (tor and docker with it). A test that wants an answer serves one
+    on a socket in ``DN_BASE_DIR`` and stubs ``deviceallocator.run_installer``. The
+    retired mesh node's directory is empty too, and its signal raises: a launch removes
+    that directory, keys included, and ends the node it names."""
+    from diplomat_app import diplomacynetwork
+
+    def no_signal(pid):
+        raise AssertionError(f"a test signalled pid {pid}")
+
+    monkeypatch.setenv("DN_BASE_DIR", str(tmp_path / "network"))
+    monkeypatch.setenv("DIPLOMAT_DIPLOMACY_NETWORK_DIR", str(tmp_path / "no-network-package"))
+    monkeypatch.setattr(diplomacynetwork, "legacy_dir", lambda: tmp_path / "mesh")
+    monkeypatch.setattr(diplomacynetwork, "_terminate", no_signal)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def isolated_state_dir(tmp_path, monkeypatch):
     """Redirect ``~/.local/state/diplomat`` to a per-test temp dir: quitting the applet
     writes the operator-quit mark there, which would keep the operator's real tray from
@@ -454,3 +475,27 @@ def _drain_qt_widgets():
     app = QApplication.instance()
     if app is not None:
         drain_qt_widgets(app)
+
+
+@pytest.fixture
+def clock_in():
+    """Set this machine's clock, and that of every process the test starts, to a time
+    zone by its name."""
+    before = os.environ.get("TZ")
+
+    def to(zone: str) -> None:
+        os.environ["TZ"] = zone
+        time.tzset()
+
+    yield to
+    if before is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = before
+    time.tzset()
+
+
+@pytest.fixture
+def kolkata(clock_in):
+    """That clock five and a half hours ahead of UTC."""
+    clock_in("Asia/Kolkata")

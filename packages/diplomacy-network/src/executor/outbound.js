@@ -1,0 +1,357 @@
+// The broker's connections out to the internet for its jobs. Their socket buffers are
+// kernel memory node can neither cap nor measure, so the kernel is polled (/proc/self/net
+// tcp and tcp6 on Linux, one netstat on macOS) every OUT_POLL_MS while any are open; all
+// jobs together may hold OUT_BYTES, shared equally among the jobs with connections out.
+//
+// Writes enter the kernel as fast as this machine copies, so they are counted as written:
+// a job at its share (by the last poll plus writes since) has its writes corked until a
+// poll finds room. Incoming bytes come at the link's speed, and a poll that finds all jobs
+// past OUT_BYTES resets the fullest connection of the job furthest past its share until
+// within it; a job within its share loses none.
+//
+// A closed socket whose bytes the kernel still holds keeps them for minutes with nothing
+// left to count or reset it. So a connection out is reset on close if the kernel may hold
+// any; one the job ends is kept open, counted as the job's, until a poll finds its bytes
+// taken, and reset OUT_LINGER_MS past its end. Its shutdown waits too: a shutdown waits for
+// kernel buffer room, and a socket mid-shutdown cannot be reset (libuv refuses, and node
+// never closes it).
+
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import { execFile } from 'node:child_process';
+
+export const OUT_BYTES = 32 * 1024 * 1024;
+export const OUT_POLL_MS = 500;
+/// The soonest next poll once a job's writes are held.
+export const OUT_SOONEST_MS = 100;
+/// Connections out a job may have open while the kernel cannot be read.
+export const OUT_FALLBACK = 32;
+export const OUT_LINGER_MS = 30000;
+
+/// For comparison: IPv6 as eight hex groups without leading zeros, "::" or a zone.
+export function plainAddress(address) {
+  if (!address.includes(':')) return address;
+  let text = address.toLowerCase();
+  const v4 = /(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(text);
+  if (v4) {
+    const [a, b, c, d] = v4.slice(1).map(Number);
+    text = `${text.slice(0, v4.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const [head, tail] = text.split('::');
+  const left = head ? head.split(':') : [];
+  const right = tail === undefined ? [] : tail ? tail.split(':') : [];
+  const groups = tail === undefined ? left : [...left, ...Array(8 - left.length - right.length).fill('0'), ...right];
+  return groups.map((g) => (parseInt(g, 16) || 0).toString(16)).join(':');
+}
+
+// The kernel writes each 32-bit word of an address in /proc in its own byte order.
+function procAddress(hex) {
+  const bytes = Buffer.from(hex, 'hex');
+  if (os.endianness() === 'LE') for (let i = 0; i < bytes.length; i += 4) bytes.subarray(i, i + 4).reverse();
+  if (bytes.length === 4) return [...bytes].join('.');
+  const groups = [];
+  for (let i = 0; i < 16; i += 2) groups.push(bytes.readUInt16BE(i).toString(16));
+  return groups.join(':');
+}
+
+/// /proc/net/tcp{,6} rows but listening and SYN_SENT ones; `bytes` is queued either way,
+/// `sending` outbound only.
+export function parseProc(text) {
+  const lines = text.split('\n');
+  if (!/^\s*sl\s+local_address\s+rem(?:ote)?_address\s+st\s+tx_queue\s+rx_queue/.test(lines[0])) throw new Error('not a table of TCP sockets');
+  const rows = [];
+  for (const line of lines.slice(1)) {
+    if (!line.trim()) continue;
+    const m = /^\s*\d+:\s+([0-9A-F]+):([0-9A-F]{4})\s+([0-9A-F]+):([0-9A-F]{4})\s+([0-9A-F]{2})\s+([0-9A-F]{8}):([0-9A-F]{8})\s/.exec(line);
+    if (!m) throw new Error(`not a TCP socket: ${line.slice(0, 120)}`);
+    // SYN_SENT (02): one answered as the table is read can show the far end's sequence
+    // number as its receive queue.
+    if (m[5] === '0A' || m[5] === '02') continue;
+    rows.push({
+      local: procAddress(m[1]), localPort: parseInt(m[2], 16), remote: procAddress(m[3]), remotePort: parseInt(m[4], 16),
+      bytes: parseInt(m[6], 16) + parseInt(m[7], 16), sending: parseInt(m[6], 16),
+    });
+  }
+  return rows;
+}
+
+/// macOS `netstat -anl -p tcp` as parseProc's rows; sockets with no far end are skipped.
+export function parseNetstat(text) {
+  const lines = text.split('\n');
+  const header = lines.findIndex((l) => /^Proto\s+Recv-Q\s+Send-Q\s+Local Address\s+Foreign Address/.test(l));
+  if (header < 0) throw new Error('netstat printed no table of connections');
+  const rows = [];
+  const split = (field) => {
+    const at = field.lastIndexOf('.');
+    const address = field.slice(0, at);
+    const port = field.slice(at + 1);
+    return { address, port: port === '*' ? null : Number(port) };
+  };
+  for (const line of lines.slice(header + 1)) {
+    if (!line.trim()) continue;
+    const m = /^tcp[46]{1,2}\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s/.exec(line);
+    if (!m) throw new Error(`not a TCP connection: ${line.slice(0, 120)}`);
+    const local = split(m[3]);
+    const remote = split(m[4]);
+    if (remote.port === null) continue;
+    if (!Number.isInteger(local.port) || !Number.isInteger(remote.port)) throw new Error(`not a TCP connection: ${line.slice(0, 120)}`);
+    rows.push({
+      local: plainAddress(local.address), localPort: local.port, remote: plainAddress(remote.address), remotePort: remote.port,
+      bytes: Number(m[1]) + Number(m[2]), sending: Number(m[2]),
+    });
+  }
+  return rows;
+}
+
+async function procTable(name) {
+  try { return parseProc(await fs.readFile(`/proc/self/net/${name}`, 'utf8')); } catch (e) {
+    // A kernel without IPv6 has no tcp6.
+    if (e.code === 'ENOENT' && name === 'tcp6') return [];
+    throw e;
+  }
+}
+
+export async function systemQueues() {
+  if (process.platform === 'linux') return [...await procTable('tcp'), ...await procTable('tcp6')];
+  if (process.platform === 'darwin') {
+    const text = await new Promise((resolve, reject) => execFile('/usr/sbin/netstat', ['-anl', '-p', 'tcp'], { maxBuffer: 64 * 1024 * 1024, timeout: 5000 },
+      (e, out) => (e ? reject(e) : resolve(out))));
+    return parseNetstat(text);
+  }
+  throw new Error(`the kernel's socket queues cannot be read on ${process.platform}`);
+}
+
+/// `add(job, raw)` counts a connected socket as the job's; what TLS over it writes shows
+/// only in polls, and `over(raw, secure)` defers the TLS socket's shutdown as raw's is.
+/// `full(job)`: polls fail and the job has `fallback` open. `say(job, text, why)` hears of
+/// each reset (`why` 'ended' past the linger, 'full' past the total) and, with `job` null,
+/// of polls failing and recovering.
+export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest = OUT_SOONEST_MS, fallback = OUT_FALLBACK,
+  linger = OUT_LINGER_MS, queues = systemQueues, say = () => {} } = {}) {
+  const jobs = new Map();
+  const entryOf = new WeakMap();
+  let timer = null;
+  let due = 0;
+  let polling = false;
+  let failing = false;
+  let last = 0;
+
+  const share = () => Math.floor(bytes / jobs.size);
+  // By the last poll that answered, or written since it began.
+  const sending = (entry) => entry.sending > 0 || entry.raw.bytesWritten > entry.sentAt;
+  const to = (entry) => `a connection out of this job to ${entry.remoteText}:${entry.remotePort}`;
+  // A socket mid-shutdown cannot be reset, only closed.
+  const reset = (entry) => (entry.shut ? entry.raw.destroy() : entry.raw.resetAndDestroy());
+
+  // A connection the job ended or closed while the kernel held its bytes, once they are
+  // taken or can no longer be told.
+  function settle(entry) {
+    entry.closing = 0;
+    if (entry.closed) return entry.raw.destroy();
+    for (const shut of entry.shuts.splice(0)) shut();
+    return undefined;
+  }
+
+  // Holds the stream's shutdown while the kernel may have bytes of it to send.
+  function deferShutdown(stream, entry) {
+    const final = stream._final;
+    stream._final = function shutting(cb) {
+      const shut = () => {
+        entry.shut = true;
+        final.call(this, cb);
+      };
+      if (this.destroyed || !sending(entry)) return shut();
+      entry.closing ||= Date.now();
+      entry.shuts.push(shut);
+      return undefined;
+    };
+  }
+
+  function schedule(delay) {
+    const at = Date.now() + delay;
+    if (polling || (timer && due <= at)) return;
+    clearTimeout(timer);
+    due = at;
+    timer = setTimeout(poll, delay);
+    timer.unref();
+  }
+
+  function hold(state) {
+    for (const entry of state.entries) {
+      if (entry.corked) continue;
+      entry.corked = true;
+      entry.raw.cork();
+    }
+    schedule(Math.max(0, last + soonest - Date.now()));
+  }
+
+  // Uncorks what fits in the share, counted as written; at least one once the job holds
+  // nothing.
+  function release(state, limit) {
+    for (const entry of state.entries) {
+      if (!entry.corked) continue;
+      if (state.est + entry.kept > limit && state.est > 0) continue;
+      entry.corked = false;
+      state.est += entry.kept;
+      entry.kept = 0;
+      entry.raw.uncork();
+    }
+  }
+
+  // A closed connection holds nothing: it was reset if the kernel might have held any.
+  function forget(entry) {
+    entry.state.entries.delete(entry);
+    if (entry.state.entries.size === 0 && jobs.get(entry.state.job) === entry.state) jobs.delete(entry.state.job);
+  }
+
+  async function poll() {
+    timer = null;
+    polling = true;
+    // The kernel's answer will not include what is written from here on, nor what node is
+    // still handing it (which goes in as the kernel has room, corked or not); what node
+    // keeps back is counted when let go, as ending the socket does too.
+    for (const state of jobs.values()) {
+      for (const entry of state.entries) {
+        if (!entry.raw.writableCorked) entry.kept = 0;
+        entry.base = entry.wrote - (entry.raw.writableLength - entry.kept);
+        entry.asked = entry.raw.bytesWritten - entry.raw.writableLength;
+      }
+    }
+    let rows;
+    try { rows = await queues(); } catch (e) { rows = e; }
+    polling = false;
+    last = Date.now();
+    if (rows instanceof Error) {
+      if (!failing) {
+        failing = true;
+        say(null, `the kernel's queues of the connections out cannot be read (${rows.message}): until they can, a job may have ${fallback} connections out open, and what they hold is not counted`);
+        for (const state of jobs.values()) release(state, Infinity);
+      }
+      // Nothing tells any longer when what a closing connection was sent is taken.
+      for (const state of jobs.values()) for (const entry of state.entries) if (entry.closing) settle(entry);
+      if (jobs.size) schedule(every);
+      return;
+    }
+    if (failing) {
+      failing = false;
+      say(null, 'the kernel\'s queues of the connections out can be read again');
+    }
+    const byPorts = new Map();
+    for (const row of rows) {
+      const key = `${row.localPort} ${row.remotePort}`;
+      if (!byPorts.has(key)) byPorts.set(key, []);
+      byPorts.get(key).push(row);
+    }
+    let total = 0;
+    for (const state of jobs.values()) {
+      state.queued = 0;
+      for (const entry of state.entries) {
+        entry.wrote -= entry.base;
+        entry.sentAt = entry.asked;
+        entry.queued = 0;
+        entry.sending = 0;
+        for (const row of byPorts.get(`${entry.localPort} ${entry.remotePort}`) ?? []) {
+          if (row.local !== entry.local || row.remote !== entry.remote || row.bytes < entry.queued) continue;
+          entry.queued = row.bytes;
+          entry.sending = row.sending;
+        }
+        if (entry.closing && !entry.raw.destroyed) {
+          if (!sending(entry)) settle(entry);
+          else if (last - entry.closing >= linger) {
+            say(state.job, `${to(entry)} is reset: the far host had not taken what it was sent ${linger / 1000} s after the job ended it`, 'ended');
+            reset(entry);
+          }
+        }
+        if (!entry.raw.destroyed) state.queued += entry.queued;
+      }
+      total += state.queued;
+    }
+    // Every job's share is the same, so the job furthest past its share holds the most.
+    for (;;) {
+      let worst = null;
+      let fullest = null;
+      for (const state of jobs.values()) {
+        if (total <= bytes || (worst && state.queued <= worst.queued)) continue;
+        for (const entry of state.entries) {
+          if (entry.raw.destroyed || entry.queued === 0 || (worst === state && entry.queued <= fullest.queued)) continue;
+          worst = state;
+          fullest = entry;
+        }
+      }
+      if (!worst) break;
+      say(worst.job, `${to(fullest)} is reset: the connections out of all jobs held more than the ${bytes / 2 ** 20} MiB of this machine's memory they may, and this job's ${(worst.queued / 2 ** 20).toFixed(1)} MiB the most past its share`, 'full');
+      reset(fullest);
+      total -= fullest.queued;
+      worst.queued -= fullest.queued;
+    }
+    const limit = share();
+    for (const state of jobs.values()) {
+      state.est = 0;
+      for (const entry of state.entries) if (!entry.raw.destroyed) state.est += entry.queued + entry.wrote;
+      release(state, limit);
+    }
+    if (jobs.size) schedule([...jobs.values()].some((state) => [...state.entries].some((e) => e.corked)) ? soonest : every);
+  }
+
+  function add(job, raw) {
+    if (!jobs.has(job)) jobs.set(job, { job, entries: new Set(), est: 0, queued: 0 });
+    const state = jobs.get(job);
+    const entry = {
+      raw, state, wrote: 0, base: 0, queued: 0, sending: 0, sentAt: raw.bytesWritten, asked: raw.bytesWritten, corked: false, kept: 0,
+      closing: 0, closed: false, shuts: [], shut: false,
+      local: plainAddress(raw.localAddress), localPort: raw.localPort,
+      remote: plainAddress(raw.remoteAddress), remoteText: raw.remoteAddress, remotePort: raw.remotePort,
+    };
+    state.entries.add(entry);
+    entryOf.set(raw, entry);
+    const write = raw.write;
+    raw.write = function counted(chunk, encoding, cb) {
+      const n = typeof chunk === 'string' ? Buffer.byteLength(chunk, typeof encoding === 'string' ? encoding : 'utf8') : chunk.length;
+      entry.wrote += n;
+      state.est += n;
+      if (!failing && !entry.corked && state.est >= share()) hold(state);
+      if (entry.corked) entry.kept += n;
+      return write.call(this, chunk, encoding, cb);
+    };
+    const destroy = raw._destroy;
+    raw._destroy = function closing(err, cb) {
+      if (this._handle && sending(entry) && !entry.shut) this.resetAndClosing = true;
+      return destroy.call(this, err, cb);
+    };
+    deferShutdown(raw, entry);
+    raw.once('close', () => forget(entry));
+    schedule(every);
+  }
+
+  function close(raw) {
+    const entry = entryOf.get(raw);
+    if (failing || !sending(entry)) return raw.destroy();
+    entry.closing ||= Date.now();
+    entry.closed = true;
+    return undefined;
+  }
+
+  function over(raw, secure) {
+    deferShutdown(secure, entryOf.get(raw));
+  }
+
+  function lingering(job) {
+    let n = 0;
+    for (const entry of jobs.get(job)?.entries ?? []) if (entry.closed) n++;
+    return n;
+  }
+
+  function full(job) {
+    const state = jobs.get(job);
+    return failing && !!state && state.entries.size >= fallback;
+  }
+
+  function drop(job) {
+    const state = jobs.get(job);
+    if (!state) return;
+    jobs.delete(job);
+    for (const entry of state.entries) reset(entry);
+  }
+
+  return { add, over, close, lingering, full, drop, fallback };
+}

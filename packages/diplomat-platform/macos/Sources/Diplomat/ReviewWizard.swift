@@ -145,11 +145,14 @@ enum AgentSpawner {
         case neverStarted(terminal: String, waited: TimeInterval, tokenItem: String = "")
         case noToken(item: String)
         case headless
+        case network
 
         var errorDescription: String? {
             switch self {
             case .headless:
                 return "a headless self-test opens no agent terminal"
+            case .network:
+                return "the Diplomacy Network is on, so no agent starts on this machine"
             case .write(let m): return "Couldn't stage prompt: \(m)"
             case .osascript(let code, let stderr):
                 let s = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1133,7 +1136,7 @@ struct ReviewWizardView: View {
             queueSweep(cfg)
             return
         }
-        // The SAME pipeline the auto-monitor rides — dedup, ban, tracking — only the
+        // The SAME pipeline the auto-monitor rides - dedup, ban, tracking - only the
         // trigger (this click) and its policies (foreground, none of the automatic-work
         // gates) differ. See `AgentDispatchGate`.
         let term = AgentSpawner.resolved(store.terminal)
@@ -1142,8 +1145,9 @@ struct ReviewWizardView: View {
                                  prURL: trackingPRURL,
                                  prNumber: store.isRootCheckout(cfg.checkout) ? cfg.prRef.number : nil,
                                  authorLogin: reviewedAuthorLogin,
-                                 counter: nil, directory: cfg.checkout)
-        status = "Launching \(term.title)…"
+                                 counter: nil, directory: cfg.checkout,
+                                 allows: .init(review: cfg))
+        status = store.dispatchingText(terminal: term.title)
         Task {
             status = statusText(for: await store.dispatchAgent(job, source: .panel),
                                 terminal: term.title)
@@ -1186,7 +1190,7 @@ struct ReviewWizardView: View {
 ///
 /// A wizard SPAWN is a `.panel` dispatch, and none of the automatic-task cap, the
 /// rate-limit budget and the free-disk floor applies to a human's click, so
-/// `.atCapacity`, `.unaffordable` and `.lowDisk` are answers only a monitor gets —
+/// `.atCapacity`, `.unaffordable` and `.lowDisk` are answers only a monitor gets -
 /// as is `.notAllowed`, which speaks for the review monitor's own finds.
 /// They are spelled out rather than folded into a `default`, so adding an outcome
 /// keeps failing this switch until someone decides what the wizard should say about it.
@@ -1200,5 +1204,8 @@ func statusText(for outcome: Store.DispatchOutcome, terminal: String) -> String 
     case .unaffordable: return "Too little rate limit left for automatic work."
     case .lowDisk: return "Too little free disk for automatic work."
     case .failed(let msg): return "Failed: \(msg)"
+    case .offered: return "Offered to the pool · \(Fmt.clock(Date()))"
+    case .offering: return NetworkText.offering
+    case .networkRefused(let why), .networkDown(let why): return "Not offered: \(why)"
     }
 }

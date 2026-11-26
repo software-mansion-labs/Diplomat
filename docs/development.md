@@ -204,6 +204,16 @@ DIPLOMAT_RENDER=panel    ./Diplomat.app/Contents/MacOS/Diplomat  # snapshot a sc
                                                      #   wizard[-other|-specific[-mine|-theirs]|-wrong|-banned]
                                                      #   devices[-open|-procs]|conflicts[-other|-specific|-wrong]
                                                      #   devices-screen[-remote[-away]|-off] (the Devices screen)
+                                                     #   network-screen (the Network screen over a synthetic
+                                                     #   daemon snapshot: three pools, one of them left);
+                                                     #   network-screen-starting (a daemon still coming up, no
+                                                     #   pool yet); network-screen-failed (no tor and no docker
+                                                     #   to use); network-screen-down (the daemon not
+                                                     #   answering); network-screen-unsaved (a change the
+                                                     #   config refused, hours that leave this machine none of
+                                                     #   its own jobs); network-screen-off (the switch off);
+                                                     #   network-panel (the main panel saying what of the
+                                                     #   network does not work)
                                                      #   audit[-issues|-prs|-all]
                                                      #   telemetry (the screen over a synthetic ledger, written to a
                                                      #   scratch dir); telemetry-panel (the same inside the panel)
@@ -250,6 +260,11 @@ DIPLOMAT_PIPELINE_TEST=1 ...                     # self-test: what each pipeline
                                                      #   switch, the forces. Spawns nothing, runs no gh/claude/Linear;
                                                      #   DIPLOMAT_PIPELINE_E2E=<dir> adds real syncs through
                                                      #   stubs of those three you supply (see PipelineTest.live)
+DIPLOMAT_NETWORK_TEST=1  ...                     # self-test: the Diplomacy Network through the Store against a
+                                                     #   stand-in daemon on a scratch socket (DN_BASE_DIR): what is
+                                                     #   posted each cycle, a job offered and never spawned, a run
+                                                     #   withdrawn, priced and retired, the switch going off.
+                                                     #   Starts no daemon, opens no terminal; exit code = verdict
 DIPLOMAT_APIWATCH_TEST=1 ...                     # self-test: who a scan may type into (an agent's session,
                                                      #   including one a terminal only shows through tmux;
                                                      #   never a plain shell). Reads no terminal, sends nothing
@@ -300,6 +315,8 @@ scripts/macos-vm-test.sh            # KEEP_VM=1 leaves the VM up afterwards
 Cadences and paths are overridable too, for tuning: `DIPLOMAT_AUTOFIX_SECS`,
 `DIPLOMAT_APIWATCH_SECS`, `DIPLOMAT_PROC_POLL_SECS` (min 2s),
 `DIPLOMAT_CORE` (where the shared `assets/` live), `DIPLOMAT_DEVICE_ALLOCATOR_DIR`,
+`DIPLOMAT_DIPLOMACY_NETWORK_DIR` (the `diplomacy-network` package whose installer starts the
+daemon), `DN_BASE_DIR` (the daemon's directory, its socket in it),
 `DIPLOMAT_NODE` (the `node` to use),
 `DIPLOMAT_REPO` (a single repo root for the agents - outranks Settings ▸ *Repo roots*),
 `DIPLOMAT_CONFIG` (where that shared `config.json` lives), and for the
@@ -328,10 +345,11 @@ alone gets a job that installs *only* what that package needs, so a dependency
 creeping back in fails a build instead of going unnoticed:
 the [`szpont`](../packages/szpont/README.md) launcher is tested with nothing but
 pytest installed, and
-[`device-allocator`](../packages/device-allocator/README.md) and
-[`remote-machines`](../packages/remote-machines/README.md) with nothing but Node.
+[`device-allocator`](../packages/device-allocator/README.md),
+[`remote-machines`](../packages/remote-machines/README.md) and
+[`diplomacy-network`](../packages/diplomacy-network/README.md) with nothing but Node.
 
-CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) is seven jobs:
+CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) is eight jobs:
 `swift-macos` (build both Swift packages + the core smoke + headless panel and
 telemetry renders + the helper self-tests), `swift-core-linux` (proves the core builds on
 Linux, and publishes a static `diplomat-core` binary), `python-linux` (pytest
@@ -339,7 +357,15 @@ against that binary, so the golden-prompt parity is proven across languages),
 `szpont` (the launcher, and the built
 wheel installed into a venv that has never seen the checkout), `szpont-npm` (the
 same launcher in JavaScript, held to the Python one's plan machine shape for
-machine shape), `node-device-allocator`, and `node-remote-machines`.
+machine shape), `node-device-allocator`, `node-remote-machines`, and
+`node-diplomacy-network`.
+
+A second workflow,
+[`diplomacy-network-e2e.yml`](../.github/workflows/diplomacy-network-e2e.yml), runs the
+Diplomacy Network daemon against the real docker engine on every change under
+`packages/diplomacy-network` or `packages/daemon-core`, and against the real Tor network when
+dispatched by hand with `tor` set. The forge is a stand-in, and the cases that need a model
+credential print SKIP.
 
 ```
 packages/
@@ -355,6 +381,9 @@ packages/
                                  machines this one reaches over SSH (ssh config, mDNS, known_hosts; only
                                  hosts whose key is already trusted), their load re-read every minute and
                                  capabilities every 5, and the steering that sends artifact-producing work to them
+
+  diplomacy-network/           ← the Diplomacy Network daemon (see its README): pools over Tor, jobs in
+                                 containers, forge actions in the requester's name
 
   daemon-core/                 ← what both MCP daemons share: the unix-socket client and singleton server,
                                  atomic writes, the Claude Code installer layers, the test runner
@@ -393,6 +422,9 @@ packages/
                                    `claude -p` classifier
         CommsLog.swift             ~/.diplomat/comms/events.jsonl, both applets' log, folded for the screen
         LoginShell.swift           locating a CLI through the operator's login shell, past any alias
+        Network.swift              the Diplomacy Network as the applets see it: what an offer carries, the
+                                   pools and the room posted each cycle, the daemon's snapshot decoded, the
+                                   hours, and what of the network does not work (NetworkTrouble)
         Pipeline.swift             the Pipeline's model: items, stages, lanes, the graph, effects, settings
         PipelineTick.swift         one pipeline sync: read, rate, fast-track, split, merge, the effects owed
         PipelineRead.swift         a sync's GitHub and Linear reads, and the edges between what they read
@@ -406,8 +438,8 @@ packages/
       DiplomatCoreSmoke/       ← Linux-buildable core self-test (filters + prompts + golden files + live dump)
       DiplomatCoreCLI/         ← thin `build-prompt` CLI over the core (ships as the `diplomat-core` binary),
                                  so the Linux front-end shells out for Review/Issues/Conflicts/Audit prompts
-                                 instead of reimplementing them; `tool-data` and `telemetry` expose the two
-                                 engines the Linux side reimplements, and `pipeline-teams` its parse of the
+                                 instead of reimplementing them; `tool-data`, `telemetry` and `network` expose
+                                 the engines the Linux side reimplements, and `pipeline-teams` its parse of the
                                  Linear teams setting, so the parity tests can diff them;
                                  `comms-tick`, `comms-auth`, `comms-feed` and `comms-effect` run Comms for the Linux applet,
                                  and `pipeline-tick` and `pipeline-last` the Pipeline
@@ -417,7 +449,8 @@ packages/
   diplomat-runtime/            ← the platform-neutral Python half: the twin of diplomat-core plus
                                  everything below the UI that has no Swift counterpart
     diplomat_runtime/            no Qt, no AppKit - the assets loader, PR triage, the run book, token
-                                 accounting, the spawner. The Linux applet imports it
+                                 accounting, the spawner. The Linux applet imports it.
+                                 `network.py` is the twin of the core's `Network.swift`
 
   diplomat-platform/           ← the platform wrappers: one UI each over that same core
     macos/                     ← macOS SwiftUI app - thin UI over the core
@@ -459,6 +492,10 @@ packages/
         PipelineMonitor.swift      the pipeline's sync loop, applying each effect to the queue, its attempt records
         PipelineView.swift         the Pipeline screen: the graph of issues and PRs, lanes, the selected card
         PipelineTest.swift         self-test of what each effect does to the queue (DIPLOMAT_PIPELINE_TEST)
+        DiplomacyNetwork.swift     bridge to the Diplomacy Network daemon: its socket's routes, its installer's daemon verbs, the screen's words
+        NetworkMonitor.swift       the daemon's lifecycle, the per-cycle pools and admit posts, the Network screen's actions
+        NetworkScreen.swift        the Network screen: the daemon's status, the hour settings, one panel per pool
+        NetworkTest.swift          self-test of offers, runs and the switch against a stand-in daemon (DIPLOMAT_NETWORK_TEST)
         TelemetryView.swift        the Telemetry screen: the bell curve, the rate-limit windows, the backlog and finished-work series, the token split
         TelemetryLog.swift         writes/reads ~/.diplomat/pr-monitor/telemetry.jsonl (append-only, rotated)
         UsageScan.swift            Claude Code transcript scanner: repo-vs-other tokens, per-task attribution
@@ -472,7 +509,8 @@ packages/
         RepoPaths.swift            locate this app's own checkout (DIPLOMAT_SELF_REPO → the checkout the bundle sits in → the one it recorded → ~/dev/diplomat),
                                    the sibling packages it reaches for, and the agents' repo roots
         AppConfig.swift            the cross-process settings file (~/.diplomat/config.json), shared with the
-                                   Linux applet and the two MCP daemons
+                                   Linux applet, the two MCP daemons and the Diplomacy Network daemon;
+                                   the network's switch as last read from it (~/.diplomat/network-switch.json)
       install/                 ← build-app + the autostart / auto-update (un)installers (launchd)
       tests/                   ← installers.sh: what those two installers write, run against stubs
     linux/                     ← Linux Qt6/PySide6 desktop app (see its README)
@@ -491,7 +529,9 @@ packages/
                                  both and demands the same facts and the same plan
 
 .github/workflows/ci.yml       ← swift-macos · swift-core-linux · python-linux · szpont · szpont-npm ·
-                                 node-device-allocator · node-remote-machines
+                                 node-device-allocator · node-remote-machines · node-diplomacy-network
+.github/workflows/diplomacy-network-e2e.yml  ← the Diplomacy Network daemon against real docker, and
+                                               real Tor on request
 .github/workflows/release-szpont.yml     ← every push to main → the next minor on PyPI + npm, from one
                                            verified commit; tag szpont-v* to release what a tree states
 ```

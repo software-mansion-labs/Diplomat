@@ -331,7 +331,8 @@ def repo_root_paths() -> list[str]:
 #: ``RepoPaths.rootsTTL``.
 ROOTS_TTL = 60.0
 
-_roots_cache: tuple[tuple, float, list[LocalRepo], bool, bool, bool] | None = None
+_roots_cache: tuple[tuple, float, list[LocalRepo], bool, bool, bool,
+                    list[LocalRepo], list[str]] | None = None
 _roots_followers: list[weakref.WeakMethod] = []
 
 
@@ -351,15 +352,20 @@ def _resolved_roots() -> tuple[list[LocalRepo], bool, bool, bool]:
     key = (tuple(paths), configured)
     now = time.monotonic()
     if _roots_cache is None or _roots_cache[0] != key or now - _roots_cache[1] >= ROOTS_TTL:
-        remotes = {p: out for p in map(os.path.expanduser, paths)
+        expanded = list(map(os.path.expanduser, paths))
+        remotes = {p: out for p in expanded
                    if (out := localrepos.remote_config(p)) is not None}
         hosts = localrepos.gitlab_hosts()
         before = _roots_cache[2] if _roots_cache else None
-        _roots_cache = (key, now,
-                        localrepos.resolve_roots(paths, remotes, configured, hosts),
+        roots = localrepos.resolve_roots(paths, remotes, configured, hosts)
+        named = any(localrepos.entries(p, remotes.get(p, ""), hosts=hosts) for p in expanded)
+        _roots_cache = (key, now, roots,
                         localrepos.all_resolve(paths, remotes, hosts),
                         localrepos.primary_resolves(paths, remotes, hosts),
-                        localrepos.guessed(paths, remotes, hosts))
+                        localrepos.guessed(paths, remotes, hosts),
+                        roots if named else [],
+                        [p for p in expanded
+                         if p not in remotes and localrepos.checkout_remotes(p) is None])
         if before is not None and _roots_cache[2] != before:
             for ref in list(_roots_followers):
                 method = ref()
@@ -381,6 +387,16 @@ def repo_roots() -> list[LocalRepo]:
     call per root at most that often, and a root that failed to resolve (a missing
     checkout, a ``git`` timeout) or whose remotes changed is read again within it."""
     return list(_resolved_roots()[0])
+
+
+def roots_linking() -> tuple[list[LocalRepo], list[str]]:
+    """Of one reading of the root paths: the roots a path's own remote names - none
+    while no path resolved, the one root of :func:`repo_roots` then standing in for the
+    configured repo - and the paths, ``~`` expanded, that could not be read: missing, or
+    ``git`` failing on one. A path that was read and has no GitHub or GitLab remote is
+    in neither."""
+    _resolved_roots()
+    return list(_roots_cache[6]), list(_roots_cache[7])
 
 
 def roots_complete() -> bool:
