@@ -720,7 +720,7 @@ struct PipelineDetail: View {
     }
     var revokeEnabled: Bool { enabled && !forcedRevoke }
 
-    /// Twin of the Linux detail's.
+    /// Twin of `pipelineview.taken_over_line`.
     static func takenOverLine(_ item: PipelineItem) -> String {
         "Taken over: neither its rating nor its " + (item.kind == .pr ? "diff floor" : "triage") + " holds it"
     }

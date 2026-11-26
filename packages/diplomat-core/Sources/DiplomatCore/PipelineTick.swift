@@ -977,9 +977,9 @@ final class PipelineSync {
     }
 
     /// What merging `pr`, read again with `Gate`, would close: whether it closes an open
-    /// issue (unless taken over) and each one is a candidate, and what no read judged. GitHub also closes the
-    /// issues a closing word names in its title or a commit message. Each is judged as these
-    /// fresh reads have it, whatever the sync's first read saw.
+    /// issue (unless taken over) and each one is a candidate, and what no read judged. GitHub
+    /// also closes the issues a closing word names in its title or a commit message. Each is
+    /// judged as these fresh reads have it, whatever the sync's first read saw.
     func freshCloses(_ pr: PipelineEntry, linear: LinearJudged) -> (fixes: Bool, unjudged: [String]) {
         let closing = pr.closing.filter(open) + linear.closing
         var unjudged = pr.closingPast ? ["issues past what one read lists"] : []
@@ -1339,9 +1339,8 @@ final class PipelineSync {
 
     func takenOver(_ e: PipelineEntry) -> Bool { state.takenOver[e.id] != nil }
 
-    /// Applies the revokes `control.json` holds now, which a press since this sync was handed
-    /// its own put there: right before each merge and the asks, so neither acts on a takeover
-    /// taken back, the item's own or that of an issue a PR closes.
+    /// Applies the revokes pressed since this sync started, from `control.json`: right before
+    /// each merge and the asks, so neither acts on a takeover taken back, an issue's included.
     func lateRevokes() {
         guard blocked == nil else { return }
         for id in PipelineControl.read(in: dir)?.revoke ?? [] where state.takenOver[id] != nil {
@@ -1385,8 +1384,8 @@ final class PipelineSync {
 
     /// The operator's revokes, then takeovers. A revoke needs no read: it forgets the
     /// takeover, and a PR goes off the fast track until taken over again, which `track`
-    /// writes to its labels. A takeover is recorded once a read right before refuses it nothing; a PR's
-    /// once `fastTrack` is on it, which forgets what came off it before.
+    /// writes to its labels. A takeover is recorded once a read right before refuses it
+    /// nothing; a PR's once `fastTrack` is on it, which forgets what came off it before.
     func takeOver() {
         if let blocked {
             for id in settings.force?.revoke ?? [] { notice("\(id)'s takeover was not revoked: \(blocked)") }
