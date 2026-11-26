@@ -1115,7 +1115,11 @@ struct SettingsView: View {
     private var linearLoginButton: some View {
         Group {
             if store.linearSigningIn {
-                Button("Cancel") { store.cancelLinearSignIn() }
+                HStack(spacing: 6) {
+                    Button("Copy link") { store.copyLinearPage() }
+                        .disabled(store.linearSignInPage == nil || store.linearSignIn == nil)
+                    Button("Cancel") { store.cancelLinearSignIn() }.disabled(store.linearSignIn == nil)
+                }
             } else if store.linearLogin != nil {
                 Button {
                     Task { await store.signOutOfLinear() }
@@ -1159,11 +1163,14 @@ struct SettingsView: View {
     }
 
     static func linearLoginSummary(_ store: Store) -> String {
+        if store.linearSigningIn {
+            return store.linearSignInPage?.opened == false ? "No browser opened: Copy link and paste it into one"
+                : "Waiting for the browser…"
+        }
+        if let note = store.linearLoginNote { return note }
         if ProcessInfo.processInfo.environment[LinearAPI.envVar]?.isEmpty == false {
             return "$\(LinearAPI.envVar), which wins over the login"
         }
-        if store.linearSigningIn { return "Waiting for the browser…" }
-        if let note = store.linearLoginNote { return note }
         guard let login = store.linearLogin else { return "Not signed in" }
         return "Signed in as \(login.user) (\(login.organization))"
     }

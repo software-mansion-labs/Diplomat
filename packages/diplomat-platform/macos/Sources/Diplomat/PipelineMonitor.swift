@@ -162,9 +162,10 @@ extension Store {
                 result = await Task.detached(priority: .utility) {
                     PipelineTick.run(settings: settings)
                 }.value
-                // A login Linear no longer accepts is forgotten by the sync.
-                refreshLinearLogin()
             }
+            // The sync forgets a login it can no longer refresh; a sign-out under way reads
+            // it once it ends.
+            if !linearSigningOut { refreshLinearLogin() }
             let ran = Store.pipelineRan(result, started: started)
             // Taken by this sync; what was forced during it waits for the next.
             if ran, let sent = settings.force {
@@ -590,33 +591,47 @@ extension Store {
         linearLogin = LinearLogin.saved()
     }
 
-    /// Waits off the main actor for the browser to come back, or for Cancel; once signed in,
-    /// syncs as a switch turned on does.
+    /// Waits off the main actor for the browser to come back, or for a Cancel while it has
+    /// not; once signed in, syncs as a switch turned on does.
     func signInToLinear() async {
         guard !linearSigningIn else { return }
-        let cancel = OSAllocatedUnfairLock(initialState: false)
-        linearSignInCancel = cancel
         linearSigningIn = true
         linearLoginNote = nil
         let stub = Store.linearLoginOverride
-        let answer = await Task.detached(priority: .userInitiated) {
+        let signIn = Task.detached(priority: .userInitiated) { [weak self] in
             Result {
-                try LinearLogin.signIn(oauth: stub?.oauth, open: stub?.open ?? { NSWorkspace.shared.open($0) },
-                                       cancelled: { cancel.withLock { $0 } },
-                                       transport: stub?.transport ?? SlackAPI.curl)
+                try LinearLogin.signIn(oauth: stub?.oauth, open: { url in
+                    Task { @MainActor in self?.openLinearPage(url) }
+                }, cancelled: { Task.isCancelled }, transport: stub?.transport ?? SlackAPI.curl)
             }
-        }.value
-        linearSignInCancel = nil
+        }
+        linearSignIn = signIn
+        let answer = await signIn.value
+        linearSignIn = nil
         linearSigningIn = false
+        linearSignInPage = nil
         refreshLinearLogin()
         switch answer {
-        case .success: pipelineSwitched(on: pipelineEnabled)
+        case .success: if pipelineEnabled { Task { await runPipelineSyncOnce() } }
+        case .failure where signIn.isCancelled: break
         case .failure(let error): linearLoginNote = error.localizedDescription
         }
     }
 
+    func openLinearPage(_ url: URL) {
+        guard linearSignIn != nil else { return }
+        linearSignInPage = (url, Store.linearLoginOverride?.open(url) ?? NSWorkspace.shared.open(url))
+    }
+
+    func copyLinearPage(to pasteboard: NSPasteboard = .general) {
+        guard let page = linearSignInPage else { return }
+        pasteboard.clearContents()
+        pasteboard.setString(page.url.absoluteString, forType: .string)
+    }
+
     func cancelLinearSignIn() {
-        linearSignInCancel?.withLock { $0 = true }
+        linearSignIn?.cancel()
+        linearSignIn = nil
     }
 
     /// Off the main actor: the revocation is a call to Linear.

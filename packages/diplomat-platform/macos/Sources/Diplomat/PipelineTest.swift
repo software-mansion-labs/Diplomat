@@ -1547,22 +1547,24 @@ enum PipelineTest {
                 return (200, [:], Data(#"{"data": {"viewer": {"name": "Ada Lovelace"}, "organization": {"name": "Acme"}}}"#.utf8))
             }
         }
-        /// Runs `during` once `action` is under way (`busy`), then waits for it to end.
+        /// Runs `during` once `action` is under way (`busy`, for up to 5s), then waits for it to end.
         func underWay(_ action: @escaping @MainActor () async -> Void, busy: () -> Bool,
-                      during: () -> Void) async {
+                      during: () async -> Void) async {
             let running = Task { await action() }
-            var spins = 0
-            while !busy() && spins < 1000 {
-                spins += 1
+            for _ in 0..<500 {
                 await Task.yield()
+                if busy() { break }
+                try? await Task.sleep(nanoseconds: 10_000_000)
             }
-            during()
+            await during()
             await running.value
         }
-        func signIn(_ browser: StubBrowser, secs: Double = 10, token: (Int, String) = granted,
-                    during: () -> Void = {}) async {
+        /// `during` runs once the sign-in starts, or once its page is handed over (`page`).
+        func signIn(_ browser: StubBrowser, secs: Double = 10, token: (Int, String) = granted, page: Bool = false,
+                    during: () async -> Void = {}) async {
             Store.linearLoginOverride = (open: browser.open, oauth: oauth(secs: secs), transport: linear(token: token))
-            await underWay({ await store.signInToLinear() }, busy: { store.linearSigningIn }, during: during)
+            await underWay({ await store.signInToLinear() },
+                           busy: { page ? store.linearSignInPage != nil : store.linearSigningIn }, during: during)
         }
         /// Whether the row showed it under way.
         func signOut(revoke: Int) async -> Bool {
@@ -1582,45 +1584,72 @@ enum PipelineTest {
               summary() == "$DIPLOMAT_LINEAR_TOKEN, which wins over the login")
         unsetenv(LinearAPI.envVar)
 
-        await signIn(StubBrowser(code: nil, opens: false))
-        check("no browser: the note gives the page to open by hand",
-              store.linearLoginNote?.hasPrefix("No browser opened Linear's sign-in page: "
-                  + "https://linear.invalid/oauth/authorize?client_id=diplomat-selftest&") == true
-                  && summary() == store.linearLoginNote && !store.linearSigningIn && store.linearLogin == nil)
-
         var waiting = ""
         var cleared = false
+        var again = 0.0
+        var lateOpened = true
         let started = Date()
-        await signIn(StubBrowser(code: nil)) {
+        store.linearLoginNote = "an earlier sign-in's failure"
+        await signIn(StubBrowser(code: nil), page: true) {
             waiting = summary()
             cleared = store.linearLoginNote == nil
+            let second = Date()
+            await store.signInToLinear()
+            again = Date().timeIntervalSince(second)
             store.cancelLinearSignIn()
+            let late = URL(string: "https://linear.invalid/late")!
+            store.openLinearPage(late)
+            lateOpened = store.linearSignInPage?.url == late
         }
-        check("signing in: the row waits for the browser, the last note cleared",
+        check("signing in: the row waits for the browser it opened, the last note cleared",
               waiting == "Waiting for the browser…" && cleared)
-        check("Cancel: the sign-in stops at once and says so",
+        check("…a second Sign in… meanwhile starts none", again < 1)
+        check("…a page handed over once cancelled is not opened", !lateOpened)
+        check("Cancel: the sign-in stops at once, and nothing is said to have failed",
               Date().timeIntervalSince(started) < 5 && !store.linearSigningIn && store.linearLogin == nil
-                  && summary() == "Linear sign-in was cancelled")
+                  && store.linearSignInPage == nil && summary() == "Not signed in")
 
-        await signIn(StubBrowser(code: nil), secs: 1)
-        check("a browser that never comes back: the sign-in gives up",
-              summary() == "Linear sign-in was not finished in the browser in time" && store.linearLogin == nil)
+        setenv(LinearAPI.envVar, "lin_api_selftest", 1)
+        await signIn(StubBrowser(code: nil), secs: 1) { waiting = summary() }
+        check("a browser that never comes back: the sign-in gives up, said over $DIPLOMAT_LINEAR_TOKEN's line",
+              waiting == "Waiting for the browser…"
+                  && summary() == "Linear sign-in was not finished in the browser in time" && store.linearLogin == nil)
+        unsetenv(LinearAPI.envVar)
 
         let refused = StubBrowser(code: "stale")
         await signIn(refused, token: (400, #"{"error": "invalid_grant", "error_description": "The code expired"}"#))
         check("a code Linear refuses: said, in the row and the browser, and nothing saved",
-              summary() == "Linear refused the sign-in: invalid_grant: The code expired"
-                  && refused.shown().map { $0.contains("Linear refused the sign-in") } == [true]
+              summary() == "Linear gave no token: invalid_grant: The code expired"
+                  && refused.shown().map { $0.contains("Linear gave no token") } == [true]
                   && store.linearLogin == nil && !FileManager.default.fileExists(atPath: file))
 
+        var ticks = 0
+        Store.pipelineTickOverride = { _ in
+            ticks += 1
+            return PipelineTickResult(at: Date())
+        }
+        defer { Store.pipelineTickOverride = nil }
         let consented = StubBrowser(code: "c")
         await signIn(consented) { waiting = summary() }
+        for _ in 0..<200 where ticks == 0 { try? await Task.sleep(nanoseconds: 10_000_000) }
         check("signed in: as whom Linear said, saved in the pipeline's directory",
               waiting == "Waiting for the browser…" && !store.linearSigningIn && store.linearLoginNote == nil
                   && summary() == "Signed in as Ada Lovelace (Acme)"
                   && store.linearLogin?.refreshToken == "r1" && store.linearLogin == LinearLogin.saved()
                   && consented.shown().map { $0.contains("Diplomat is signed in to Linear as Ada Lovelace (Acme).") }
                       == [true])
+        check("…and a sync runs", ticks == 1)
+        let kept = try? Data(contentsOf: URL(fileURLWithPath: file))
+        try? FileManager.default.removeItem(atPath: file)
+        store.linearSigningOut = true
+        await store.runPipelineSyncOnce()
+        check("a sync during a sign-out leaves the row to it", store.linearLogin != nil)
+        store.linearSigningOut = false
+        await store.runPipelineSyncOnce()
+        check("…any other reads the login again: one the sync forgot is gone", store.linearLogin == nil)
+        try? kept?.write(to: URL(fileURLWithPath: file))
+        store.refreshLinearLogin()
+        Store.pipelineTickOverride = nil
 
         let busy = await signOut(revoke: 200)
         check("Sign out: busy until Linear answers, then signed out and the login gone",
@@ -1633,6 +1662,37 @@ enum PipelineTest {
         check("Linear refusing the revocation: signed out all the same, and said",
               signedIn && store.linearLogin == nil && !FileManager.default.fileExists(atPath: file)
                   && summary() == "Signed out, but Linear answered HTTP 503 to the revocation")
+
+        let exchanging = DispatchSemaphore(value: 0)
+        Store.linearLoginOverride = (open: StubBrowser(code: "c").open, oauth: oauth(secs: 10), transport: { request in
+            guard request.url.absoluteString.hasSuffix("/oauth/token") else { return try linear(token: granted)(request) }
+            exchanging.signal()
+            Thread.sleep(forTimeInterval: 0.5)
+            return (400, [:], Data(#"{"error": "invalid_grant"}"#.utf8))
+        })
+        await underWay({ await store.signInToLinear() }, busy: { exchanging.wait(timeout: .now()) == .success }) {
+            store.cancelLinearSignIn()
+        }
+        check("Cancel once the browser is back: Linear then refusing the code says nothing",
+              store.linearLoginNote == nil && summary() == "Not signed in")
+
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("diplomat-selftest-\(getpid())"))
+        defer { pasteboard.releaseGlobally() }
+        let byHand = StubBrowser(code: "c")
+        var unopened = ""
+        var copied: String?
+        await signIn(StubBrowser(code: nil, opens: false), page: true) {
+            unopened = summary()
+            store.copyLinearPage(to: pasteboard)
+            copied = pasteboard.string(forType: .string)
+            if let copied, let url = URL(string: copied) { _ = byHand.open(url) }
+        }
+        check("no browser: still waiting, and Copy link hands over the page",
+              unopened == "No browser opened: Copy link and paste it into one"
+                  && copied?.hasPrefix("https://linear.invalid/oauth/authorize?client_id=diplomat-selftest&") == true)
+        check("…whose visit signs in", store.linearLogin?.user == "Ada Lovelace"
+              && byHand.shown().map { $0.contains("signed in to Linear") } == [true])
+        _ = await signOut(revoke: 200)
     }
 
     /// `DIPLOMAT_PIPELINE_E2E=<dir>`: real syncs (`PipelineTick.run`) of `acme/app`, checked

@@ -1,6 +1,9 @@
 import DiplomatCore
 import Foundation
 
+/// Set by `linear-login`'s SIGTERM.
+private var linearLoginTerminated: sig_atomic_t = 0
+
 /// The Linux front-end's whole reach into the pipeline, so it has one implementation.
 ///
 ///   pipeline-tick  stdin = PipelineSettings JSON. One sync (`PipelineTick.run`) with the
@@ -12,12 +15,11 @@ import Foundation
 ///   pipeline-teams stdin = `{"raw": <the Linear teams setting>}`. stdout = `{"teams":
 ///                  [{"key", "repo"}], "bad": [entry]}` (`PipelineSettings.LinearTeam.parse`),
 ///                  so the Linux twin of the parse is tested against this one.
-///   linear-login   no stdin. `LinearLogin.signIn`, its page opened with the first of
-///                  `$BROWSER`'s `:`-separated commands that starts (`%s` standing for the
-///                  URL, else it goes last), else `xdg-open` (`open` on macOS), within 10s,
-///                  and printed on stderr; stdout = {"ok":
-///                  true, "user", "organization"} or {"ok": false, "error"}. Exits 0 either
-///                  way; killing it abandons the sign-in.
+///   linear-login   no stdin. `LinearLogin.signIn`; stdout = {"url": <Linear's consent
+///                  page, for the caller to open>} once listening, then {"ok": true,
+///                  "user", "organization"} or {"ok": false, "error"}. Exits 0 either way.
+///                  SIGTERM, or its parent's exit, cancels a sign-in still waiting for the
+///                  browser; one past it ends as it would have.
 ///   linear-logout  no stdin. `LinearLogin.signOut`; stdout = {"ok": true, "warning":
 ///                  <why Linear did not revoke it>|null} or {"ok": false, "error"}.
 ///   linear-whoami  no stdin. stdout = {"user", "organization"} of the saved login, or {}.
@@ -49,9 +51,12 @@ enum PipelineCommand {
     }
 
     static func login() {
+        let parent = getppid()
+        signal(SIGTERM) { _ in linearLoginTerminated = 1 }
         let answer: [String: Any]
         do {
-            let me = try LinearLogin.signIn(open: openBrowser)
+            let me = try LinearLogin.signIn(open: { emitObject(["url": $0.absoluteString]) },
+                                            cancelled: { linearLoginTerminated != 0 || getppid() != parent })
             answer = ["ok": true, "user": me.user, "organization": me.organization]
         } catch {
             answer = ["ok": false, "error": error.localizedDescription]
@@ -69,32 +74,6 @@ enum PipelineCommand {
 
     static func whoami() {
         emitObject(LinearLogin.saved().map { ["user": $0.user, "organization": $0.organization] } ?? [:])
-    }
-
-    /// Launched, and not seen failing within ten seconds; a browser that stays up is left running.
-    private static func openBrowser(_ url: URL) -> Bool {
-        try? FileHandle.standardError.write(contentsOf: Data("Sign in to Linear: \(url.absoluteString)\n".utf8))
-#if os(macOS)
-        let fallback = "/usr/bin/open"
-#else
-        let fallback = "xdg-open"
-#endif
-        let listed = (ProcessInfo.processInfo.environment["BROWSER"] ?? "").split(separator: ":").map(String.init)
-        let until = Date().addingTimeInterval(10)
-        for command in listed.isEmpty ? [fallback] : listed {
-            let bare = command.replacingOccurrences(of: "'%s'", with: "%s").replacingOccurrences(of: "\"%s\"", with: "%s")
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/bin/sh")
-            p.arguments = ["-c", bare.contains("%s") ? bare.replacingOccurrences(of: "%s", with: "\"$1\"") : bare + " \"$1\"",
-                           "sh", url.absoluteString]
-            p.standardInput = FileHandle.nullDevice
-            p.standardOutput = FileHandle.nullDevice
-            p.standardError = FileHandle.nullDevice
-            do { try p.run() } catch { return false }
-            while p.isRunning && Date() < until { usleep(50_000) }
-            if p.isRunning || p.terminationStatus == 0 { return true }
-        }
-        return false
     }
 
     private static func emitObject(_ answer: [String: Any]) {

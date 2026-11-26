@@ -835,14 +835,16 @@ final class Store: ObservableObject {
     @Published var pipelineError: String?
     /// What the screen asked for (Rate now, Fracture) that no sync has taken yet.
     @Published var pipelineForce = PipelineSettings.Force()
-    /// `LinearLogin.saved`, read at launch and after each sign-in and sign-out.
+    /// `LinearLogin.saved`, read at launch, after each sign-in and sign-out, and after each sync.
     @Published var linearLogin: LinearLogin.Saved?
     @Published var linearSigningIn = false
     @Published var linearSigningOut = false
+    /// The running sign-in's consent page, for Copy link, and whether a browser opened it.
+    @Published var linearSignInPage: (url: URL, opened: Bool)?
     /// Why the last sign-in or sign-out failed, or why Linear did not revoke the login.
     @Published var linearLoginNote: String?
-    /// The running sign-in's Cancel.
-    var linearSignInCancel: OSAllocatedUnfairLock<Bool>?
+    /// The running sign-in, until it ends or Cancel cancels it.
+    @Published var linearSignIn: Task<Result<LinearLogin.Saved, Error>, Never>?
     /// Driven from `PipelineMonitor.swift`, hence not private.
     var pipelineMonitorTask: Task<Void, Never>?
     var pipelineWakeObserver: NSObjectProtocol?

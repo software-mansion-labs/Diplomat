@@ -100,8 +100,8 @@ _GH_CALLS_PER_PART = 5
 _MERGES_PER_ROOT = 3
 _GH_CALLS_PER_MERGE = 4
 #: Linear's reads (300 issues, paged), its label and child writes, and the re-read of
-#: their candidates: 3 calls of 100 at ``httpTimeoutSecs``.
-_LINEAR_SECS = 300 + 3 * 30
+#: their candidates: 3 calls of 100 at ``httpTimeoutSecs``; and the login's refresh.
+_LINEAR_SECS = 300 + 4 * 30
 #: The login shell's lookups of ``gh`` and ``claude``, and a margin for the rest.
 _LOOKUP_SECS = 10
 _MARGIN_SECS = 30
@@ -229,9 +229,7 @@ def ran_since(result: dict, started: float) -> bool:
 # MARK: - the Linear login
 
 
-#: Core bounds pipeline.json does not hold: how long the core watches ``$BROWSER``
-#: start, and ``SlackAPI.curl``'s grace past a request's timeout.
-_BROWSER_SECS = 10
+#: ``SlackAPI.curl``'s grace past a request's timeout.
 _HTTP_GRACE_SECS = 5
 
 
@@ -239,14 +237,15 @@ def _linear_call_secs(t: dict) -> float:
     return float(t.get("httpTimeoutSecs", 30)) + _HTTP_GRACE_SECS
 
 
-def _linear_answer(verb: str, timeout: float,
-                   started: Callable | None = None) -> tuple[dict | None, str]:
+def _linear_answer(verb: str, timeout: float, started: Callable | None = None,
+                   line: Callable | None = None) -> tuple[dict | None, str]:
+    """The last line of ``diplomat-core <verb>``'s stdout, read as an object."""
     try:
-        out = promptcore.cli([verb], timeout=timeout, started=started)
+        out = promptcore.cli([verb], timeout=timeout, started=started, line=line)
     except (RuntimeError, promptcore.CoreBinaryMissing) as exc:
         return None, str(exc)
     try:
-        answer = json.loads(out)
+        answer = json.loads((out.strip().splitlines() or [""])[-1])
     except ValueError:
         answer = None
     if not isinstance(answer, dict):
@@ -254,16 +253,23 @@ def _linear_answer(verb: str, timeout: float,
     return answer, ""
 
 
-def linear_login(started: Callable | None = None) -> tuple[dict | None, str]:
+def linear_login(started: Callable | None = None,
+                 page: Callable[[str], None] | None = None) -> tuple[dict | None, str]:
     """``({"user", "organization"}, "")`` once signed in to Linear in the browser, else
-    ``(None, why not)``. ``started`` is handed the core's process, whose death abandons
-    the sign-in. Bounded by the browser's start, ``signInSecs``, and three Linear calls:
-    the code's exchange, who the token is, and a sync's refresh holding the login's
-    lock. Never raises."""
+    ``(None, why not)``. ``page`` is handed Linear's consent page to open, ``started``
+    the core's process, whose SIGTERM cancels a sign-in still waiting for the browser.
+    Bounded by ``signInSecs`` and three Linear calls: the code's exchange, who the token
+    is, and a sync's refresh holding the login's lock. Never raises."""
+    def line(text: str) -> None:
+        with contextlib.suppress(ValueError, AttributeError):
+            url = json.loads(text).get("url")
+            if isinstance(url, str) and page is not None:
+                page(url)
+
     t = tunables()
-    timeout = (_BROWSER_SECS + float((t.get("linearOAuth") or {}).get("signInSecs", 300))
+    timeout = (float((t.get("linearOAuth") or {}).get("signInSecs", 300))
                + 3 * _linear_call_secs(t) + _MARGIN_SECS)
-    answer, error = _linear_answer("linear-login", timeout, started)
+    answer, error = _linear_answer("linear-login", timeout, started, line)
     if answer is None:
         return None, error
     if answer.get("ok") is not True:

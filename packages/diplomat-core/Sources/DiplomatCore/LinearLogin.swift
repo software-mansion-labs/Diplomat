@@ -19,7 +19,6 @@ public enum LinearLogin {
     public enum Failure: LocalizedError, Equatable {
         case noClient
         case noPort([Int])
-        case noBrowser(String)
         case timedOut
         case cancelled
         case declined(String)
@@ -35,8 +34,6 @@ public enum LinearLogin {
             case .noPort(let ports):
                 return "Linear sign-in needs one of the ports " + ports.map(String.init).joined(separator: ", ")
                     + " free on 127.0.0.1, and none was"
-            case .noBrowser(let url):
-                return "No browser opened Linear's sign-in page: \(url)"
             case .timedOut:
                 return "Linear sign-in was not finished in the browser in time"
             case .cancelled:
@@ -44,7 +41,7 @@ public enum LinearLogin {
             case .declined(let why):
                 return "Linear sign-in was declined: \(why)"
             case .refused(let why):
-                return "Linear refused the sign-in: \(why)"
+                return "Linear gave no token: \(why)"
             case .transport(let why):
                 return "Linear could not be reached: \(why)"
             case .expired:
@@ -63,9 +60,14 @@ public enum LinearLogin {
         return try? CommsLog.decoder.decode(Saved.self, from: data)
     }
 
+    /// When the last refresh that failed with its token still good began; until a minute
+    /// later, only an expired token is refreshed.
+    private static var refreshFailed: Date?
+
     /// The `Authorization` a Linear call carries: the override's key as is, else the saved
-    /// token, refreshed first once it expires within `refreshMarginSecs`. Nil when signed out;
-    /// a login Linear no longer accepts is forgotten.
+    /// token, refreshed first once it expires within `refreshMarginSecs`, though while it is
+    /// still good, a minute after a refresh that failed. Nil when signed out; a login that can no
+    /// longer be refreshed is forgotten.
     public static func authorization(in dir: URL = PipelineLog.dir, now: Date = Date(),
                                      transport: @escaping SlackAPI.Transport = SlackAPI.curl) throws -> String? {
         if let env = ProcessInfo.processInfo.environment[LinearAPI.envVar], !env.isEmpty { return env }
@@ -74,7 +76,9 @@ public enum LinearLogin {
         let oauth = model.linearOAuth
         guard let answer = try PrivateFiles.locked(lock(in: dir), { () throws -> String? in
             guard var login = saved(in: dir) else { return nil }
-            if let expires = login.expiresAt, expires <= now.addingTimeInterval(oauth.refreshMarginSecs) {
+            let retry = refreshFailed.map { now.timeIntervalSince($0) >= 60 } ?? true
+            if let expires = login.expiresAt, expires <= now.addingTimeInterval(oauth.refreshMarginSecs),
+               expires <= now || retry {
                 do {
                     guard let refresh = login.refreshToken else { throw Failure.expired }
                     let t = try tokens([("grant_type", "refresh_token"), ("refresh_token", refresh),
@@ -88,7 +92,7 @@ public enum LinearLogin {
                     unlink(file(in: dir).path)
                     throw Failure.expired
                 } catch where expires > now {
-                    // Still good for now: the next read refreshes it.
+                    refreshFailed = now
                 }
             }
             return "Bearer " + login.accessToken
@@ -98,18 +102,19 @@ public enum LinearLogin {
         return answer
     }
 
-    /// Opens Linear's consent page with `open` and waits on 127.0.0.1 for the browser to
-    /// come back, until `signInSecs` pass or `cancelled` answers true; then exchanges the
-    /// code, asks Linear who the token is, and saves the login.
+    /// Hands `open` Linear's consent page once listening on 127.0.0.1, and waits there for the
+    /// browser to come back, until `signInSecs` pass or `cancelled` answers true; then
+    /// exchanges the code, asks Linear who the token is, and saves the login.
     public static func signIn(in dir: URL = PipelineLog.dir, oauth given: CoreAssets.PipelineModel.LinearOAuth? = nil,
-                              open: (URL) -> Bool, cancelled: () -> Bool = { false },
+                              open: (URL) -> Void, cancelled: () -> Bool = { false },
                               transport: @escaping SlackAPI.Transport = SlackAPI.curl) throws -> Saved {
         let model = try config()
         let oauth = given ?? model.linearOAuth
         guard !oauth.clientID.isEmpty else { throw Failure.noClient }
-        guard let listener = oauth.ports.lazy.compactMap({ Listener(port: UInt16(clamping: $0)) }).first else {
-            throw Failure.noPort(oauth.ports)
-        }
+        // A loop: `lazy.compactMap(…).first` binds the port it finds twice.
+        var bound: Listener?
+        for port in oauth.ports where bound == nil { bound = Listener(port: UInt16(clamping: port)) }
+        guard let listener = bound else { throw Failure.noPort(oauth.ports) }
         let redirect = oauth.redirect.replacingOccurrences(of: "{port}", with: String(listener.port))
         let verifier = randomToken()
         let state = randomToken()
@@ -125,7 +130,9 @@ public enum LinearLogin {
             // Lets a second sign-in pick another workspace.
             URLQueryItem(name: "prompt", value: "consent"),
         ]
-        guard let url = page?.url, open(url) else { throw Failure.noBrowser(page?.string ?? oauth.authorize) }
+        guard let url = page?.url else { throw Failure.file("linearOAuth.authorize is not a URL: \(oauth.authorize)") }
+        guard !cancelled() else { throw Failure.cancelled }
+        open(url)
         let path = URLComponents(string: redirect)?.path ?? ""
         let deadline = Date().addingTimeInterval(oauth.signInSecs)
         while true {
@@ -197,7 +204,7 @@ public enum LinearLogin {
     // MARK: - Linear's answers
 
     static func config() throws -> CoreAssets.PipelineModel {
-        do { return try CoreAssets.pipeline() } catch { throw Failure.refused(error.localizedDescription) }
+        do { return try CoreAssets.pipeline() } catch { throw Failure.file(error.localizedDescription) }
     }
 
     static func save(_ login: Saved, in dir: URL) throws {
@@ -225,13 +232,8 @@ public enum LinearLogin {
     static func whoami(_ authorization: String, model: CoreAssets.PipelineModel,
                        transport: @escaping SlackAPI.Transport) throws -> (user: String, organization: String) {
         guard let url = LinearAPI.endpoint(model) else { throw Failure.transport("the Linear API is not a URL") }
-        let data: [String: Any]
-        do {
-            data = try LinearAPI(authorization: authorization, url: url, timeout: model.httpTimeoutSecs,
+        let data = try LinearAPI(authorization: { authorization }, url: url, timeout: model.httpTimeoutSecs,
                                  transport: transport).call("Viewer", [:])
-        } catch {
-            throw Failure.refused(error.localizedDescription)
-        }
         let user = (data["viewer"] as? [String: Any])?["name"] as? String ?? ""
         return (user, (data["organization"] as? [String: Any])?["name"] as? String ?? "")
     }
@@ -346,7 +348,7 @@ public enum LinearLogin {
             let fd = socket(AF_INET, SOCK_STREAM, 0)
 #endif
             guard fd >= 0 else { return nil }
-            // Rebinds past the last sign-in's connections in TIME_WAIT; never past a listener.
+            // Rebinds past the last sign-in's connections in TIME_WAIT.
             var one: Int32 = 1
             setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
             var addr = sockaddr_in()
@@ -381,9 +383,9 @@ public enum LinearLogin {
                 guard poll(&p, 1, Int32(min(left, 0.25) * 1000) + 1) > 0 else { continue }
                 let client = accept(fd, nil, nil)
                 guard client >= 0 else { continue }
-                // A browser's speculative connection, which may send nothing, holds the wait
-                // up no longer.
-                var tv = timeval(tv_sec: 2, tv_usec: 0)
+                // A connection with no head within 3s (a browser's speculative one, which may
+                // send nothing, or a trickle) is dropped, so the wait still ends and hears Cancel.
+                var tv = timeval(tv_sec: 1, tv_usec: 0)
                 setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 #if canImport(Darwin)
                 var one: Int32 = 1
@@ -391,7 +393,8 @@ public enum LinearLogin {
 #endif
                 var head = Data()
                 var chunk = [UInt8](repeating: 0, count: 4096)
-                while head.count < 16384, head.range(of: Data("\r\n\r\n".utf8)) == nil {
+                let giveUp = Date().addingTimeInterval(2)
+                while head.count < 16384, Date() < giveUp, head.range(of: Data("\r\n\r\n".utf8)) == nil {
                     let n = read(client, &chunk, chunk.count)
                     guard n > 0 else { break }
                     head.append(contentsOf: chunk[0..<n])

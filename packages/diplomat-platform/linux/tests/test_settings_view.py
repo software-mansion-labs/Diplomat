@@ -653,6 +653,34 @@ def _settle(view) -> None:
     QApplication.processEvents()
 
 
+def _arrives(probe) -> None:
+    """Waits for ``probe()``, the signals a worker emitted landing meanwhile."""
+    import time
+
+    from PySide6.QtWidgets import QApplication
+
+    deadline = time.monotonic() + 10
+    while not probe():
+        assert time.monotonic() < deadline
+        QApplication.processEvents()
+        time.sleep(0.01)
+
+
+_PAGE = ("https://linear.app/oauth/authorize?client_id=c&redirect_uri="
+         "http%3A%2F%2F127.0.0.1%3A29170%2Flinear%2Fcallback&scope=read%20write&state=s")
+
+
+def _browser(monkeypatch) -> list[str]:
+    """``QDesktopServices.openUrl`` as settingsview reaches it, opening nothing; returns
+    the pages it was asked to open."""
+    from diplomat_app import settingsview
+
+    asked = []
+    monkeypatch.setattr(settingsview.QDesktopServices, "openUrl",
+                        lambda url: asked.append(bytes(url.toEncoded()).decode()) or True)
+    return asked
+
+
 def test_the_linear_login_row_says_who_is_signed_in(make_view, monkeypatch):
     from diplomat_runtime import pipeline
 
@@ -696,7 +724,7 @@ def test_a_sign_in_waits_off_the_ui_thread_and_its_failure_stays_until_the_next(
     back = threading.Event()
     answers = [(None, "Linear refused the sign-in: invalid_grant"), (me, "")]
 
-    def login(self, cancelled):
+    def login(self, cancelled, page):
         assert back.wait(10)
         back.clear()
         answer = answers.pop(0)
@@ -725,7 +753,7 @@ def test_a_sign_in_waits_off_the_ui_thread_and_its_failure_stays_until_the_next(
 
 
 def test_who_is_signed_in_is_read_again_once_a_sync_is_applied(make_view, monkeypatch):
-    """The sync forgets a login Linear no longer accepts."""
+    """A sync forgets the login once Linear refuses its refresh."""
     saved = [{"user": "Ada", "organization": "Ours"}]
     asked = _whoami(monkeypatch, saved)
     view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
@@ -739,27 +767,112 @@ def test_who_is_signed_in_is_read_again_once_a_sync_is_applied(make_view, monkey
 
 
 def test_cancel_stops_the_sign_in_and_says_nothing_failed(make_view, monkeypatch):
+    """Nor opens a page the core names after it."""
     import threading
 
     _whoami(monkeypatch, [])
+    opened = _browser(monkeypatch)
     stopped = threading.Event()
+
+    def login(self, cancelled, page):
+        assert stopped.wait(10)
+        page(_PAGE)
+        return None, "Linear sign-in was cancelled"
+
     monkeypatch.setattr(Store, "stop_linear_login", lambda self: stopped.set())
-    monkeypatch.setattr(Store, "linear_login", lambda self, cancelled: (
-        stopped.wait(10), (None, "diplomat-core linear-login failed: Sign in to Linear"))[1])
+    monkeypatch.setattr(Store, "linear_login", login)
     view, synced = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
     row, button = view._pipeline_login_row, view._linear_button
     button.click()
     button.click()
     assert stopped.is_set()
+    assert (button.text(), button.isEnabled()) == ("Cancel", False)
     _settle(view)
+    assert opened == []
     assert (row.summary(), button.text(), button.isEnabled()) == ("Not signed in",
                                                                   "Sign in…", True)
     assert synced == []
 
 
+def test_a_sign_in_hands_its_page_to_the_desktop_and_copy_link_to_the_clipboard(
+        make_view, monkeypatch):
+    import threading
+
+    from PySide6.QtGui import QGuiApplication
+
+    _whoami(monkeypatch, [])
+    opened = _browser(monkeypatch)
+    handing, back = threading.Event(), threading.Event()
+
+    def login(self, cancelled, page):
+        assert handing.wait(10)
+        handing.clear()
+        page(_PAGE)
+        assert back.wait(10)
+        back.clear()
+        return None, "Linear sign-in was not finished in the browser in time"
+
+    monkeypatch.setattr(Store, "linear_login", login)
+    view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    row, button, copy = view._pipeline_login_row, view._linear_button, view._linear_copy
+    assert not copy.isVisibleTo(view)
+    for _ in range(2):
+        button.click()
+        assert (row.summary(), copy.isVisibleTo(view), copy.isEnabled()) == (
+            "Waiting for the browser…", True, False)
+        handing.set()
+        _arrives(lambda: copy.isEnabled())
+        assert row.summary() == "Waiting for the browser…"
+        QGuiApplication.clipboard().clear()
+        copy.click()
+        assert QGuiApplication.clipboard().text() == _PAGE
+        back.set()
+        _settle(view)
+        assert not copy.isVisibleTo(view)
+        assert row.summary() == "Linear sign-in was not finished in the browser in time"
+    assert opened == [_PAGE, _PAGE]
+
+
+def test_a_sign_in_whose_login_is_saved_syncs_whatever_its_core_answered(make_view,
+                                                                         monkeypatch):
+    """A core killed once it has saved the login."""
+    _whoami(monkeypatch, [])
+    view, synced = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    view._linear_signing_in = True
+    view._on_linear_answered("diplomat-core linear-login failed: ", "",
+                             {"user": "Ada", "organization": "Ours"})
+    assert view._linear_button.text() == "Sign out"
+    assert synced == [True]
+
+
+def test_the_api_key_line_gives_way_to_a_sign_in_and_its_note(make_view, monkeypatch):
+    import threading
+
+    from diplomat_runtime import pipeline
+
+    _whoami(monkeypatch, [])
+    monkeypatch.setenv(pipeline.TOKEN_ENV, "lin_api_x")
+    back = threading.Event()
+
+    def login(self, cancelled, page):
+        assert back.wait(10)
+        return None, "Linear refused the sign-in: invalid_grant"
+
+    monkeypatch.setattr(Store, "linear_login", login)
+    view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    row, button = view._pipeline_login_row, view._linear_button
+    assert row.summary() == "$DIPLOMAT_LINEAR_TOKEN, which wins over the login"
+    button.click()
+    assert row.summary() == "Waiting for the browser…"
+    back.set()
+    _settle(view)
+    assert row.summary() == "Linear refused the sign-in: invalid_grant"
+    assert "#FF3B30" in row._summary.styleSheet()
+
+
 def test_a_sign_out_says_what_it_could_not_do(make_view, monkeypatch):
-    """Who is signed in is asked as the card is built and after each action, never on a
-    refresh."""
+    """Who is signed in is asked as the card is built, after each action and after each
+    sync, never on a refresh."""
     import threading
 
     from diplomat_runtime import pipeline

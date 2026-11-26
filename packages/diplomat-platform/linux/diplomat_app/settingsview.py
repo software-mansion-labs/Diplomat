@@ -18,8 +18,8 @@ import os
 import shutil
 import time
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QColorDialog,
     QComboBox,
@@ -86,6 +86,8 @@ class SettingsView(QWidget):
     # A Linear sign-in's or sign-out's answer: (what failed, why Linear did not revoke
     # the login, linear-whoami's answer after).
     _linear_answered = Signal(str, str, object)
+    # Linear's consent page, as the sign-in's core hands it over.
+    _linear_page_arrived = Signal(str)
 
     def __init__(self, store: Store) -> None:
         super().__init__()
@@ -151,6 +153,7 @@ class SettingsView(QWidget):
         store.pipeline_sync_applied.connect(self._on_pipeline_sync_applied)
         self._comms_tested.connect(self._on_comms_tested)
         self._linear_answered.connect(self._on_linear_answered)
+        self._linear_page_arrived.connect(self._on_linear_page)
         self._refresh_allocator_ui()
         self._refresh_update_ui()
         self._refresh_autofix_ui()
@@ -1416,10 +1419,19 @@ class SettingsView(QWidget):
                    "in, commas, semicolons or new lines between them. A key is read in "
                    "capitals, as Linear spells it."))
         options.addWidget(self._pipeline_teams_row)
+        self._linear_copy = QPushButton("Copy link")
+        self._linear_copy.clicked.connect(
+            lambda: QGuiApplication.clipboard().setText(self._linear_page[0]))
         self._linear_button = QPushButton()
         self._linear_button.clicked.connect(self._on_linear_button)
+        login_control = QWidget()
+        login_row = QHBoxLayout(login_control)
+        login_row.setContentsMargins(0, 0, 0, 0)
+        login_row.setSpacing(6)
+        login_row.addWidget(self._linear_copy)
+        login_row.addWidget(self._linear_button)
         self._pipeline_login_row = self._track(SettingRow(
-            "Linear login", self._linear_button,
+            "Linear login", login_control,
             detail="Signs in through the browser to Diplomat's Linear app, which reads the "
                    "tracked teams' issues and writes labels and child issues as you. The "
                    "login is kept in ~/.diplomat/pipeline/linear-login.json, readable by "
@@ -1429,9 +1441,11 @@ class SettingsView(QWidget):
                    "over it. Without a login, the teams set here are skipped with a notice "
                    "and GitHub still syncs, but no PR is merged."))
         options.addWidget(self._pipeline_login_row)
-        # linear-whoami's last answer; the last action's failure or warning (text, colour).
+        # linear-whoami's last answer; the last action's failure or warning (text, colour);
+        # the sign-in's consent page and whether it opened.
         self._linear_me = pipeline.linear_whoami()
         self._linear_note: tuple[str, str] | None = None
+        self._linear_page: tuple[str, bool] | None = None
         self._linear_signing_in = self._linear_cancelled = False
         self._refresh_pipeline_ui()
         return card
@@ -1479,6 +1493,7 @@ class SettingsView(QWidget):
         if self._linear_signing_in:
             self._linear_cancelled = True
             self._linear_button.setEnabled(False)
+            self._refresh_linear_login()
             self.store.stop_linear_login()
             return
         signing_in = self._linear_me is None
@@ -1493,7 +1508,8 @@ class SettingsView(QWidget):
             error = warning = ""
             try:
                 if signing_in:
-                    error = self.store.linear_login(lambda: self._linear_cancelled)[1]
+                    error = self.store.linear_login(lambda: self._linear_cancelled,
+                                                    self._linear_page_arrived.emit)[1]
                 else:
                     ok, text = pipeline.linear_logout()
                     error, warning = ("", text) if ok else (text, "")
@@ -1503,12 +1519,21 @@ class SettingsView(QWidget):
 
         self.store.start_background(ask, name="linear-login" if signing_in else "linear-logout")
 
+    def _on_linear_page(self, url: str) -> None:
+        # A Cancel can land before the page does.
+        if not self._linear_cancelled:
+            self._linear_page = (url, QDesktopServices.openUrl(QUrl(url)))
+            self._refresh_linear_login()
+
     def _on_linear_answered(self, error: str, warning: str, me: object) -> None:
-        signed_in = self._linear_signing_in and not error
+        me = me if isinstance(me, dict) else None
+        # Saved is what counts: a core killed after saving answers an error.
+        signed_in = self._linear_signing_in and me is not None
         if self._linear_cancelled:
             error = ""
         self._linear_signing_in = self._linear_cancelled = False
-        self._linear_me = me if isinstance(me, dict) else None
+        self._linear_page = None
+        self._linear_me = me
         self._linear_note = ((error, _RED) if error
                              else (f"Signed out, but {warning}", _ORANGE) if warning
                              else None)
@@ -1518,22 +1543,25 @@ class SettingsView(QWidget):
             self.store.run_pipeline_sync_async()
 
     def _on_pipeline_sync_applied(self) -> None:
-        # The sync forgets a login Linear no longer accepts. An action under way reads
-        # it once answered.
+        # A sync forgets a login it can no longer refresh. An action under way
+        # reads it once answered.
         if not self._linear_signing_in and self._linear_button.isEnabled():
             self._linear_me = pipeline.linear_whoami()
             self._refresh_linear_login()
 
     def _refresh_linear_login(self) -> None:
-        me, row = self._linear_me, self._pipeline_login_row
+        me, row, page = self._linear_me, self._pipeline_login_row, self._linear_page
         self._linear_button.setText("Cancel" if self._linear_signing_in
                                     else "Sign in…" if me is None else "Sign out")
-        if os.environ.get(pipeline.TOKEN_ENV):
-            row.set_summary(f"${pipeline.TOKEN_ENV}, which wins over the login")
-        elif self._linear_signing_in:
-            row.set_summary("Waiting for the browser…")
+        self._linear_copy.setVisible(self._linear_signing_in)
+        self._linear_copy.setEnabled(page is not None and not self._linear_cancelled)
+        if self._linear_signing_in:
+            row.set_summary("Waiting for the browser…" if page is None or page[1]
+                            else "No browser opened: Copy link and paste it into one")
         elif self._linear_note:
             row.set_summary(self._linear_note[0], color=self._linear_note[1])
+        elif os.environ.get(pipeline.TOKEN_ENV):
+            row.set_summary(f"${pipeline.TOKEN_ENV}, which wins over the login")
         elif me is not None:
             row.set_summary(f"Signed in as {me['user']} ({me['organization']})")
         else:
