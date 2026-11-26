@@ -117,6 +117,7 @@ public enum LinearLogin {
                     try save(login, in: dir)
                 } catch Failure.expired {
                     unlink(file(in: dir).path)
+                    unlink(cache(in: dir).path)
                     throw Failure.expired
                 } catch where expires > now {
                     refreshFailed = now

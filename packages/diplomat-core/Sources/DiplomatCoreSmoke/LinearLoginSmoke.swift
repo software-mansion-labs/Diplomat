@@ -421,8 +421,11 @@ func linearLoginSmoke() throws {
           == .transport("timed out after 30s"), "an expired token whose refresh failed")
     auth.tokenFails = false
     auth.token = (400, ["error": "invalid_grant"])
+    let authCache = authDir.appendingPathComponent("linear-mcp-cache.json")
+    try Data("{}".utf8).write(to: authCache)
     check(failure { try LinearLogin.access(in: authDir, now: now, transport: auth.transport) } == .expired
-          && LinearLogin.saved(in: authDir) == nil, "a login whose refresh Linear refuses is forgotten")
+          && LinearLogin.saved(in: authDir) == nil && !FileManager.default.fileExists(atPath: authCache.path),
+          "a login whose refresh Linear refuses is forgotten, with the issues kept under it")
     try saveLogin(authDir, expires: now.addingTimeInterval(-60), refresh: nil)
     check(failure { try LinearLogin.access(in: authDir, now: now, transport: auth.transport) } == .expired,
           "expired with nothing to refresh it with")

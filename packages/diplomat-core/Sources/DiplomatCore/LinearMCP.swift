@@ -117,7 +117,7 @@ final class LinearMCP {
         }
         let more = streams.contains { !$0.buffer.isEmpty || !$0.done }
         defer { save() }
-        let nodes = try page.map(listed)
+        let nodes = try page.compactMap(listed)
         if !more { complete = true }
         return ["viewer": try viewer().viewer,
                 "issues": ["pageInfo": ["hasNextPage": more, "endCursor": more ? "more" as Any : NSNull()], "nodes": nodes]]
@@ -193,13 +193,13 @@ final class LinearMCP {
     private var touched: Set<String> = []
     private var complete = false
 
-    private func listed(_ issue: [String: Any]) throws -> [String: Any] {
+    private func listed(_ issue: [String: Any]) throws -> [String: Any]? {
         guard let id = issue["uuid"] as? String else { throw LinearAPI.Failure.api("list_issues answered an issue with no uuid") }
         if let d = kept[id], d.updatedAt == issue["updatedAt"] as? String {
             touched.insert(id)
             return try shape(issue, d)
         }
-        return try fresh(id)
+        return try found(id)
     }
 
     private var displayNames: [String: String] = [:]
@@ -258,10 +258,15 @@ final class LinearMCP {
         return n
     }
 
+    /// Only under the login's lock and while it is saved, so a Sign out mid-sync leaves no
+    /// cache; skipped while the lock is held.
     private func save() {
         guard let cache, let data = try? JSONEncoder().encode(complete ? kept.filter { touched.contains($0.key) } : kept)
         else { return }
-        _ = PrivateFiles.writeWhole(data, to: cache)
+        let dir = cache.deletingLastPathComponent()
+        _ = PrivateFiles.locked(LinearLogin.lock(in: dir), wait: false) {
+            if FileManager.default.fileExists(atPath: LinearLogin.file(in: dir).path) { _ = PrivateFiles.writeWhole(data, to: cache) }
+        }
     }
 
     // MARK: - The session

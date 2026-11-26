@@ -1760,6 +1760,8 @@ private func pipelineMCP(base: URL, root: PipelineSettings.Root, team: PipelineS
                                state: "canceled", stateName: "Backlog"))
         let d = base.appendingPathComponent("mcp-\(name)")
         try seedRerate(d, 13, sha("c3"), at: t0.addingTimeInterval(-3600))
+        // The login the issue cache is kept under.
+        if mcp { try Data("{}".utf8).write(to: d.appendingPathComponent("linear-login.json")) }
         return (t, d)
     }
     let (key, keyDir) = try twin(false, "key"), (mcp, mcpDir) = try twin(true, "mcp")
@@ -1841,7 +1843,24 @@ private func pipelineMCP(base: URL, root: PipelineSettings.Root, team: PipelineS
     let sw = PipelineTick.run(settings: every, now: t0, dir: base.appendingPathComponent("mcp-swapped"), io: swappedIO)
     check(sw.notices == ["Linear: the Linear login changed during the sync"] && swapped.authorizations.isEmpty,
           "a login changed mid-sync: \(sw.notices) \(swapped.authorizations)")
+    // Signed out mid-sync: the issues read are not kept.
+    let (out, outDir) = try twin(true, "signed-out")
+    let outCache = outDir.appendingPathComponent("linear-mcp-cache.json")
+    _ = sync(out, every, outDir, t0)
+    let keptBefore = FileManager.default.fileExists(atPath: outCache.path)
+    out.onLinear = { if $0 == "list_issues" { out.onLinear = nil; _ = try? LinearLogin.signOut(in: outDir) } }
+    let so = sync(out, every, outDir, t0.addingTimeInterval(600))
+    check(keptBefore && item(so.result, linearURL("ENG-1")) != nil && !FileManager.default.fileExists(atPath: outCache.path),
+          "signed out during a sync: \(keptBefore) \(so.result.notices)")
+
     // An issue Linear cannot find is left out of a batch, as GraphQL leaves it.
+    let (lost, lostDir) = try twin(true, "lost")
+    lost.tickets[3].updated = at("11:30")
+    lost.onLinear = { if $0 == "get_issue" { lost.tickets.removeAll { $0.identifier == "ENG-40" } } }
+    let lo = sync(lost, every, lostDir, t0)
+    check(lo.result.unread.isEmpty && !lo.result.notices.contains { $0.contains("get_issue") }
+          && item(lo.result, linearURL("ENG-40")) == nil && item(lo.result, linearURL("ENG-1")) != nil,
+          "an issue listed, then not found: \(lo.result.notices) \(lo.result.unread)")
     func vanished(_ mcp: Bool) throws -> Synced {
         let (t, d) = try twin(mcp, "vanished-\(mcp)")
         t.tickets[2].state = "canceled"
