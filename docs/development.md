@@ -433,6 +433,7 @@ packages/
         PipelineRead.swift         a sync's GitHub and Linear reads, and the edges between what they read
         PipelineGate.swift         the floor a PR's diff puts under its rating, and the merge holds
         PipelineRater.swift        the sandboxed `claude -p` rating and split calls (assets/pipeline.json)
+        PipelineRateJob.swift      a rating a sync asked for, as the queued job a front-end runs
         PipelineLayout.swift       the graph's grid layout
         PipelineLog.swift          ~/.diplomat/pipeline: the log, the last sync, its state, cached ratings and live switches
         Telemetry.swift            folds the telemetry ledger + every figure on the Telemetry screen: window
@@ -445,7 +446,7 @@ packages/
                                  the engines the Linux side reimplements, and `pipeline-teams` its parse of the
                                  Linear teams setting, so the parity tests can diff them;
                                  `comms-tick`, `comms-auth`, `comms-feed` and `comms-effect` run Comms for the Linux applet,
-                                 and `pipeline-tick` and `pipeline-last` the Pipeline
+                                 and `pipeline-tick`, `pipeline-last` and `pipeline-rate` the Pipeline
     Tests/fixtures/            ← test inputs and expected outputs, not shipped
       prompts/                   expected prompt outputs (`<mode>.expected.txt`), asserted byte-for-byte by BOTH platforms' tests
 
