@@ -900,7 +900,8 @@ def _pipeline_item(url: str, label: str, title: str, *, kind: str, stage: str, l
                    state: str = "open", author: str | None = None, assignees: tuple = (),
                    rating: tuple | None = None, rated_by: str | None = None,
                    why: str | None = None, floor: tuple | None = None, hold: str | None = None,
-                   head: str | None = None, clean: str | None = None) -> dict:
+                   head: str | None = None, clean: str | None = None,
+                   taken_over: bool = False) -> dict:
     """A ``PipelineItem`` as the Swift encoder writes it: an optional that is nil is no
     key. ``rating`` and ``floor`` are ``(risk, complexity)``."""
     from diplomat_runtime import comms
@@ -912,7 +913,8 @@ def _pipeline_item(url: str, label: str, title: str, *, kind: str, stage: str, l
         if value is not None:
             item[key] = {"risk": value[0], "complexity": value[1]}
     for key, value in (("author", author), ("ratedBy", rated_by), ("why", why),
-                       ("hold", hold), ("headSha", head), ("cleanAt", clean)):
+                       ("hold", hold), ("headSha", head), ("cleanAt", clean),
+                       ("takenOver", taken_over or None)):
         if value is not None:
             item[key] = value
     return item
@@ -988,6 +990,10 @@ def pipeline_fixture_result(slug: str, now: datetime) -> dict:
                        kind="issue", source="linear", repo="ENG", stage="candidate",
                        lane="fast", writable=True, updated=ago(30), author="Marta Kowalska",
                        rating=low, rated_by="local", hold="its rating labels could not be written"),
+        _pipeline_item(issue(1833), "#1833", "Keep the device list in boot order across reboots",
+                       kind="issue", stage="candidate", lane="fast", writable=True,
+                       updated=ago(70), author="ola", rating=("medium", "medium"),
+                       rated_by="label", taken_over=True, **gh),
         _pipeline_item(onion, f"{other}#31", "Onion circuits drop after an hour idle",
                        kind="issue", repo=other, stage="unrated", lane="unrated",
                        writable=True, updated=ago(5), author="latekvo"),
@@ -1004,8 +1010,9 @@ def pipeline_fixture_result(slug: str, now: datetime) -> dict:
           (issue(1820), 0, 1), (issue(1821), 1, 1), (issue(1822), 1, 2), (pr(1826), 2, 2),
           (issue(1829), 0, 3), (pr(1830), 1, 3),
           (linear("ENG-40"), 0, 4), (linear("ENG-42"), 1, 4),
-          (onion, 0, 5),
-          (issue(1790), 0, 6), (pr(1795), 1, 6)]
+          (issue(1833), 0, 5),
+          (onion, 0, 6),
+          (issue(1790), 0, 7), (pr(1795), 1, 7)]
     edges = [(issue(1801), pr(1810), "fixes"), (issue(1801), pr(1811), "fixes"),
              (pr(1810), pr(1811), "stacked"),
              (issue(1820), issue(1821), "child"), (issue(1820), issue(1822), "child"),
@@ -1031,6 +1038,9 @@ def pipeline_fixture_result(slug: str, now: datetime) -> dict:
         (120, issue(1829), "rated",
          "medium risk, medium complexity: The list's diffing and the allocator's event order "
          "both play a part, and which of them owns the fix is a judgement call."),
+        (75, issue(1833), "rated", "medium risk, medium complexity"),
+        (75, issue(1833), "labelled", "+risk:medium +complexity:medium"),
+        (70, issue(1833), "takeover", "taken over from the Pipeline screen, whatever its rating"),
         (55, issue(1801), "rated", "low risk, low complexity"),
         (55, issue(1801), "labelled", "+risk:low +complexity:low"),
         (40, pr(1810), "rated", "low risk, low complexity: One timeout around one call, with a "

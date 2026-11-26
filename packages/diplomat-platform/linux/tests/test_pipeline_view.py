@@ -704,8 +704,8 @@ def test_each_action_asks_the_store_about_the_selected_item(store, monkeypatch):
     # Not mine: a sync rates only my own PRs.
     (P3, ["open"]),
     (I4, ["open", "rate"]),
-    # Unrated, writable, no child: it may be split.
-    (I6, ["open", "rate", "fracture"]),
+    # Unrated, writable, no child: it may be split, and taken over.
+    (I6, ["open", "rate", "fracture", "takeover"]),
     # Someone else's: never split.
     (I7, ["open", "rate"]),
     # Done: nothing left to ask.
@@ -736,13 +736,14 @@ def test_a_linear_issue_is_rated_and_split_only_in_a_team_with_a_root(store, mon
     monkeypatch.setattr(review, "repo_roots", lambda: [LocalRepo("o", "r", "/src/r")])
     view = PipelineView(store)
     view.select(linear)
-    assert list(view.buttons) == ["open"]
+    # A takeover with no root is the sync's to refuse (``takeoverRefused``).
+    assert list(view.buttons) == ["open", "takeover"]
     store.pipeline_linear_teams_raw = "ENG=o/elsewhere"
     store.pipeline_changed.emit()
-    assert list(view.buttons) == ["open"]
+    assert list(view.buttons) == ["open", "takeover"]
     store.pipeline_linear_teams_raw = "eng=O/R"
     store.pipeline_changed.emit()
-    assert list(view.buttons) == ["open", "rate", "fracture"]
+    assert list(view.buttons) == ["open", "rate", "fracture", "takeover"]
 
 
 def test_an_issue_with_children_is_not_split_again(store):
@@ -751,7 +752,7 @@ def test_an_issue_with_children_is_not_split_again(store):
     store.pipeline_result = result
     view = PipelineView(store)
     view.select(I4)
-    assert list(view.buttons) == ["open", "rate"]
+    assert list(view.buttons) == ["open", "rate", "takeover"]
 
 
 def test_an_ask_waiting_for_its_sync_shows_asked(store, monkeypatch):
@@ -850,14 +851,14 @@ def test_tracker_text_in_an_actions_tooltip_is_never_read_as_markup(store):
     result = _result()
     result["items"][4] = {**result["items"][4], "hold": triaged, "fractureRefused": triaged,
                           "author": "<i>m</i>"}
-    result["items"][5] = {**result["items"][5], "rateRefused": banned}
+    result["items"][5] = {**result["items"][5], "rateRefused": banned, "takeoverRefused": banned}
     store.pipeline_result = result
     store.banned_authors = [bans.BannedAuthor("<i>m</i>", "prompt injection")]
     view = PipelineView(store)
     view.select(I5)
     assert [_tip(view.buttons[k]) for k in ("fracture", "fix")] == [triaged, banned]
     view.select(I6)
-    assert _tip(view.buttons["rate"]) == banned
+    assert [_tip(view.buttons[k]) for k in ("rate", "takeover")] == [banned, banned]
 
 
 def test_a_sync_that_read_no_item_says_what_it_did_not_read(store, monkeypatch):
@@ -1024,6 +1025,133 @@ def test_off_the_asks_are_disabled_and_open_is_not(store):
     assert view.status.text() == "Off - turn the Pipeline on in Settings."
     # The last result is still drawn.
     assert len(view.canvas.cards) == 9
+
+
+@pytest.mark.parametrize("fields, offered", [
+    ({"stage": "unrated"}, True),
+    ({"stage": "human"}, True),
+    ({"stage": "human", "kind": "pr", "state": "draft"}, True),
+    ({"stage": "candidate"}, False),
+    ({"stage": "fractured"}, False),
+    ({"stage": "fixing"}, False),
+    ({"stage": "fast-track", "kind": "pr"}, False),
+    ({"stage": "human", "writable": False}, False),
+    ({"stage": "human", "state": "closed"}, False),
+    ({"stage": "human", "takenOver": True}, False),
+])
+def test_a_takeover_is_for_a_writable_open_item_unrated_or_left_to_a_human(fields, offered):
+    item = {**_item(1, stage="human", lane="human"), **fields}
+    assert pipelineview.can_take_over(item) is offered
+
+
+def _taken_over(*at: int) -> dict:
+    """:func:`_result` with the items at ``at`` taken over, and PR #2 left to a human."""
+    result = _result()
+    result["items"][1] = {**result["items"][1], "stage": "human", "lane": "human"}
+    for i in at:
+        result["items"][i] = {**result["items"][i], "takenOver": True}
+    return result
+
+
+def test_authorize_takeover_says_what_a_sync_does_with_it_and_asks_for_one(store, monkeypatch):
+    calls = _recorder(store, monkeypatch)
+    store.pipeline_result = _taken_over()
+    view = PipelineView(store)
+
+    def shown() -> tuple[str, bool, str]:
+        btn = view.buttons["takeover"]
+        return btn.text(), btn.isEnabled(), _tip(btn)
+
+    view.select(I6)
+    assert shown() == ("Authorize takeover", True, "Hand it to Diplomat in a sync started now: "
+                       "a fix candidate whatever its rating or triage")
+    assert "revoke" not in view.buttons
+    view.buttons["takeover"].click()
+    view.select(P2)
+    assert shown() == ("Authorize takeover", True, "Hand it to Diplomat in a sync started now: "
+                       "reviewed until clean and merged, whatever its rating")
+    view.buttons["takeover"].click()
+    assert calls == [("takeover", I6), ("takeover", P2)]
+
+
+def test_revoke_takeover_takes_it_back_and_a_pr_off_the_fast_track_for_good(store, monkeypatch):
+    calls = _recorder(store, monkeypatch)
+    store.pipeline_result = _taken_over(1, 4)
+    view = PipelineView(store)
+    view.select(I5)
+    assert [k for k in view.buttons if k in ("takeover", "revoke")] == ["revoke"]
+    revoke = view.buttons["revoke"]
+    assert (revoke.text(), revoke.isEnabled(), _tip(revoke)) == (
+        "Revoke takeover", True, "Take it back from Diplomat in a sync started now")
+    assert "Taken over: its rating does not hold it" in _labels(view.detail)
+    revoke.click()
+    view.select(P2)
+    assert _tip(view.buttons["revoke"]) == ("Take it back from Diplomat in a sync started now: "
+                                            "off the fast track for good")
+    view.buttons["revoke"].click()
+    assert calls == [("revoke", I5), ("revoke", P2)]
+    view.select(I6)
+    assert "Taken over: its rating does not hold it" not in _labels(view.detail)
+
+
+def test_a_takeover_or_revoke_waiting_for_its_sync_shows_asked(store, monkeypatch):
+    monkeypatch.setattr(store, "run_pipeline_sync_async", lambda: None)
+    store.pipeline_result = _taken_over(4)
+    view = PipelineView(store)
+    view.select(I6)
+    view.buttons["takeover"].click()
+    assert (view.buttons["takeover"].text(), view.buttons["takeover"].isEnabled()) == (
+        "Takeover asked", False)
+    view.select(I5)
+    view.buttons["revoke"].click()
+    assert (view.buttons["revoke"].text(), view.buttons["revoke"].isEnabled()) == (
+        "Revoke asked", False)
+
+
+def test_authorize_takeover_is_off_where_a_sync_would_refuse_it_and_revoke_is_not(store):
+    """A revoke reads nothing: neither the ban list nor a refusal holds it."""
+    refused = "it carries the label wip"
+    result = _taken_over(4)
+    result["items"][4] = {**result["items"][4], "takeoverRefused": refused}
+    result["items"][5] = {**result["items"][5], "takeoverRefused": refused}
+    store.pipeline_result = result
+    view = PipelineView(store)
+
+    def shown(item_id: str, key: str) -> tuple[bool, str]:
+        view.select(item_id)
+        return view.buttons[key].isEnabled(), _tip(view.buttons[key])
+
+    assert shown(I6, "takeover") == (False, refused)
+    bans.banned_path().parent.mkdir(parents=True, exist_ok=True)
+    bans.banned_path().write_text("{", encoding="utf-8")
+    store.refresh_activity()
+    assert shown(I6, "takeover") == (False, "The prompt-injection ban list could not be read")
+    assert shown(I5, "revoke") == (True, "Take it back from Diplomat in a sync started now")
+
+
+def test_every_action_fits_the_detail(store, app):
+    """The pane does not scroll sideways."""
+    store.pipeline_result = _taken_over(4)
+    view = PipelineView(store)
+    view.resize(1100, 700)
+    view.show()
+    try:
+        view.select(I5)
+        app.processEvents()
+        assert list(view.buttons) == ["open", "rate", "fracture", "fix", "revoke"]
+        assert view.detail.minimumSizeHint().width() <= view.detail_scroll.viewport().width()
+    finally:
+        view.close()
+
+
+def test_off_neither_a_takeover_nor_a_revoke_is_asked(store):
+    store.pipeline_result = _taken_over(4)
+    store.pipeline_enabled = False
+    view = PipelineView(store)
+    view.select(I6)
+    assert not view.buttons["takeover"].isEnabled()
+    view.select(I5)
+    assert not view.buttons["revoke"].isEnabled()
 
 
 # MARK: the status line and banners
