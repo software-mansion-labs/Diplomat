@@ -2079,6 +2079,16 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
           && mr.result.effects.isEmpty,
           "banned during a rating: \(mr.claude) \(mr.writes) \(mr.result.effects)")
     try ban([])
+    let lateBan = only([1])
+    lateBan.issues[0].author = "mallory"
+    var forceOne = PipelineSettings(roots: [root], rate: true)
+    forceOne.force = .init(rate: [issueURL(1)])
+    let lb1 = sync(lateBan, forceOne, dir("ban-after-ask"), t0, drain: false)
+    try ban(["mallory"])
+    let lb2 = sync(lateBan, PipelineSettings(roots: [root], rate: true), dir("ban-after-ask"), later(5), drain: false)
+    check(lb1.result.effects == [rateFX(issueURL(1), 1, "1", forced: true, author: "mallory")] && lb2.result.effects.isEmpty,
+          "banned after Rate now asked: \(lb1.result.effects) \(lb2.result.effects)")
+    try ban([])
     let midAsks = only([1, 13, 14, 24, 27])
     midAsks.issues[issue(midAsks, 1)].labels = lowLow
     midAsks.prs[number(midAsks, 14)].reviews = []
@@ -5074,6 +5084,33 @@ private func pipelineRateJobs(base: URL, root: PipelineSettings.Root, t0: Date) 
     let q2 = sync(q, PipelineSettings(roots: [root], rate: true), qd, later(5), drain: false)
     check(asks(q2) == [rateFX(prURL(11), 11, "2", author: "op")] && files(qd) == ["2.job.json"],
           "pushed to while queued: \(q2.result.effects) \(files(qd))")
+
+    // A second rating's answer is no second rating once a person took the first one's labels
+    // off: the PR is asked about again, for a first rating.
+    let relabelled = only([14, 24])
+    let rd = dir("relabelled")
+    let track = PipelineSettings(roots: [root], rate: true, fastTrack: true)
+    let r1 = sync(relabelled, track, rd, t0, drain: false)
+    _ = PipelineRateJob.run(item: prURL(14), stamp: "1", dir: rd, io: relabelled.io())
+    relabelled.prs[0].labels = ["diplomat:fast-track"]
+    let r2 = sync(relabelled, track, rd, later(5), drain: false)
+    check(asks(r1) == [rateFX(prURL(14), 14, "1", author: "op")] && !r2.events.contains { $0.kind == .rerated }
+          && asks(r2) == [rateFX(prURL(14), 14, "2", author: "op")],
+          "rating labels taken off before the second rating: \(r1.result.effects) \(trail(r2.events, r2.result)) "
+          + "\(r2.result.effects)")
+
+    // A job that answers while a sync runs is not handed to the queue again.
+    let midway = only([1, 13, 27])
+    let wd = dir("answered-midway")
+    try seedRerate(wd, 13, sha("c3"), at: later(-60))
+    let rateMerge = PipelineSettings(roots: [root], rate: true, merge: true)
+    midway.onReread = { _ in _ = PipelineRateJob.run(item: issueURL(1), stamp: "1", dir: wd, io: midway.io()) }
+    let w1 = sync(midway, rateMerge, wd, t0, drain: false)
+    let answered = files(wd)
+    let w2 = sync(midway, rateMerge, wd, later(5), drain: false)
+    check(merged(w1) && answered == ["1.answer.json", "1.job.json"] && asks(w1).isEmpty
+          && w2.writes == ["+risk:low #1", "+complexity:low #1"],
+          "answered during the sync that asked: \(w1.writes) \(answered) \(w1.result.effects) \(w2.writes)")
 
     // At most `asks` unforced ratings wait at once; one answered makes room for one more.
     let many = only([])
