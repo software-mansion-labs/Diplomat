@@ -35,6 +35,8 @@ final class MainWindow {
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         window.contentViewController = hosting
+        // Else AppKit focuses the search field on open.
+        window.initialFirstResponder = hosting.view
         window.title = "Diplomat"
         window.isReleasedWhenClosed = false
         window.contentMinSize = NSSize(width: MainRoot.minWidth, height: MainRoot.minHeight)
@@ -113,7 +115,8 @@ enum WindowLog {
 }
 
 /// The window's content: the two-column panel at its fixed width, centred, scrolling
-/// when the window is shorter than it, and sideways when narrower.
+/// when the window is shorter than it, and sideways when narrower. The Pipeline screen
+/// fills the window instead, its graph and detail scrolling on their own.
 struct MainRoot: View {
     /// Two columns: the left holds the monitoring lists (status, bans, sessions,
     /// devices, activity), the right every interactive surface (search, tool grid,
@@ -131,23 +134,29 @@ struct MainRoot: View {
     /// The screen the window opens on (`DIPLOMAT_REOPEN_TEST` opens it elsewhere).
     var screen: ContentView.PanelScreen = .main
 
+    /// Whether the screen up fills the window.
+    struct Fills: PreferenceKey {
+        static let defaultValue = false
+        static func reduce(value: inout Bool, nextValue: () -> Bool) { value = value || nextValue() }
+    }
+
+    @State private var fills = false
+
     var body: some View {
         GeometryReader { geo in
-            if geo.size.width < MainRoot.fullWidth {
-                ScrollView([.vertical, .horizontal]) {
-                    panel.frame(width: MainRoot.width)
-                }
-            } else {
-                ScrollView {
-                    panel
-                        .frame(width: MainRoot.width)
-                        .frame(maxWidth: .infinity)
-                }
+            // One scroll view for every size and screen: swapping it for another would
+            // rebuild the panel, dropping its open screen.
+            ScrollView(fills ? .horizontal
+                       : geo.size.width < MainRoot.fullWidth ? [.vertical, .horizontal] : .vertical) {
+                panel
+                    .frame(width: fills ? max(geo.size.width, MainRoot.width) : MainRoot.width)
+                    .frame(maxWidth: .infinity)
             }
         }
         // Else the page drifts down when content grows after the first layout: the
         // activity feed loading in, a screen switch.
         .defaultScrollAnchor(.topLeading)
+        .onPreferenceChange(Fills.self) { fills = $0 }
     }
 
     private var panel: ContentView {

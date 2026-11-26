@@ -38,7 +38,9 @@ enum Render {
         // page of empty placeholder boxes where every switch, picker and field is.
         if what.lowercased().hasPrefix("window-") {
             let mode = String(what.dropFirst("window-".count))
-            runWindow(what: mode, out: out, root: chrome(view(for: mode, store: store), store: store))
+            let size = mode.lowercased().hasPrefix("pipeline")
+                ? NSSize(width: MainRoot.width + 20, height: appWindowSize.height) : nil
+            runWindow(what: mode, out: out, root: chrome(view(for: mode, store: store), store: store), size: size)
             return false
         }
 
@@ -94,7 +96,8 @@ enum Render {
     /// scroller. `DIPLOMAT_RENDER_HEIGHT` sets the window's height (default 800).
     ///
     /// `DIPLOMAT_RENDER=window-<mode>` passes any other mode's view, sized to it, for the
-    /// controls `ImageRenderer` leaves blank.
+    /// controls `ImageRenderer` leaves blank. A Pipeline mode gets `app`'s window size
+    /// instead: that screen fills its window, so fitted to it, its graph has no height.
     private static func runWindow(what: String, out: String, root: some View, size: NSSize? = nil) {
         let hosting = NSHostingController(rootView: root)
         if size != nil { hosting.sizingOptions = [] }

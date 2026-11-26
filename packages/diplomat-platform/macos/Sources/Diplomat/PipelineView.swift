@@ -46,8 +46,11 @@ struct PipelineView: View {
                 HStack(alignment: .top, spacing: 12) {
                     graph(result)
                         .frame(maxWidth: .infinity, alignment: .topLeading)
-                    detail(result)
-                        .frame(width: PipelineView.detailWidth, alignment: .topLeading)
+                    ViewThatFits(in: .vertical) {
+                        detail(result)
+                        ScrollView(.vertical) { detail(result) }
+                    }
+                    .frame(width: PipelineView.detailWidth, alignment: .topLeading)
                 }
             } else {
                 Text(PipelineView.emptyText(enabled: store.pipelineEnabled, synced: result != nil,
@@ -59,7 +62,6 @@ struct PipelineView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .cardChrome(padding: 6)
             }
-            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .onChange(of: selected) { actionError = nil }
@@ -233,10 +235,6 @@ struct PipelineView: View {
 
     // MARK: - The graph
 
-    /// Taller than this, the graph scrolls inside its own frame, so the selected card's
-    /// details stay beside it.
-    static let viewport: CGFloat = 560
-
     @Environment(\.isImageRendering) private var isImageRendering
 
     @ViewBuilder
@@ -256,18 +254,12 @@ struct PipelineView: View {
             Color.clear.frame(height: layout.size.height)
                 .overlay(alignment: .topLeading) { canvas }
                 .clipped()
-        } else if layout.size.height <= PipelineView.viewport {
-            ViewThatFits(in: .horizontal) {
-                canvas
-                ScrollView(.horizontal) { canvas }
-            }
         } else {
             // Both ways only once too wide: a scroll view centres narrower content.
             ViewThatFits(in: .horizontal) {
                 ScrollView(.vertical) { canvas.frame(maxWidth: .infinity, alignment: .topLeading) }
                 ScrollView([.horizontal, .vertical]) { canvas }
             }
-            .frame(height: PipelineView.viewport)
         }
     }
 
