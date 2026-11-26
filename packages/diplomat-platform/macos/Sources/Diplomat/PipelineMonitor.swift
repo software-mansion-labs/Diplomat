@@ -58,7 +58,7 @@ extension Store {
 
     /// The switches as they stand, which a running sync re-reads before each of its writes,
     /// merges and ratings (one that cannot read them keeps those it started with), and the
-    /// revokes asked, which hold a merge it is about to make. Headless
+    /// revokes asked, which it applies right before each merge and its asks. Headless
     /// only into a `DIPLOMAT_PIPELINE_DIR`, so a render or self-test never steers the live
     /// app's sync. Twin of `pipeline.write_control`.
     func writePipelineControl() {

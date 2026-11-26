@@ -45,8 +45,8 @@ CONTROL_KEYS = ("enabled", "rate", "fix", "fastTrack", "merge", "fracture")
 
 
 def write_control(switches: dict) -> None:
-    """The switches, and the ``revoke`` asks (when any), which hold a merge a running sync
-    is about to make. Never raises: a sync that cannot read ``control.json`` goes by the
+    """The switches, and the ``revoke`` asks (when any), which a running sync applies right
+    before each merge and its asks. Never raises: a sync that cannot read ``control.json`` goes by the
     settings it was started with. Twin of ``Store.writePipelineControl``."""
     folder = pipeline_dir()
     tmp = folder / f"control.json.tmp-{os.getpid()}-{uuid.uuid4().hex}"

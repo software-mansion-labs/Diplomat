@@ -144,8 +144,8 @@ counts. A takeover is refused for an item Diplomat may not write to, one carryin
 a banned author, one in a root read in part or whose Linear team has no root, while the ban list
 cannot be read, an issue split already, fixed by an open PR, tracked on GitHub or held by a Linear
 issue tracking it, and a PR closing an issue Diplomat may not fix. **Revoke takeover** takes it back,
-a PR off the fast track until taken over again, and none is merged once you press it, even by a sync
-already running. A takeover also ends once a sync that reads every source whole finds its item
+a PR off the fast track until taken over again. Pressed while a sync runs, it reaches that sync
+too, through `control.json`: no merge or ask after it acts on the takeover. A takeover also ends once a sync that reads every source whole finds its item
 closed, and a PR's when a person takes a fast-track label off it.
 
 ## Ratings
@@ -463,8 +463,8 @@ labels are the state; this is what a sync needs besides:
   carries. An item missing from a read keeps these until it is read merged or closed, or goes 90 days unseen. Also what was last
   logged, so the log does not repeat itself. A `state.json` or `ratings.json` that is there but
   cannot be read leaves every sync reading and showing only, with a notice.
-- `control.json` - the switches as the app has them, rewritten whenever one changes and before
-  each sync.
+- `control.json` - the switches as the app has them, and the revokes asked that no sync has
+  answered, rewritten whenever one changes, a takeover or revoke is asked, and before each sync.
 - `linear-login.json` - the [Linear login](#linear): its tokens, and who it is.
 
 The fix and review asks' attempt records are the app's own (`pipelineAttempts`): a run that reported

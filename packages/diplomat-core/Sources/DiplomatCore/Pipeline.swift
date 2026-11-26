@@ -428,11 +428,11 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
 }
 
 /// The pipeline's switches as the front-end has them now: `control.json` in
-/// `PipelineLog.dir`, which it rewrites whole whenever one changes and before each sync. A
-/// sync reads it right before every outward step and rating call, and skips a step whose
-/// switch, or `enabled`, is off; a forced step needs `enabled` alone, and taking back the
-/// sync's own split claim needs neither. It can only stop what the settings allow. A
-/// missing or incomplete file leaves the settings as they were.
+/// `PipelineLog.dir`, which it rewrites whole whenever one changes, a takeover or revoke is
+/// asked, and before each sync. A sync reads it right before every outward step and rating
+/// call, and skips a step whose switch, or `enabled`, is off; a forced step needs `enabled`
+/// alone, and taking back the sync's own split claim needs neither. It can only stop what
+/// the settings allow. A missing or incomplete file leaves the settings as they were.
 public struct PipelineControl: Codable, Equatable, Sendable {
     public var enabled: Bool
     public var rate: Bool
@@ -440,8 +440,8 @@ public struct PipelineControl: Codable, Equatable, Sendable {
     public var fastTrack: Bool
     public var merge: Bool
     public var fracture: Bool
-    /// The items whose takeover the operator revoked and no sync has been handed yet: none
-    /// is merged meanwhile.
+    /// The items whose takeover the operator revoked and no sync has answered yet: a sync
+    /// running applies them right before each merge and its asks.
     public var revoke: [String]?
 
     public init(enabled: Bool, rate: Bool, fix: Bool, fastTrack: Bool, merge: Bool, fracture: Bool,

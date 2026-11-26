@@ -167,6 +167,8 @@ final class PipelineSync {
     /// The prompt-injection ban list, lowercased, as `may` last read it; nil once a read
     /// failed.
     var banned: Set<String>? = []
+    /// The items whose takeover a revoke asked while this sync ran undid (`lateRevokes`).
+    var lateRevoked: Set<String> = []
     /// Per cleared PR, the code of the hold `settle` found on it.
     var holdCodes: [String: String] = [:]
     /// Each issue a merge this sync asked for may have closed, by its id as `byURL` keys it.
@@ -1337,6 +1339,18 @@ final class PipelineSync {
 
     func takenOver(_ e: PipelineEntry) -> Bool { state.takenOver[e.id] != nil }
 
+    /// Applies the revokes `control.json` holds now, which a press since this sync was handed
+    /// its own put there: right before each merge and the asks, so neither acts on a takeover
+    /// taken back, the item's own or that of an issue a PR closes.
+    func lateRevokes() {
+        guard blocked == nil else { return }
+        for id in PipelineControl.read(in: dir)?.revoke ?? [] where state.takenOver[id] != nil {
+            revoke(id)
+            lateRevoked.insert(id)
+            if let i = pos[id] { entries[i].item.hold = "its takeover was revoked" }
+        }
+    }
+
     /// Forgets `id`'s takeover, if any; a PR's labels come off at `track`.
     func revoke(_ id: String) {
         guard let kind = state.takenOver.removeValue(forKey: id) else { return }
@@ -1922,11 +1936,8 @@ final class PipelineSync {
             let judged = linearJudged(read)
             // Right before the hold is judged: the ban list goes into it.
             guard let fresh = linear == nil ? read : reread(e), may(.merge) else { continue }
-            if takenOver(fresh), PipelineControl.read(in: dir)?.revoke?.contains(e.id) == true {
-                revoke(e.id)
-                entries[i].item.hold = "its takeover was revoked"
-                continue
-            }
+            lateRevokes()
+            if lateRevoked.contains(e.id) { continue }
             let flag = mergeFlag(fresh)
             var hold: (code: String, message: String)?
             if fresh.item.headSha != head {
@@ -2002,6 +2013,7 @@ final class PipelineSync {
     /// The agent work owed, newest item first, judged by the ban list as it reads now; each
     /// logged `asked` once per stamp.
     func owed() -> [PipelineEffect] {
+        lateRevokes()
         let fix = may(.fix), review = may(.fastTrack)
         if fix { recheckLinear() }
         var out: [PipelineEffect] = []

@@ -3680,7 +3680,7 @@ private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: Pipeli
     let ps = sync(pushed, PipelineSettings(roots: [root], fastTrack: true), dir("pushed"), t0)
     check(ps.writes == ["-diplomat:cleared #13"] && stageOf(ps.result, prURL(13)) == "fast-track/fast",
           "pushed past its cleared head: \(ps.writes) \(stageOf(ps.result, prURL(13)))")
-    // Off the fast track for good: re-rated above low/low at an earlier head, or taken off before.
+    // Off the fast track: re-rated above low/low at an earlier head, or taken off before.
     let earlier = only([13, 27])
     try seed(dir("rerated-earlier"),
              PipelineEvent(at: later(-90), item: prURL(13), kind: .rerated, detail: "medium risk, low complexity",
@@ -5169,6 +5169,33 @@ private func pipelineTakeover(base: URL, root: PipelineSettings.Root, team: Pipe
     check(!merged(lr) && said(lr) == [revoked] && lrKept.isEmpty
           && item(lr.result, prURL(11))?.hold == "its takeover was revoked",
           "#11 revoked mid-sync: \(lr.writes) \(said(lr)) \(lrKept) \(stageOf(lr.result, prURL(11)))")
+    // So does an issue's: no merge of the PR fixing it, nor a fix asked for it.
+    func lateIssue(_ name: String, revoked: Bool) throws -> Synced {
+        let t = only([3, 11])
+        var fix = t.prs.removeFirst()
+        _ = sync(t, with(PipelineSettings(roots: [root]), takeover: [issueURL(3)]), dir(name), t0)
+        fix.closes = [3]
+        fix.body = "Fixes #3."
+        t.prs = [fix]
+        _ = sync(t, track, dir(name), later(10))
+        marker(t, 11)
+        try fm.createDirectory(at: dir(name), withIntermediateDirectories: true)
+        PipelineControl(enabled: true, rate: true, fix: false, fastTrack: true, merge: true, fracture: false,
+                        revoke: revoked ? [issueURL(3)] : nil).save(in: dir(name))
+        return sync(t, track, dir(name), later(20))
+    }
+    let kept3 = try lateIssue("issue-kept", revoked: false)
+    let late3 = try lateIssue("issue-revoked", revoked: true)
+    check(merged(kept3) && !merged(late3) && said(late3) == [revoked]
+          && stageOf(late3.result, prURL(11)) == "cleared/fast (\(PipelineGate.Hold.notAFix.message))",
+          "#11 fixing #3, whose takeover is revoked mid-sync: \(kept3.writes) \(late3.writes) \(stageOf(late3.result, prURL(11)))")
+    _ = sync(only([3]), with(fixOnly, takeover: [issueURL(3)]), dir("issue-ask"), t0)
+    PipelineControl(enabled: true, rate: false, fix: true, fastTrack: false, merge: false, fracture: false,
+                    revoke: [issueURL(3)]).save(in: dir("issue-ask"))
+    let ask = sync(only([3]), fixOnly, dir("issue-ask"), later(5))
+    check(ask.result.effects.isEmpty && said(ask) == [revoked] && ask.result.fixable.isEmpty
+          && item(ask.result, issueURL(3))?.hold == "its takeover was revoked",
+          "#3 revoked mid-sync: \(ask.result.effects) \(said(ask)) \(stageOf(ask.result, issueURL(3)))")
     let revokeJSON = String(decoding: try JSONEncoder().encode(
         PipelineControl(enabled: true, rate: false, fix: false, fastTrack: false, merge: false, fracture: false,
                         revoke: ["a"])), as: UTF8.self)
