@@ -133,6 +133,8 @@ private final class Trackers {
         var moreAttachments: [String] = []
         var moreLabels = false
         var state = "started"
+        /// Its state's name, which `list_issues` matches as it matches the type.
+        var stateName: String?
         var archived = false
         /// Linear's `name` for it, the full name, is another: `<displayName> Smith`.
         var creator = (id: "U_REPORTER", displayName: "Reporter")
@@ -267,9 +269,13 @@ private final class Trackers {
     /// use the name that read answered.
     var renamedFrom: String?
 
+    /// Signed in through Linear's MCP server, which `mcpServer` plays, instead of by key.
+    var mcp = false
+
     func io(key: String? = smokeKey) -> PipelineIO {
         PipelineIO(gh: { self.gh($0) }, claude: { self.claude($0, $1, $2, $3) },
-                   linear: { try self.linear($0) }, linearAuth: { key })
+                   linear: { try self.mcp ? self.mcpServer($0) : self.linear($0) },
+                   linearAuth: { key.map { self.mcp ? .init(.mcp, "Bearer " + $0) : .init(.key, $0) } })
     }
 
     // MARK: gh
@@ -704,7 +710,7 @@ private final class Trackers {
             n["attachments"] = ["pageInfo": ["hasNextPage": !t.moreAttachments.isEmpty],
                                 "nodes": t.attachments.map { ["url": $0] }] as [String: Any]
             n["team"] = ["id": t.team == "ENG" ? "T1" : "T_\(t.team)", "key": t.team]
-            n["state"] = ["type": t.state, "name": t.state.capitalized]
+            n["state"] = ["type": t.state, "name": t.stateName ?? t.state.capitalized]
             return n
         }
         switch op {
@@ -777,6 +783,161 @@ private final class Trackers {
                                                                       "url": linearPage(identifier, v["title"] as? String ?? "")]] as [String: Any]])
         default:
             return (400, [:], json(["errors": [["message": "unknown operation \(op)"]]]))
+        }
+    }
+
+    // MARK: Linear's MCP server
+
+    /// Each tool called, in order, and the sessions started.
+    var mcpTools: [String] = []
+    var mcpSessions = 0
+    /// The next tool call finds its session ended, as the server may end one.
+    var mcpSessionEnds = false
+    /// `list_issues` cuts a description past this many characters, as the server does.
+    var mcpCut = 40
+    /// `list_issues` answers at most this many a page, whatever its `limit`.
+    var mcpPage = 50
+    /// `get_user` finds nobody.
+    var mcpNoUsers = false
+    /// Every request is refused as the server refuses a revoked token.
+    var mcpRefused = false
+
+    func mcpServer(_ request: SlackAPI.Request) throws -> (status: Int, headers: [String: String], body: Data) {
+        authorizations.insert(request.headers["Authorization"] ?? "")
+        if mcpRefused {
+            return (401, ["content-type": "application/json"],
+                    json(["error": "invalid_token", "error_description": "Invalid access token"]))
+        }
+        guard let rpc = try JSONSerialization.jsonObject(with: request.body) as? [String: Any],
+              let method = rpc["method"] as? String else { return (400, [:], Data()) }
+        switch method {
+        case "initialize":
+            mcpSessions += 1
+            return (200, ["content-type": "application/json", "mcp-session-id": "s\(mcpSessions)"],
+                    json(["jsonrpc": "2.0", "id": rpc["id"] ?? NSNull(), "result": ["protocolVersion": "2025-06-18"]]))
+        case "notifications/initialized":
+            return (202, [:], Data())
+        case "tools/call":
+            break
+        default:
+            return (400, [:], Data())
+        }
+        guard request.headers["Mcp-Session-Id"] == "s\(mcpSessions)", !mcpSessionEnds,
+              request.headers["MCP-Protocol-Version"] == "2025-06-18" else {
+            mcpSessionEnds = false
+            return (404, [:], Data())
+        }
+        let params = rpc["params"] as? [String: Any] ?? [:]
+        let tool = params["name"] as? String ?? ""
+        let a = params["arguments"] as? [String: Any] ?? [:]
+        mcpTools.append(tool)
+        onLinear?(tool)
+        if linearDown { return (500, [:], Data("Internal Server Error".utf8)) }
+        // An event stream, as the server may answer any request.
+        func reply(_ text: String, error: Bool = false) -> (status: Int, headers: [String: String], body: Data) {
+            var result: [String: Any] = ["content": [["type": "text", "text": text]]]
+            if error { result["isError"] = true }
+            let event = String(decoding: json(["jsonrpc": "2.0", "id": rpc["id"] ?? NSNull(), "result": result]), as: UTF8.self)
+            return (200, ["content-type": "text/event-stream"], Data("event: message\ndata: \(event)\n\n".utf8))
+        }
+        func answer(_ value: Any) -> (status: Int, headers: [String: String], body: Data) {
+            reply(String(decoding: json(value), as: UTF8.self))
+        }
+        func name(_ label: String) -> String { labelBook.first { $0.id == label }?.name ?? "?" }
+        func teamID(_ t: Ticket) -> String { t.team == "ENG" ? "T1" : "T_\(t.team)" }
+        func ticket(_ ref: Any?) -> Int? {
+            let ref = ref as? String ?? ""
+            return tickets.firstIndex { $0.id == ref || $0.identifier == ref.uppercased() }
+        }
+        func issue(_ t: Ticket, full: Bool) -> [String: Any] {
+            let parent = t.parent?.components(separatedBy: "/issue/").last?.split(separator: "/").first.map(String.init)
+            var n: [String: Any] = [
+                "id": t.identifier, "uuid": t.id, "title": t.title, "url": t.url, "updatedAt": t.updated,
+                "description": full || t.description.count <= mcpCut ? t.description
+                    : t.description.prefix(mcpCut) + "… (truncated, use `get_issue` for full description)",
+                "archivedAt": t.archived ? at("09:00") as Any : NSNull(), "status": t.stateName ?? t.state.capitalized,
+                "statusType": t.state, "labels": t.labels.map(name), "createdById": t.creator.id,
+                "assignee": t.assignee?.name ?? NSNull(), "assigneeId": t.assignee?.id ?? NSNull(),
+                "parentId": parent ?? NSNull(), "teamId": teamID(t),
+            ]
+            if full { n["attachments"] = (t.attachments + t.moreAttachments).map { ["id": "att-\($0)", "title": "", "url": $0] } }
+            return n
+        }
+        switch tool {
+        case "whoami":
+            return answer(["user": ["id": "U_OP", "name": "Op"], "workspace": ["name": "Acme"]])
+        case "get_user":
+            guard !mcpNoUsers, let t = tickets.first(where: { $0.creator.id == a["query"] as? String }) else {
+                return reply("User not found", error: true)
+            }
+            return answer(["id": t.creator.id, "name": t.creator.displayName + " Smith", "displayName": t.creator.displayName])
+        case "get_issue":
+            if linearIssueDown { return (500, [:], Data("Internal Server Error".utf8)) }
+            guard let i = ticket(a["id"]) else { return reply("Entity not found: Issue", error: true) }
+            return answer(issue(tickets[i], full: true))
+        case "list_issues":
+            let limit = min((a["limit"] as? NSNumber)?.intValue ?? 50, mcpPage)
+            if let parent = a["parentId"] {
+                let url = ticket(parent).map { tickets[$0].url }
+                let kids = tickets.filter { $0.parent != nil && $0.parent == url && !$0.archived }
+                return answer(["issues": kids.prefix(limit).map { ["id": $0.identifier, "url": $0.url] }, "hasNextPage": false])
+            }
+            let state = a["state"] as? String ?? ""
+            let all = tickets.filter {
+                $0.team == a["team"] as? String && !$0.archived
+                    && ($0.state == state || ($0.stateName ?? $0.state).lowercased() == state.lowercased())
+            }
+                .sorted { $0.updated > $1.updated }
+            let from = Int(a["cursor"] as? String ?? "") ?? 0
+            let more = from + limit < all.count
+            return answer(["issues": all.dropFirst(from).prefix(limit).map { issue($0, full: false) }, "hasNextPage": more,
+                           "cursor": more ? "\(from + limit)" as Any : NSNull()])
+        case "list_issue_labels":
+            let wanted = (a["name"] as? String ?? "").lowercased()
+            let team = a["team"] as? String
+            return answer(["labels": labelBook.filter { $0.name.lowercased() == wanted && ($0.team == nil || $0.team == team) }
+                .map { ["id": $0.id, "name": $0.name, "color": "#5856D6", "description": NSNull(), "archivedAt": NSNull()] },
+                           "hasNextPage": false])
+        case "save_issue_label":
+            let id = "lab-new-\(labelBook.count)"
+            labelBook.append((id, a["name"] as? String ?? "", nil))
+            writes.append("linear-label \(a["name"] as? String ?? "") \(a["color"] as? String ?? "")")
+            return answer(["id": id, "name": a["name"] ?? "", "color": a["color"] ?? ""])
+        case "save_issue" where a["id"] != nil:
+            guard let i = ticket(a["id"]) else { return reply("Entity not found: Issue", error: true) }
+            func label(_ ref: String) -> String? {
+                labelBook.first { $0.id == ref }?.id
+                    ?? labelBook.first { $0.name.lowercased() == ref.lowercased() && ($0.team == nil || $0.team == teamID(tickets[i])) }?.id
+            }
+            for ref in a["addLabels"] as? [String] ?? [] {
+                guard let l = label(ref) else { return reply("Label not found: \(ref)", error: true) }
+                tickets[i].labels.append(l)
+                writes.append("+\(name(l)) \(tickets[i].identifier)")
+            }
+            for ref in a["removeLabels"] as? [String] ?? [] {
+                guard let l = label(ref) else { return reply("Label not found: \(ref)", error: true) }
+                tickets[i].labels.removeAll { $0 == l }
+                writes.append("-\(name(l)) \(tickets[i].identifier)")
+            }
+            return answer(issue(tickets[i], full: true))
+        case "save_issue":
+            guard let parent = ticket(a["parentId"]), a["team"] as? String == "T1" else {
+                return reply("Invalid team or parent", error: true)
+            }
+            let identifier = "ENG-\(nextTicket)"
+            nextTicket += 1
+            tickets.append(Ticket(id: "lin-\(identifier)", identifier: identifier, title: a["title"] as? String ?? "",
+                                  description: a["description"] as? String ?? "", updated: at("12:00"),
+                                  parent: tickets[parent].url, creator: ("U_OP", "Op")))
+            linearChildren.append(a)
+            writes.append("linear-issue \(identifier) \(a["title"] as? String ?? "")")
+            if linearCreatesLost > 0 {
+                linearCreatesLost -= 1
+                return (502, [:], Data("Bad Gateway".utf8))
+            }
+            return answer(issue(tickets[tickets.count - 1], full: true))
+        default:
+            return reply("Unknown tool: \(tool)", error: true)
         }
     }
 }
@@ -1518,7 +1679,7 @@ func pipelineSmoke() throws {
     var rotatingIO = rotating.io()
     rotatingIO.linearAuth = {
         issued += 1
-        return "Bearer t\(issued)"
+        return .init(.key, "Bearer t\(issued)")
     }
     _ = PipelineTick.run(settings: PipelineSettings(roots: [root], linearTeams: [team]), now: t0,
                          dir: base.appendingPathComponent("rotating"), io: rotatingIO)
@@ -1548,6 +1709,7 @@ func pipelineSmoke() throws {
     try pipelineGuards(base: base, root: root, team: team, t0: t0)
     try pipelineMergeSync(base: base, root: root, team: team, t0: t0)
     try pipelineRatingPass1(base: base, root: root, team: team, t0: t0)
+    try pipelineMCP(base: base, root: root, team: team, t0: t0)
 
     // The real gh and claude get neither token, and claude runs in the checkout.
     let stubs = base.appendingPathComponent("live-checkout")
@@ -1571,7 +1733,117 @@ func pipelineSmoke() throws {
     check(claudeOut.ok && !claudeEnv.contains("lin_api_from_env"), "claude's environment holds the Linear key")
     check(claudeEnv.components(separatedBy: "\n").first?.hasSuffix("/live-checkout") == true,
           "claude runs in the root's checkout: \(claudeEnv.prefix(200))")
-    check((try? live.linearAuth()) == "lin_api_from_env", "the override is sent as is")
+    check((try? live.linearAuth()) == .init(.key, "lin_api_from_env"), "the override is sent as is")
+}
+
+/// The same trackers read through Linear's MCP server instead of by key: the same syncs,
+/// but for the merges it holds, since the server cannot say every issue linking a PR.
+private func pipelineMCP(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
+                         t0: Date) throws {
+    section("pipeline over Linear's MCP server")
+    let every = PipelineSettings(roots: [root], linearTeams: [team], rate: true, fix: true, fastTrack: true,
+                                 merge: true, fracture: true)
+    let long = "Header is blue, should be purple. The token lives in Theme.swift; its snapshot pins it."
+    func twin(_ mcp: Bool, _ name: String) throws -> (Trackers, URL) {
+        let t = fixture()
+        t.mcp = mcp
+        t.mcpPage = 1
+        t.tickets[0].description = long
+        t.tickets[0].state = "backlog"
+        t.tickets[1].state = "unstarted"
+        t.tickets[2].state = "duplicate"
+        t.tickets.append(.init(id: "lin-40", identifier: "ENG-40", title: "Payment copy", updated: at("08:00"),
+                               parent: t.tickets[1].url))
+        t.tickets.append(.init(id: "lin-41", identifier: "ENG-41", title: "Old idea", updated: at("08:30"),
+                               state: "canceled", stateName: "Backlog"))
+        let d = base.appendingPathComponent("mcp-\(name)")
+        try seedRerate(d, 13, sha("c3"), at: t0.addingTimeInterval(-3600))
+        return (t, d)
+    }
+    let (key, keyDir) = try twin(false, "key"), (mcp, mcpDir) = try twin(true, "mcp")
+    let held = "would close the Linear issues linking it, the Linear issues linking #27, "
+        + "which Diplomat did not read or may not write to"
+    var tools: [[String]] = []
+    var asked: [PipelineEffect] = []
+    for n in 0..<3 {
+        let at = t0.addingTimeInterval(Double(n) * 600)
+        let sessions = mcp.mcpSessions
+        let k = sync(key, every, keyDir, at), m = sync(mcp, every, mcpDir, at)
+        check(m.writes == k.writes.filter { !$0.hasPrefix("merge ") } && m.result.notices == k.result.notices
+              && m.result.effects == k.result.effects && m.result.unread == k.result.unread,
+              "sync \(n) over MCP: \(m.writes) \(m.result.notices) \(m.result.effects)")
+        let differ = k.result.items.filter { item(m.result, $0.id) != $0 }.map(\.id).sorted()
+        check(m.result.items.count == k.result.items.count && differ == [issueURL(27), prURL(13)]
+              && stageOf(m.result, prURL(13)) == "cleared/fast (\(held))" && stageOf(m.result, issueURL(27)) == "fixing/fast",
+              "sync \(n) over MCP, what differs: \(differ.map { "\($0) \(stageOf(m.result, $0))" })")
+        check(mcp.mcpSessions == sessions + 1, "one session a sync: \(mcp.mcpSessions - sessions)")
+        tools.append(mcp.mcpTools)
+        mcp.mcpTools = []
+        asked = m.result.effects
+    }
+    check(key.writes.contains("merge #13 --squash \(sha("c3"))") && !mcp.writes.contains { $0.hasPrefix("merge ") })
+    check(Set(mcp.handed).isSubset(of: key.handed), "gh and claude are handed what they are under a key: "
+          + "\(Set(mcp.handed).subtracting(key.handed).map { $0.prefix(300) })")
+    check(mcp.writes.contains("+risk:low ENG-1") && mcp.tickets[0].labels == key.tickets[0].labels,
+          "labels written by ID: \(mcp.tickets[0].labels)")
+    check(mcp.authorizations == ["Bearer " + smokeKey] && !mcp.handed.contains { $0.contains(smokeKey) },
+          "the MCP server is sent the token: \(mcp.authorizations)")
+    check(asked.contains { if case let .fixLinear(_, "ENG-1", _, text, _) = $0 { text.hasSuffix("\n\n" + long) } else { false } },
+          "a description list_issues cuts is read whole: \(asked)")
+    // Details are read once and kept by updatedAt; the fix asked rereads its issue.
+    check(tools[0].filter { $0 == "get_issue" }.count == 4 && tools[2].filter { $0 == "get_issue" }.count == 1,
+          "get_issue a sync: \(tools.map { $0.filter { $0 == "get_issue" }.count })")
+    let cache = mcpDir.appendingPathComponent("linear-mcp-cache.json")
+    check((try? FileManager.default.attributesOfItem(atPath: cache.path)[.posixPermissions] as? Int) == 0o600,
+          "the cache is owner-only")
+    // A retitle moves updatedAt, so it is read again.
+    mcp.tickets[2].title = "Docs link 404s for everyone"
+    mcp.tickets[2].updated = at("11:00")
+    key.tickets[2] = mcp.tickets[2]
+    let rk = sync(key, every, keyDir, t0.addingTimeInterval(1800)), rm = sync(mcp, every, mcpDir, t0.addingTimeInterval(1800))
+    check(item(rm.result, linearURL("ENG-3")) == item(rk.result, linearURL("ENG-3"))
+          && item(rm.result, linearURL("ENG-3"))?.title == "Docs link 404s for everyone",
+          "a retitled issue: \(item(rm.result, linearURL("ENG-3"))?.title ?? "")")
+
+    // The server ends a session: one more is started and the call made again.
+    mcp.mcpTools = []
+    mcp.mcpSessionEnds = true
+    let sessions = mcp.mcpSessions
+    let ended = sync(mcp, every, mcpDir, t0.addingTimeInterval(2400))
+    check(ended.result.notices.isEmpty && mcp.mcpSessions == sessions + 2 && !mcp.mcpSessionEnds,
+          "a session ended: \(ended.result.notices) \(mcp.mcpSessions - sessions)")
+
+    // Who opened an issue is the ban list's to judge, so an issue whose author goes unread is none.
+    let blind = try twin(true, "blind").0
+    blind.mcpNoUsers = true
+    let b = sync(blind, every, base.appendingPathComponent("mcp-blind"), t0)
+    check(b.result.notices == ["Linear: get_user: User not found"]
+          && !b.result.items.contains { $0.id.hasPrefix("https://linear.app/") }
+          && !b.writes.contains { $0.contains("ENG-") }, "an author unread: \(b.result.notices)")
+
+    // Down: as the API's twin says it.
+    let (downKey, downKeyDir) = try twin(false, "down-key"), (downMCP, downMCPDir) = try twin(true, "down-mcp")
+    downKey.linearDown = true
+    downMCP.linearDown = true
+    let dk = sync(downKey, every, downKeyDir, t0), dm = sync(downMCP, every, downMCPDir, t0)
+    check(dm.result.notices == dk.result.notices && dm.writes == dk.writes.filter { !$0.hasPrefix("merge ") },
+          "Linear down over MCP: \(dm.result.notices) / \(dk.result.notices)")
+    // Signed in the other way mid-sync: no token goes to the API it is not for.
+    let swapped = fixture()
+    var asks = 0
+    var swappedIO = swapped.io()
+    swappedIO.linearAuth = {
+        asks += 1
+        return asks == 1 ? .init(.key, smokeKey) : .init(.mcp, "Bearer other")
+    }
+    let sw = PipelineTick.run(settings: every, now: t0, dir: base.appendingPathComponent("mcp-swapped"), io: swappedIO)
+    check(sw.notices == ["Linear: the Linear login changed during the sync"] && swapped.authorizations.isEmpty,
+          "a login changed mid-sync: \(sw.notices) \(swapped.authorizations)")
+    let revoked = try twin(true, "revoked").0
+    revoked.mcpRefused = true
+    let rv = sync(revoked, every, base.appendingPathComponent("mcp-revoked"), t0)
+    check(rv.result.notices == ["Linear answered HTTP 401: invalid_token: Invalid access token"],
+          "a token the server refuses: \(rv.result.notices)")
 }
 
 /// The fix asks a sync may not make, and the merges after one it could not confirm.
@@ -1995,9 +2267,9 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
           "the pipeline's directory is under $HOME: \(PipelineLog.dir.path)")
     try fm.createDirectory(at: home, withIntermediateDirectories: true)
     try fm.createDirectory(at: PipelineLog.dir, withIntermediateDirectories: true)
-    try Data(#"{"accessToken":"from_home","user":"Ada","organization":"Acme"}"#.utf8)
+    try Data(#"{"method":"mcp","accessToken":"from_home","user":"Ada","organization":"Acme"}"#.utf8)
         .write(to: PipelineLog.dir.appendingPathComponent("linear-login.json"))
-    check((try? PipelineIO.live.linearAuth()) == "Bearer from_home", "the Linear login is read under $HOME")
+    check((try? PipelineIO.live.linearAuth()) == .init(.mcp, "Bearer from_home"), "the Linear login is read under $HOME")
     let banDir = home.appendingPathComponent(".diplomat/pr-monitor")
     try fm.createDirectory(at: banDir, withIntermediateDirectories: true)
     func ban(_ logins: [String]) throws {

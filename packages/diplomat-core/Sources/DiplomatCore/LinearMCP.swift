@@ -301,7 +301,8 @@ final class LinearMCP {
         nextID += 1
         let answer = try post(["jsonrpc": "2.0", "id": id, "method": method, "params": params])
         guard answer.status == 200 else {
-            throw LinearAPI.Failure.http(answer.status, CommsText.oneLine(String(decoding: answer.body.prefix(200), as: UTF8.self)))
+            let root = (try? JSONSerialization.jsonObject(with: answer.body)) as? [String: Any]
+            throw LinearAPI.Failure.http(answer.status, LinearLogin.oauthError(root) ?? "")
         }
         guard let reply = Self.reply(answer.body, id: id) else {
             throw LinearAPI.Failure.api("Linear's MCP server answered no \(method) reply")

@@ -284,9 +284,7 @@ public enum LinearLogin {
         }
         let obj = (try? JSONSerialization.jsonObject(with: answer.body)) as? [String: Any]
         guard (200..<300).contains(answer.status), let id = obj?["client_id"] as? String, !id.isEmpty else {
-            let why = [obj?["error"] as? String ?? "", obj?["error_description"] as? String ?? ""].filter { !$0.isEmpty }
-            throw Failure.refused("the client was not registered: "
-                + (why.isEmpty ? "HTTP \(answer.status)" : why.joined(separator: ": ")))
+            throw Failure.refused("the client was not registered: " + (oauthError(obj) ?? "HTTP \(answer.status)"))
         }
         return id
     }
@@ -297,13 +295,17 @@ public enum LinearLogin {
         let answer = try post(endpoint, fields, timeout: model.httpTimeoutSecs, transport: transport)
         let obj = (try? JSONSerialization.jsonObject(with: answer.body)) as? [String: Any]
         guard answer.status == 200, let access = obj?["access_token"] as? String, !access.isEmpty else {
-            let code = obj?["error"] as? String ?? ""
-            if code == "invalid_grant" && fields.first?.1 == "refresh_token" { throw Failure.expired }
-            let why = [code, obj?["error_description"] as? String ?? ""].filter { !$0.isEmpty }
-            throw Failure.refused(why.isEmpty ? "HTTP \(answer.status)" : why.joined(separator: ": "))
+            if obj?["error"] as? String == "invalid_grant" && fields.first?.1 == "refresh_token" { throw Failure.expired }
+            throw Failure.refused(oauthError(obj) ?? "HTTP \(answer.status)")
         }
         let expires = (obj?["expires_in"] as? NSNumber).map { now.addingTimeInterval($0.doubleValue) }
         return (access, obj?["refresh_token"] as? String, expires)
+    }
+
+    /// An OAuth error answer's `error: error_description`.
+    static func oauthError(_ obj: [String: Any]?) -> String? {
+        let why = [obj?["error"] as? String ?? "", obj?["error_description"] as? String ?? ""].filter { !$0.isEmpty }
+        return why.isEmpty ? nil : why.joined(separator: ": ")
     }
 
     static func whoami(_ api: LinearAPI) throws -> (user: String, organization: String) {
