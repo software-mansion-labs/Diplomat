@@ -161,7 +161,7 @@ const staged = (daemonPath) => {
   }
   return file;
 };
-// A bash /bin/sh (macOS's, Arch's) fills an unset $SHELL in from passwd: the bash fallback is dash's.
+// A bash /bin/sh fills an unset $SHELL in from passwd: the bash fallback is dash's.
 if (!spawnSync('/bin/sh', ['-c', 'echo "$SHELL"'], { encoding: 'utf8', env: {} }).stdout.trim()) {
   fs.writeFileSync(path.join(BASE, '.bashrc'), `PATH='${RC_BIN}':$PATH\n`);
   runs(staged('/usr/bin:/bin'), { PATH: '/usr/bin:/bin' });
