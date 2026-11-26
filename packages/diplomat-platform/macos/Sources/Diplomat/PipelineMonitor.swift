@@ -35,7 +35,9 @@ extension Store {
     /// The forces sorted as the Linux store hands them on.
     var pipelineSettings: PipelineSettings {
         let force = PipelineSettings.Force(rate: pipelineForce.rate.sorted(),
-                                           fracture: pipelineForce.fracture.sorted())
+                                           fracture: pipelineForce.fracture.sorted(),
+                                           takeover: pipelineForce.takeover.sorted(),
+                                           revoke: pipelineForce.revoke.sorted())
         return PipelineSettings(
             roots: roots.filter { !$0.isGitLab }.map {
                 PipelineSettings.Root(owner: $0.owner, repo: $0.repo, path: $0.path, me: knownMe(for: $0))
@@ -43,7 +45,7 @@ extension Store {
             linearTeams: Store.pipelineTeams(pipelineLinearTeamsRaw),
             rate: pipelineRate, fix: pipelineFix, fastTrack: pipelineFastTrack,
             merge: pipelineMerge, fracture: pipelineFracture,
-            force: force.rate.isEmpty && force.fracture.isEmpty ? nil : force,
+            force: force.isEmpty ? nil : force,
             queued: Store.pipelineQueued(requestedWork, attempts: loadPipelineAttempts()))
     }
 
@@ -171,7 +173,9 @@ extension Store {
             if ran, let sent = settings.force {
                 pipelineForce = PipelineSettings.Force(
                     rate: pipelineForce.rate.filter { !sent.rate.contains($0) },
-                    fracture: pipelineForce.fracture.filter { !sent.fracture.contains($0) })
+                    fracture: pipelineForce.fracture.filter { !sent.fracture.contains($0) },
+                    takeover: pipelineForce.takeover.filter { !sent.takeover.contains($0) },
+                    revoke: pipelineForce.revoke.filter { !sent.revoke.contains($0) })
             }
             await applyPipeline(result, judged: ran && epoch == pipelineEpoch, handed: handed)
         } while pipelineSyncAgain && pipelineEnabled
@@ -664,10 +668,20 @@ extension Store {
         Task { await runPipelineSyncOnce() }
     }
 
-    /// Rate now / Fracture: rated or split on the next sync, ahead of every limit.
-    func forcePipeline(rate id: String? = nil, fracture split: String? = nil) {
+    /// Rate now / Fracture / Authorize or Revoke takeover: done on the next sync, ahead of
+    /// every limit. Of a takeover and a revoke asked of one item, the last asked wins.
+    func forcePipeline(rate id: String? = nil, fracture split: String? = nil,
+                       takeover taken: String? = nil, revoke: String? = nil) {
         if let id, !pipelineForce.rate.contains(id) { pipelineForce.rate.append(id) }
         if let split, !pipelineForce.fracture.contains(split) { pipelineForce.fracture.append(split) }
+        if let taken {
+            pipelineForce.revoke.removeAll { $0 == taken }
+            if !pipelineForce.takeover.contains(taken) { pipelineForce.takeover.append(taken) }
+        }
+        if let revoke {
+            pipelineForce.takeover.removeAll { $0 == revoke }
+            if !pipelineForce.revoke.contains(revoke) { pipelineForce.revoke.append(revoke) }
+        }
         syncPipelineNow()
     }
 
