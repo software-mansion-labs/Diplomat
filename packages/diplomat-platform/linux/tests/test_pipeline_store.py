@@ -1181,9 +1181,10 @@ def test_a_core_past_its_deadline_is_killed_while_its_lines_are_read(tmp_path, m
     ("linear_logout", "not json", 0,
      (False, "diplomat-core linear-logout answered something that is not an answer")),
     ("linear_logout", "{}", 1, (False, "diplomat-core linear-logout failed: it failed")),
-    ("linear_whoami", {"user": "Ada", "organization": "Ours"}, 0,
-     {"user": "Ada", "organization": "Ours"}),
-    ("linear_whoami", {"user": "", "organization": ""}, 0, {"user": "", "organization": ""}),
+    ("linear_whoami", {"user": "Ada", "organization": "Ours", "method": "key"}, 0,
+     {"user": "Ada", "organization": "Ours", "method": "key"}),
+    ("linear_whoami", {"user": "", "organization": ""}, 0,
+     {"user": "", "organization": "", "method": ""}),
     ("linear_whoami", {}, 0, None),
     ("linear_whoami", '{"user": "Ada"}', 1, None),
 ])
@@ -1195,11 +1196,31 @@ def test_the_linear_login_calls_answer_what_the_core_said(tmp_path, monkeypatch,
     assert (tmp_path / "argv").read_text() == call.replace("_", "-")
 
 
+@pytest.mark.parametrize("answer, status, expected", [
+    ({"ok": True, "user": "Ada", "organization": "Ours"}, 0,
+     ({"user": "Ada", "organization": "Ours"}, "")),
+    ({"ok": False, "error": "No Linear API key was given"}, 0,
+     (None, "No Linear API key was given")),
+    ("{}", 1, (None, "diplomat-core linear-login-key failed: it failed")),
+])
+def test_a_key_reaches_the_core_on_its_stdin_alone(tmp_path, monkeypatch, answer, status,
+                                                   expected):
+    _fake_core(tmp_path, monkeypatch,
+               answer if isinstance(answer, str) else json.dumps(answer), status)
+    assert pipeline.linear_login_key("lin_api_x") == expected
+    assert (tmp_path / "argv").read_text() == "linear-login-key"
+    assert json.loads((tmp_path / "stdin").read_text()) == {"key": "lin_api_x"}
+
+
 def test_each_linear_login_call_outlasts_the_bounds_the_core_holds_it_to(monkeypatch):
     """A sign-in killed after the browser came back loses it: ``signInSecs``, then the
-    code's exchange, who the token is, and a sync's refresh holding the login's lock. A
-    sign-out waits on that refresh and the revocation."""
-    t = pipeline.tunables()
+    client's registration, the code's exchange, the three MCP calls that ask who the token
+    is, and a sync's refresh holding the login's lock. A key's sign-in waits on Linear's
+    answer and that refresh, a sign-out on that refresh and the revocation."""
+    real = pipeline.tunables()
+    # Not the default it falls back to.
+    t = {**real, "linearMCP": {**real["linearMCP"], "signInSecs": 77}}
+    monkeypatch.setattr(pipeline, "tunables", lambda: t)
     call = t["httpTimeoutSecs"] + 5
     seen = []
 
@@ -1217,10 +1238,12 @@ def test_each_linear_login_call_outlasts_the_bounds_the_core_holds_it_to(monkeyp
     monkeypatch.setattr("diplomat_runtime.promptcore.core_bin", lambda: "/bin/core")
     monkeypatch.setattr("subprocess.Popen", Proc)
     pipeline.linear_login()
+    pipeline.linear_login_key("lin_api_x")
     pipeline.linear_logout()
     pipeline.linear_whoami()
-    assert seen == [("linear-login", t["linearOAuth"]["signInSecs"] + 3 * call + 30),
-                    ("linear-logout", 2 * call + 30), ("linear-whoami", 10)]
+    assert seen == [("linear-login", t["linearMCP"]["signInSecs"] + 6 * call + 30),
+                    ("linear-login-key", 2 * call + 30), ("linear-logout", 2 * call + 30),
+                    ("linear-whoami", 10)]
 
 
 def test_only_a_core_handed_started_leaves_the_apps_process_group(tmp_path, monkeypatch):

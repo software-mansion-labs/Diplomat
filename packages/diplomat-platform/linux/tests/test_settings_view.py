@@ -699,26 +699,126 @@ def test_the_linear_login_row_says_who_is_signed_in(make_view, monkeypatch):
     assert row.summary() == "$DIPLOMAT_LINEAR_TOKEN, which wins over the login"
     assert "palette(mid)" in row._summary.styleSheet()
     assert row._detail.text() == (
-        "Signs in through the browser to Diplomat's Linear app, which reads the tracked "
-        "teams' issues and writes labels and child issues as you. The login is kept in "
-        "~/.diplomat/pipeline/linear-login.json, readable by you alone, refreshed by the "
-        "sync, and never handed to an agent: a fix gets the issue's text as Diplomat read "
-        "it. Sign out forgets it and asks Linear to revoke it. $DIPLOMAT_LINEAR_TOKEN, a "
-        "personal API key, wins over it. Without a login, the teams set here are skipped "
-        "with a notice and GitHub still syncs, but no PR is merged.")
+        "Use API key… takes a personal API key, which some workspaces need an admin to "
+        "allow. Sign in… goes through Linear's MCP server in the browser and needs no "
+        "admin, but a sync under it makes more calls, and no PR is merged while teams are "
+        "set: its tools cannot list the issues linked to a PR. Either login reads the "
+        "tracked teams' issues and writes labels and child issues as you, is kept in "
+        "~/.diplomat/pipeline/linear-login.json, readable by you alone, and is never "
+        "handed to an agent: a fix gets the issue's text as Diplomat read it. Sign out "
+        "forgets it, and asks Linear to revoke an MCP one; a key stays valid until revoked "
+        "in Linear's settings. $DIPLOMAT_LINEAR_TOKEN, a personal API key, wins over it. "
+        "Without a login, the teams set here are skipped with a notice and GitHub still "
+        "syncs, but no PR is merged.")
 
-    monkeypatch.delenv(pipeline.TOKEN_ENV)
-    saved.append({"user": "Ada", "organization": "Ours"})
+
+@pytest.mark.parametrize("method, summary", [
+    ("key", "Signed in as Ada (Ours) with an API key"),
+    ("mcp", "Signed in as Ada (Ours) through Linear's MCP server"),
+])
+def test_the_linear_login_row_names_how_it_is_signed_in(make_view, monkeypatch, method,
+                                                        summary):
+    _whoami(monkeypatch, [{"user": "Ada", "organization": "Ours", "method": method}])
     view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
-    assert (view._pipeline_login_row.summary(), view._linear_button.text()) == (
-        "Signed in as Ada (Ours)", "Sign out")
+    assert (view._pipeline_login_row.summary(), view._linear_button.text(),
+            view._linear_key_button.isVisibleTo(view)) == (summary, "Sign out", False)
+
+
+def _key_row(view) -> list[bool]:
+    """Which of the key line, its Save and Cancel, Use API key… and Sign in… (or Cancel,
+    or Sign out) are drawn."""
+    return [w.isVisibleTo(view) for w in (view._linear_key, view._linear_key_save,
+                                          view._linear_key_cancel, view._linear_key_button,
+                                          view._linear_button)]
+
+
+def test_a_key_is_typed_hidden_and_checked_off_the_ui_thread(make_view, monkeypatch):
+    """Its failure leaves the line open with the key; the check's own answer says who is
+    signed in, never a sync applied meanwhile."""
+    import threading
+
+    from PySide6.QtWidgets import QLineEdit
+
+    from diplomat_runtime import pipeline
+
+    me = {"user": "Ada", "organization": "Ours", "method": "key"}
+    saved: list = []
+    asked = _whoami(monkeypatch, saved)
+    back = threading.Event()
+    keys = []
+    answers = [(None, "Linear answered HTTP 401: Authentication required"), (me, "")]
+
+    def login_key(key):
+        keys.append(key)
+        assert back.wait(10)
+        back.clear()
+        answer = answers.pop(0)
+        saved.extend([answer[0]] if answer[0] else [])
+        return answer
+
+    monkeypatch.setattr(pipeline, "linear_login_key", login_key)
+    view, synced = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    row, line, save = view._pipeline_login_row, view._linear_key, view._linear_key_save
+    assert _key_row(view) == [False, False, False, True, True]
+    assert (view._linear_key_button.text(), view._linear_button.text()) == ("Use API key…",
+                                                                            "Sign in…")
+    view._linear_key_button.click()
+    assert _key_row(view) == [True, True, True, False, False]
+    assert line.echoMode() == QLineEdit.EchoMode.Password
+    line.setText("lin_api_bad")
+    line.returnPressed.emit()
+    assert (row.summary(), line.isEnabled(), save.isEnabled(),
+            view._linear_key_cancel.isEnabled()) == ("Checking the key with Linear…",
+                                                     False, False, False)
+    view.store.pipeline_sync_applied.emit()
+    back.set()
+    _settle(view)
+    assert keys == ["lin_api_bad"]
+    assert (row.summary(), _key_row(view), line.text(), line.isEnabled()) == (
+        "Linear answered HTTP 401: Authentication required",
+        [True, True, True, False, False], "lin_api_bad", True)
+    assert "#FF3B30" in row._summary.styleSheet()
+    assert synced == []
+
+    line.setText("lin_api_good")
+    save.click()
+    back.set()
+    _settle(view)
+    assert keys == ["lin_api_bad", "lin_api_good"]
+    assert (row.summary(), view._linear_button.text(), _key_row(view), line.text()) == (
+        "Signed in as Ada (Ours) with an API key", "Sign out",
+        [False, False, False, False, True], "")
+    assert synced == [True]
+    assert asked == [1, 1, 1]
+
+
+def test_cancel_closes_the_key_line_forgetting_the_key_and_its_failure(make_view,
+                                                                       monkeypatch):
+    from diplomat_runtime import pipeline
+
+    _whoami(monkeypatch, [])
+    keys = []
+    monkeypatch.setattr(pipeline, "linear_login_key",
+                        lambda key: keys.append(key) or (None, "Linear answered HTTP 401"))
+    view, synced = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    row, line = view._pipeline_login_row, view._linear_key
+    view._linear_key_button.click()
+    line.setText("lin_api_x")
+    view._linear_key_save.click()
+    _settle(view)
+    assert row.summary() == "Linear answered HTTP 401"
+    view._linear_key_cancel.click()
+    assert (_key_row(view), line.text(), row.summary()) == (
+        [False, False, False, True, True], "", "Not signed in")
+    assert keys == ["lin_api_x"]
+    assert synced == []
 
 
 def test_a_sign_in_waits_off_the_ui_thread_and_its_failure_stays_until_the_next(
         make_view, monkeypatch):
     import threading
 
-    me = {"user": "Ada", "organization": "Ours"}
+    me = {"user": "Ada", "organization": "Ours", "method": "mcp"}
     saved: list = []
     _whoami(monkeypatch, saved)
     back = threading.Event()
@@ -735,8 +835,8 @@ def test_a_sign_in_waits_off_the_ui_thread_and_its_failure_stays_until_the_next(
     view, synced = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
     row, button = view._pipeline_login_row, view._linear_button
     button.click()
-    assert (row.summary(), button.text(), button.isEnabled()) == (
-        "Waiting for the browser…", "Cancel", True)
+    assert (row.summary(), button.text(), button.isEnabled(), _key_row(view)) == (
+        "Waiting for the browser…", "Cancel", True, [False, False, False, False, True])
     back.set()
     _settle(view)
     assert (row.summary(), button.text()) == ("Linear refused the sign-in: invalid_grant",
@@ -748,19 +848,20 @@ def test_a_sign_in_waits_off_the_ui_thread_and_its_failure_stays_until_the_next(
     assert row.summary() == "Waiting for the browser…"
     back.set()
     _settle(view)
-    assert (row.summary(), button.text()) == ("Signed in as Ada (Ours)", "Sign out")
+    assert (row.summary(), button.text()) == (
+        "Signed in as Ada (Ours) through Linear's MCP server", "Sign out")
     assert synced == [True]
 
 
 def test_who_is_signed_in_is_read_again_once_a_sync_is_applied(make_view, monkeypatch):
     """A sync forgets the login once Linear refuses its refresh."""
-    saved = [{"user": "Ada", "organization": "Ours"}]
+    saved = [{"user": "Ada", "organization": "Ours", "method": "mcp"}]
     asked = _whoami(monkeypatch, saved)
     view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
     row, button = view._pipeline_login_row, view._linear_button
     saved.clear()
     view.store.pipeline_changed.emit()
-    assert row.summary() == "Signed in as Ada (Ours)"
+    assert row.summary() == "Signed in as Ada (Ours) through Linear's MCP server"
     view.store._pipeline_synced.emit({"error": "gh: rate limited", "forced": {}})
     assert (row.summary(), button.text()) == ("Not signed in", "Sign in…")
     assert asked == [1, 1]
