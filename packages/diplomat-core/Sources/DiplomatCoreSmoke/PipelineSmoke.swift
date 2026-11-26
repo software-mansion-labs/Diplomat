@@ -1813,7 +1813,7 @@ private func pipelineMCP(base: URL, root: PipelineSettings.Root, team: PipelineS
     check(ended.result.notices.isEmpty && mcp.mcpSessions == sessions + 2 && !mcp.mcpSessionEnds,
           "a session ended: \(ended.result.notices) \(mcp.mcpSessions - sessions)")
 
-    // Who opened an issue is the ban list's to judge, so an issue whose author goes unread is none.
+    // The ban list judges who opened an issue, so one whose author goes unread is not read.
     let blind = try twin(true, "blind").0
     blind.mcpNoUsers = true
     let b = sync(blind, every, base.appendingPathComponent("mcp-blind"), t0)
@@ -1821,7 +1821,7 @@ private func pipelineMCP(base: URL, root: PipelineSettings.Root, team: PipelineS
           && !b.result.items.contains { $0.id.hasPrefix("https://linear.app/") }
           && !b.writes.contains { $0.contains("ENG-") }, "an author unread: \(b.result.notices)")
 
-    // Down: as the API's twin says it.
+    // Linear down: the notice a key's sync gives.
     let (downKey, downKeyDir) = try twin(false, "down-key"), (downMCP, downMCPDir) = try twin(true, "down-mcp")
     downKey.linearDown = true
     downMCP.linearDown = true
