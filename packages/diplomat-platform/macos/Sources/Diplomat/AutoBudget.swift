@@ -31,6 +31,14 @@ enum AutoBudget {
         cache = nil
     }
 
+    /// Pin the answer until `resetCache`, for headless self-tests only: the real one
+    /// dials the usage endpoint.
+    static func pinForSelfTest(_ budget: AgentDispatchGate.Budget) {
+        guard Headless.active else { return }
+        lock.lock(); defer { lock.unlock() }
+        cache = (.infinity, budget)
+    }
+
     /// Whether the gate is switched on at all (Settings → PR AUTO-FIX).
     static var enabled: Bool { AppConfig.autoBudgetGate }
 

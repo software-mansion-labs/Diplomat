@@ -470,6 +470,9 @@ struct ContentView: View {
         case starting(Store.QueuedAgentTask)
         /// A job whose offer the network has not answered yet.
         case offering(Store.OfferingJob)
+        /// A rating job running headless in a bay (`Store.pipelineRateRuns`). Its queued
+        /// row's key, like a starting task's.
+        case rating(Store.PipelineRateRun)
         /// An empty slot of the device's cap. Carries its position only, which is all
         /// that distinguishes one from another.
         case freeSlot(Int)
@@ -482,6 +485,7 @@ struct ContentView: View {
             case .queued(let q):  return "q-\(q.id)"
             case .starting(let q): return "q-\(q.id)"
             case .offering(let o): return "o-\(o.id)"
+            case .rating(let r): return "q-\(r.key)"
             case .freeSlot(let i): return "free-\(i)"
             }
         }
@@ -491,6 +495,7 @@ struct ContentView: View {
             case .session(let r): return r.status
             case .queued:   return .queued
             case .starting, .offering: return .starting
+            case .rating:   return .running
             case .freeSlot: return .free
             }
         }
@@ -507,6 +512,7 @@ struct ContentView: View {
     /// promise, so the position is the tiebreak rather than an assumption about the sort.
     private var agentTaskItems: [AgentTaskItem] {
         let items = store.agentRows.map(AgentTaskItem.session)
+            + store.pipelineRateRuns.map(AgentTaskItem.rating)
             + store.startingTasks.map(AgentTaskItem.starting)
             + store.networkOffering.map(AgentTaskItem.offering)
             + store.queuedTasks.map(AgentTaskItem.queued)
@@ -533,7 +539,7 @@ struct ContentView: View {
             // last queued row would drop the count for as long as its spawn takes.
             // Empty slots are not (a device with nothing to do reads "0", not "2").
             SectionHeader(title: "AGENT TASKS",
-                          count: store.agentRows.count + queued + starting,
+                          count: store.agentRows.count + store.pipelineRateRuns.count + queued + starting,
                           expanded: $tasksExpanded,
                           icon: "antenna.radiowaves.left.and.right",
                           caption: caption.isEmpty ? nil : caption)
@@ -585,6 +591,8 @@ struct ContentView: View {
             StartingTaskRow(task: task, tint: agentTaskTint(task.job.kind))
         case .offering(let held):
             OfferingTaskRow(held: held, tint: agentTaskTint(held.job.kind))
+        case .rating(let run):
+            RatingTaskRow(run: run, tint: agentTaskTint(AgentTaskQueue.rateAction))
         case .freeSlot:
             FreeSlotRow()
         }
@@ -1231,6 +1239,40 @@ private struct StartingTaskRow: View {
         .padding(6)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.06)))
         .tooltip(StartingTaskRow.help)
+    }
+}
+
+/// A rating job in its bay: no window to raise and nothing to stop, so a row that says how
+/// long it has been running and nothing more.
+private struct RatingTaskRow: View {
+    let run: Store.PipelineRateRun
+    let tint: Color
+
+    private static let help = """
+        A Pipeline rating running on this machine, with no window. It holds a slot of the \
+        automatic-task cap while it works.
+        """
+
+    var body: some View {
+        HStack(spacing: 8) {
+            IconBadge(symbol: DiplomatUI.agentTaskIcon(AgentTaskQueue.rateAction), tint: tint)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(run.label).font(.caption).lineLimit(1)
+                TimelineView(.periodic(from: Date(), by: 30)) { ctx in
+                    HStack(spacing: 3) {
+                        AgentTaskStatusLabel(status: .running)
+                        let age = Fmt.duration(ctx.date.timeIntervalSince(run.startedAt))
+                        if age != "just now" {
+                            Text("· for " + age).font(.system(size: 9)).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            Spacer(minLength: 4)
+        }
+        .padding(6)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.06)))
+        .tooltip(RatingTaskRow.help)
     }
 }
 

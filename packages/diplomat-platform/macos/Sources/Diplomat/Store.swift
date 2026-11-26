@@ -961,6 +961,7 @@ final class Store: ObservableObject {
         didSet {
             persist(pipelineRate, forKey: Keys.pipelineRate)
             writePipelineControl()
+            if !pipelineRate { withdrawPipelineAsks(nil) }
             pipelineSwitched(on: pipelineRate && !oldValue)
         }
     }
@@ -1036,6 +1037,13 @@ final class Store: ObservableObject {
     /// judged its item (`pipelineJudgedAsks`): till then it may be stale, so it does not
     /// start (`isHeld`).
     @Published var pipelineStale: Set<String> = []
+    /// The rating jobs the queue dispatched that have not returned, each holding a bay of
+    /// the task cap (`startPipelineRate`, in `PipelineMonitor.swift`). In memory only: a
+    /// job a quit cuts off leaves no answer, so the next sync asks for it again.
+    @Published var pipelineRateRuns: [PipelineRateRun] = []
+    /// The bays of the task cap held outside `capLoad`: the ratings running, and the runs
+    /// this machine executes for the network (`NetworkAdmit.running`).
+    var ratingsAndPoolRuns: Int { pipelineRateRuns.count + NetworkAdmit.running(networkState) }
 
     /// Every dispatched agent run the panel draws, in reading order: the sessions this
     /// machine spawned, and any live agent nobody dispatched at all.
@@ -2831,11 +2839,17 @@ final class Store: ObservableObject {
     }
 
     /// With the network on the room is the pool's, which has it whenever its daemon
-    /// answers and the settings can be read.
+    /// answers and the settings can be read; a rating's is this device's either way.
     func drainHasRoom(capLoad: Int) -> Bool {
-        (networkEnabled ? networkAnswered != false && networkSettingsUnknown.isEmpty
-            : capLoad < autoTaskLimit)
-            && !drainableTasks.isEmpty
+        let here = capLoad + ratingsAndPoolRuns < autoTaskLimit
+        let pool = networkAnswered != false && networkSettingsUnknown.isEmpty
+        return drainableTasks.contains { offersToNetwork($0.job) ? pool : here }
+    }
+
+    /// Whether `job` would go to the Diplomacy Network rather than run here: with the
+    /// network on, anything but a rating.
+    func offersToNetwork(_ job: AgentJob) -> Bool {
+        networkEnabled && job.rating == nil
     }
 
     /// Set when the last monitor poll cycle failed (gh/auth/network), so persistent
@@ -3443,10 +3457,11 @@ final class Store: ObservableObject {
     ///
     /// Work that is starting holds one. Its spawn has not registered anywhere yet, but the
     /// bay is spoken for — and drawn as free it would put a row that is launching next to
-    /// the empty slot it is launching into, which is one row more than the cap allows.
+    /// the empty slot it is launching into, which is one row more than the cap allows. So
+    /// does a running rating, which no tick measures.
     var freeAutoSlots: Int {
         AgentTaskQueue.freeSlots(limit: autoTaskLimit,
-                                 running: autoTasksMeasured + startingTasks.count)
+                                 running: autoTasksMeasured + startingTasks.count + pipelineRateRuns.count)
     }
 
     /// Whether the "deferring auto work" note has been logged for the current
@@ -3645,7 +3660,9 @@ final class Store: ObservableObject {
     /// failure stops the drain: it means terminal automation is broken, not that this
     /// one task was unlucky, and each entry is taken off the list before it is tried —
     /// so walking the whole queue into the same failure would clear the panel of every
-    /// queued row at once, for a reason none of them caused.
+    /// queued row at once, for a reason none of them caused. With the network on, a
+    /// rating still runs here (`offersToNetwork`), so the cap, the budget or the disk
+    /// holding one holds only the ratings after it, and a silent daemon only the rest.
     ///
     /// A task in a repo outside `read` (the roots this cycle read, by default every
     /// root) is neither priced nor started: nothing this cycle speaks for it, and a root
@@ -3698,16 +3715,21 @@ final class Store: ObservableObject {
             }
             dropQueuedTask(entry.id)
         }
+        // Whether the tasks run here (true) or offered to the network (false) have met a
+        // refusal every later one of them would meet too.
+        var stopped = Set<Bool>()
         for entry in drainableTasks {
+            let here = !offersToNetwork(entry.job)
             // The list moves under this loop: it awaits a spawn per task, and an
             // "execute now" during one of those takes its row off the queue and
             // starts it there and then. Re-reading the queue is what keeps the drain
             // from dispatching that same task a second time when it reaches it.
-            guard queuedTasks.contains(where: { $0.id == entry.id }), !outside(entry)
-            else { continue }
+            guard queuedTasks.contains(where: { $0.id == entry.id }), !outside(entry),
+                  !stopped.contains(here) else { continue }
             // A job offered to the network takes no bay of this device's cap.
-            if !networkEnabled {
-                guard await agentTick().tick.capLoad.count < autoTaskLimit else { return }
+            if here, await agentTick().tick.capLoad.count + ratingsAndPoolRuns >= autoTaskLimit {
+                stopped.insert(here)
+                continue
             }
             // Finding room here is what re-arms the saturation notice. The gate's own
             // reset sits behind the capacity measurement this path skips, so without
@@ -3716,12 +3738,12 @@ final class Store: ObservableObject {
             capacityLogged = false
             switch await runQueuedTask(entry, forced: false) {
             case .failed: return
-            // Every remaining entry would be priced against the same windows, or the
-            // same disk, or offered to the same silent daemon, and get the same answer,
-            // and the dispatch has already re-staged this one for the commit at the end
-            // of the cycle. Draining on would cost a round of refusals to no end. A
-            // refusal for the job's own reason moves on to the next.
-            case .unaffordable, .lowDisk, .networkDown: return
+            // Every remaining entry run in the same place would be priced against the
+            // same windows, or the same disk, or offered to the same silent daemon, and
+            // get the same answer, and the dispatch has already re-staged this one for
+            // the commit at the end of the cycle. Draining on would cost a round of
+            // refusals to no end. A refusal for the job's own reason moves on to the next.
+            case .unaffordable, .lowDisk, .networkDown: stopped.insert(here)
             default: break
             }
         }
@@ -3738,16 +3760,18 @@ final class Store: ObservableObject {
     // has room — behind the monitors' finds, ahead of the conflict fixes
     // (`AgentTaskQueue.band`).
 
-    /// The config behind one ask: a review, an issue fix, or a Comms investigation.
+    /// The config behind one ask: a review, an issue fix, a Comms investigation, or a
+    /// Pipeline rating.
     ///
     /// Everything downstream reads an ask through `action` / `noun` / `depth` /
     /// `buildPrompt`, so the queue, the panel and the drain never branch on which kind
     /// it is — the one place that does is `requestedTask`, where a PR is dedup-able
-    /// work and an issue or an investigation is not.
+    /// work and an issue or an investigation is not, and a rating runs no agent.
     enum RequestedConfig: Equatable {
         case review(ReviewConfig)
         case issues(IssueConfig)
         case investigate(InvestigateConfig)
+        case rate(RateConfig)
 
         /// The queue verb this ask waits under, which is also its `AgentJob.kind`
         /// and the verb its dispatch writes to the activity feed.
@@ -3756,6 +3780,7 @@ final class Store: ObservableObject {
             case .review: return AgentTaskQueue.reviewAction
             case .issues: return AgentTaskQueue.issuesAction
             case .investigate: return AgentTaskQueue.investigateAction
+            case .rate: return AgentTaskQueue.rateAction
             }
         }
 
@@ -3765,6 +3790,7 @@ final class Store: ObservableObject {
             case .review: return "Review"
             case .issues: return "Issues"
             case .investigate: return "Investigate"
+            case .rate: return "Rating"
             }
         }
 
@@ -3773,6 +3799,7 @@ final class Store: ObservableObject {
             case .review(let cfg): return cfg.depth
             case .issues(let cfg): return cfg.depth
             case .investigate: return "slack"
+            case .rate: return ""
             }
         }
 
@@ -3781,6 +3808,7 @@ final class Store: ObservableObject {
             case .review(let cfg): return cfg.buildPrompt()
             case .issues(let cfg): return cfg.buildPrompt()
             case .investigate(let cfg): return cfg.buildPrompt()
+            case .rate: return ""
             }
         }
 
@@ -3789,7 +3817,7 @@ final class Store: ObservableObject {
             switch self {
             case .review(let cfg): return .init(review: cfg)
             case .issues(let cfg): return .init(issues: cfg)
-            case .investigate: return .init()
+            case .investigate, .rate: return .init()
             }
         }
 
@@ -3799,12 +3827,13 @@ final class Store: ObservableObject {
             case .review(let cfg): return cfg.fastTrack == true
             case .issues(let cfg): return cfg.pipeline == true || cfg.linear != nil
             case .investigate: return false
+            case .rate: return true
             }
         }
     }
 
     /// One PR to review, issue to fix or investigation to run that a sweep or a Slack
-    /// message asked for, waiting for a free slot.
+    /// message asked for, or a Pipeline sync's ask, waiting for a free slot.
     ///
     /// This is the only work in the queue the applet has to REMEMBER. Everything else
     /// there is a monitor's find, re-derived from GitHub on every poll — but a PR
@@ -3816,7 +3845,7 @@ final class Store: ObservableObject {
     struct RequestedWork: Codable, Equatable {
         /// The PR number, the issue number, or an investigation's Slack ts (`CommsTS`):
         /// three numbering spaces, told apart by the verb in `key` and nowhere else. 0 for
-        /// a Linear issue's fix, which `item` names by its identifier instead.
+        /// a Linear issue's fix or rating, which `item` names by its identifier instead.
         let number: Int
         let url: String
         /// Whose PR / issue — the pipeline's ban dimension. Empty where the sweep
@@ -3829,7 +3858,8 @@ final class Store: ObservableObject {
         var repo: String
         /// The network task this ask is offered as; "" while no offer carries it.
         var offered = ""
-        /// Queued by the Pipeline screen's Start fix, not by a sync (`pipelineWithdrawn`).
+        /// Asked for by the operator, not by a sync: a fix by the Pipeline screen's Start
+        /// fix, a rating by Rate now (`pipelineWithdrawn`).
         var byHand = false
 
         /// This ask's identity everywhere it has one: the queued task's id, the row
@@ -3842,6 +3872,7 @@ final class Store: ObservableObject {
             if case .issues(let cfg) = config, let linear = cfg.linear {
                 return Store.linearItem(linear.identifier)
             }
+            if case .rate = config { return Store.pipelineIdentity(url) }
             return config.action == AgentTaskQueue.investigateAction ? String(number)
                 : Store.item(url: url, number: number, root: repo)
         }
@@ -3850,9 +3881,15 @@ final class Store: ObservableObject {
         /// many repo roots are loaded (`PRRef.itemLabel`). Carries the depth because that
         /// is the choice a sweep is worth re-reading later: the same PR queued from a
         /// `max` sweep and from a `quick` one are different jobs. An investigation's
-        /// number is a meaningless Slack ts, so it wears its own label.
+        /// number is a meaningless Slack ts, so it wears its own label; a rating has no
+        /// depth.
         func label(roots: Int) -> String {
             if case .investigate(let cfg) = config { return cfg.label }
+            if case .rate = config {
+                let linear = Store.linearItem("")
+                return "\(config.noun) · " + (item.hasPrefix(linear) ? String(item.dropFirst(linear.count))
+                                                : PRRef.itemLabel(item: item, roots: roots))
+            }
             if case .issues(let cfg) = config, let linear = cfg.linear {
                 return "\(config.noun) · \(linear.identifier) · \(config.depth)"
             }
@@ -3901,6 +3938,8 @@ final class Store: ObservableObject {
                 config = .issues(try c.decode(IssueConfig.self, forKey: .config))
             } else if action == AgentTaskQueue.investigateAction {
                 config = .investigate(try c.decode(InvestigateConfig.self, forKey: .config))
+            } else if action == AgentTaskQueue.rateAction {
+                config = .rate(try c.decode(RateConfig.self, forKey: .config))
             } else {
                 config = .review(try c.decode(ReviewConfig.self, forKey: .config))
             }
@@ -3919,6 +3958,7 @@ final class Store: ObservableObject {
             case .review(let cfg): try c.encode(cfg, forKey: .config)
             case .issues(let cfg): try c.encode(cfg, forKey: .config)
             case .investigate(let cfg): try c.encode(cfg, forKey: .config)
+            case .rate(let cfg): try c.encode(cfg, forKey: .config)
             }
         }
     }
@@ -4040,6 +4080,7 @@ final class Store: ObservableObject {
     private func requestedTask(_ entry: RequestedWork) -> QueuedAgentTask? {
         let action = entry.config.action
         var config = entry.config
+        var rating: RateConfig?
         let root = roots.first { $0.key == entry.repo }
         switch config {
         case .review(var cfg):
@@ -4050,12 +4091,15 @@ final class Store: ObservableObject {
             config = .issues(cfg)
         case .investigate:
             break
+        case .rate(let cfg):
+            rating = cfg
         }
         // A fix is deliberately NOT PR-scoped (an issue link, no PR number): the dispatch
         // dedup keys on a PR number, so an issue number would collide with the PR sharing
         // it. The assignee claim, visible to every machine, keeps two agents off one issue.
+        // Nor is a rating, which runs no agent.
         let isPR = action == AgentTaskQueue.reviewAction
-        let link: String? = isPR ? entry.url
+        let link: String? = isPR || rating != nil ? entry.url
             : action == AgentTaskQueue.issuesAction ? entry.issueLink(in: roots) : nil
         return QueuedAgentTask(
             id: entry.key,
@@ -4066,7 +4110,7 @@ final class Store: ObservableObject {
                           authorLogin: entry.author.isEmpty ? nil : entry.author,
                           counter: entry.config.isPipeline ? .pipeline : nil,
                           directory: root?.path ?? entry.config.checkout,
-                          allows: config.allows),
+                          allows: config.allows, rating: rating),
             attemptNumber: 1)
     }
 
@@ -4174,11 +4218,14 @@ final class Store: ObservableObject {
     /// and a fix stands whatever happens to its issue, the poll reading PRs alone.
     /// Without a way back out, a mis-aimed sweep is a day of agents nobody can call off.
     /// A pipeline ask's attempt record is concluded (`pipelineCancelled`), or its next sync
-    /// would queue it again.
+    /// would queue it again; a rating's job is cancelled instead, which its next sync
+    /// reads as the operator's no (`PipelineRateJob.cancel`).
     func cancelRequestedWork(_ id: String) {
         guard let entry = queuedTasks.first(where: { $0.id == id }), entry.job.requested
         else { return }
-        if entry.job.counter == .pipeline {
+        if let rating = entry.job.rating {
+            PipelineRateJob.cancel(item: rating.url, stamp: rating.stamp)
+        } else if entry.job.counter == .pipeline {
             savePipelineAttempts(Store.pipelineCancelled(loadPipelineAttempts(), job: entry.job, at: Date()))
         }
         forgetRequested(entry.id)
@@ -4452,6 +4499,9 @@ final class Store: ObservableObject {
         /// What `prompt` was built to let the agent do. An offer to the network states it
         /// beside the prompt (`NetworkOffer.from`).
         var allows = Allows()
+        /// A Pipeline rating's, whose dispatch runs its job headless here
+        /// (`startPipelineRate`) rather than an agent.
+        var rating: RateConfig?
 
         struct Allows: Equatable {
             /// A review of the operator's own PR: fixes go on its branch.
@@ -4574,6 +4624,10 @@ final class Store: ObservableObject {
     /// not be afforded when it was found, or had no room on disk, gains neither by
     /// having waited in a list; only the operator pressing "execute now" overrides
     /// them, exactly as only they override the cap.
+    ///
+    /// A rating (`AgentJob.rating`) passes the same gates, never through the network,
+    /// and in place of a spawn starts its job headless (`startPipelineRate`): no
+    /// terminal, run book record or telemetry.
     @discardableResult
     func dispatchAgent(_ job: AgentJob, source: AgentDispatchGate.Source,
                        attemptNumber: Int = 1,
@@ -4597,7 +4651,7 @@ final class Store: ObservableObject {
         // With the network on the job runs in a container on whichever machine claims
         // it, so this device's disk, cap and budget are not measured for it: they shape
         // what this machine admits from the pool instead (`runNetworkCycleOnce`).
-        let network = networkEnabled
+        let network = offersToNetwork(job)
         // First: a low disk holds the job whatever the cap or the budget would say. Off
         // the main actor, since a volume can be a network mount.
         var disk: DiskFloor.Reading?
@@ -4613,7 +4667,7 @@ final class Store: ObservableObject {
         var atCapacity = false, full = false, paused = false
         if source == .auto, !agentOnPR, !bypassCapacity, !lowDisk {
             if !network {
-                full = await agentTick().tick.capLoad.count >= autoTaskLimit
+                full = await agentTick().tick.capLoad.count + ratingsAndPoolRuns >= autoTaskLimit
                 if !full { capacityLogged = false }
             }
             // A switched-off monitor has no room for its own work, whatever the
@@ -4692,6 +4746,10 @@ final class Store: ObservableObject {
         let rowLabel = AgentDispatchGate.label(source: source, core: job.label,
                                                attemptNumber: attemptNumber,
                                                requested: job.requested)
+        if let rating = job.rating {
+            startPipelineRate(rating, label: rowLabel)
+            return .spawned(terminal: "")
+        }
         if network {
             return await offerToNetwork(job, source: source, attemptNumber: attemptNumber,
                                         forced: forced, rowLabel: rowLabel)
