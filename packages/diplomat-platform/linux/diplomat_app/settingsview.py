@@ -1443,20 +1443,20 @@ class SettingsView(QWidget):
         login_row.setContentsMargins(0, 0, 0, 0)
         login_row.setSpacing(6)
         for w in (self._linear_key, self._linear_key_save, self._linear_key_cancel,
-                  self._linear_copy, self._linear_key_button, self._linear_button):
+                  self._linear_copy, self._linear_button, self._linear_key_button):
             login_row.addWidget(w)
         self._pipeline_login_row = self._track(SettingRow(
             "Linear login", login_control,
-            detail="Use API key… takes a personal API key, which some workspaces need an "
-                   "admin to allow. Sign in… goes through Linear's MCP server in the "
-                   "browser and needs no admin, but a sync under it makes more calls, and "
-                   "no PR is merged while teams are set: its tools cannot list the issues "
-                   "linked to a PR. Either login reads the tracked teams' issues and writes "
-                   "labels and child issues as you, is kept in "
-                   "~/.diplomat/pipeline/linear-login.json, readable by you alone, and is "
+            detail="Reads the tracked teams' issues and writes labels and child issues as "
+                   "you. Use API key… takes a personal API key, which some workspaces need "
+                   "an admin to allow. Sign in… goes through Linear's MCP server in the "
+                   "browser and needs no admin, but a sync makes more calls under it, and "
+                   "as its tools cannot list the issues linking a PR, no PR is merged while "
+                   "teams are set here. The login is kept in "
+                   "~/.diplomat/pipeline/linear-login.json, readable by you alone, and "
                    "never handed to an agent: a fix gets the issue's text as Diplomat read "
-                   "it. Sign out forgets it, and asks Linear to revoke an MCP one; a key "
-                   "stays valid until revoked in Linear's settings. "
+                   "it. Sign out forgets it, and asks Linear to revoke a browser sign-in; a "
+                   "key stays valid until revoked in Linear's settings. "
                    f"${pipeline.TOKEN_ENV}, a personal API key, wins over it. Without a "
                    "login, the teams set here are skipped with a notice and GitHub still "
                    "syncs, but no PR is merged."))

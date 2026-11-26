@@ -1263,7 +1263,7 @@ struct SettingsView: View {
         PR is merged while teams are set here. The login is kept in \
         ~/.diplomat/pipeline/linear-login.json, readable by you alone, and never handed to an \
         agent: a fix gets the issue's text as Diplomat read it. Sign out forgets it, and asks \
-        Linear to revoke a browser sign-in; a key stays good until revoked in Linear's \
+        Linear to revoke a browser sign-in; a key stays valid until revoked in Linear's \
         settings. $DIPLOMAT_LINEAR_TOKEN, a personal API key, wins over it. Without a login, \
         the teams set here are skipped with a notice and GitHub still syncs, but no PR is merged.
         """
