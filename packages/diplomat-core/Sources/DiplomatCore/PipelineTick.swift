@@ -223,6 +223,7 @@ final class PipelineSync {
         }
         edges = PipelineRead.edges(entries)
         for i in entries.indices { annotate(&entries[i]) }
+        takeOver()
         if settings.fastTrack { dropStaleClears() }
         rate()
         // With Fast track off too: a `cleared` not recorded could not be told from one a person put on.
@@ -234,6 +235,9 @@ final class PipelineSync {
         for i in entries.indices {
             entries[i].item.rateRefused = rateRefusal(entries[i])
             entries[i].item.fractureRefused = fractureRefusal(entries[i])
+            let taken = takenOver(entries[i])
+            entries[i].item.takenOver = taken ? true : nil
+            entries[i].item.takeoverRefused = taken ? nil : takeoverRefusal(entries[i])
         }
 
         for n in notices where !state.notices.contains(n) { log("", .error, n) }
@@ -856,7 +860,7 @@ final class PipelineSync {
 
     func isCandidate(_ x: PipelineEntry) -> Bool {
         x.item.kind == .issue && x.item.writable
-            && labelRating(x.labels).map { raised($0, x.id).isFastTrack } == true && triaged(x) == nil
+            && (takenOver(x) || labelRating(x.labels).map { raised($0, x.id).isFastTrack } == true && triaged(x) == nil)
             && stops(x).isEmpty && onGitHub(x) == nil && twinHold(x) == nil && twinsUnread(x) == nil
             && !has(x, model.labels.fractured) && x.children.isEmpty && banHold(x) == nil && x.root != nil
     }
@@ -870,9 +874,10 @@ final class PipelineSync {
         return e.labels.filter { !stop.isDisjoint(with: Self.triageForms($0)) }
     }
 
+    /// A PR taken over may close no issue.
     func fixesCandidate(_ pr: PipelineEntry) -> Bool {
         let closing = fixed(by: pr).filter { open(entries[$0]) }
-        return !closing.isEmpty && closing.allSatisfy { isCandidate(entries[$0], for: pr) }
+        return (!closing.isEmpty || takenOver(pr)) && closing.allSatisfy { isCandidate(entries[$0], for: pr) }
     }
 
     /// The issues `pr` would close that this sync did not read, so `fixesCandidate` did not
@@ -967,7 +972,7 @@ final class PipelineSync {
     }
 
     /// What merging `pr`, read again with `Gate`, would close: whether it closes an open
-    /// issue and each one is a candidate, and what no read judged. GitHub also closes the
+    /// issue (unless taken over) and each one is a candidate, and what no read judged. GitHub also closes the
     /// issues a closing word names in its title or a commit message. Each is judged as these
     /// fresh reads have it, whatever the sync's first read saw.
     func freshCloses(_ pr: PipelineEntry, linear: LinearJudged) -> (fixes: Bool, unjudged: [String]) {
@@ -981,7 +986,7 @@ final class PipelineSync {
                 .map { "the Linear issues linking \($0.item.label)" }
         }
         // One an earlier merge closed may still read open: GitHub and Linear close it a moment later.
-        return (!closing.isEmpty && closing.allSatisfy {
+        return ((!closing.isEmpty || takenOver(pr)) && closing.allSatisfy {
             !closedHere.contains(PipelineRead.norm($0.id)) && isCandidate($0, for: pr)
                 && (linear.twins[PipelineRead.norm($0.id)] ?? nil) == nil
         }, unjudged)
@@ -1009,10 +1014,10 @@ final class PipelineSync {
         has(e, model.labels.fractured) || !e.children.isEmpty || !fixers(e).isEmpty
     }
 
-    /// A fast-track PR at a clean head this Diplomat has not rated again: each head is
-    /// rated again once, whatever the answer.
+    /// A fast-track PR, not taken over, at a clean head this Diplomat has not rated again:
+    /// each head is rated again once, whatever the answer.
     func awaitingRerate(_ e: PipelineEntry) -> Bool {
-        guard own(e), open(e), e.item.writable, has(e, model.labels.fastTrack),
+        guard !takenOver(e), own(e), open(e), e.item.writable, has(e, model.labels.fastTrack),
               let head = e.item.headSha, !head.isEmpty, e.item.cleanAt == head, rerates[e.id]?[head] == nil,
               e.item.ratedBy == "label", let r = e.item.rating, r.atLeast(e.item.floor ?? r).isFastTrack,
               offTrack(e) == nil else { return false }
@@ -1020,12 +1025,12 @@ final class PipelineSync {
     }
 
     /// `cleared`, with a clean marker at its head, at which this Diplomat rated it low/low
-    /// again. The label alone is no proof of that re-rate: anyone with triage rights can
-    /// add it.
+    /// again, or, taken over, put `cleared` on. The label alone is no proof of either: anyone
+    /// with triage rights can add it.
     func clearedByMe(_ e: PipelineEntry) -> Bool {
         guard has(e, model.labels.cleared), let head = e.item.headSha, !head.isEmpty,
               e.item.cleanAt == head else { return false }
-        return rerates[e.id]?[head]?.isFastTrack == true
+        return takenOver(e) ? state.cleared[e.id] == head : rerates[e.id]?[head]?.isFastTrack == true
     }
 
     func newer(_ a: Int, _ b: Int) -> Bool {
@@ -1259,15 +1264,17 @@ final class PipelineSync {
 
     // MARK: - Fast track
 
-    /// Why my fast-track PR is off the fast track for good.
+    /// Why my fast-track PR is off the fast track for good. A takeover stands whatever it is
+    /// rated, and forgot what came off it before.
     func offTrack(_ e: PipelineEntry) -> String? {
         let head = e.item.headSha ?? ""
-        let above = (rerates[e.id] ?? [:]).filter { !$0.value.isFastTrack }
+        let taken = takenOver(e)
+        let above = taken ? [:] : (rerates[e.id] ?? [:]).filter { !$0.value.isFastTrack }
         if let h = above[head] != nil ? head : above.keys.sorted().first, let r = above[h] {
             return "re-rated \(describe(r)) at " + (h == head ? "this head" : String(h.prefix(7)))
         }
         if !has(e, model.labels.cleared),
-           let h = state.cleared[e.id] ?? (clearsLogged.contains("\(e.id) \(head)") ? head : nil) {
+           let h = state.cleared[e.id] ?? (!taken && clearsLogged.contains("\(e.id) \(head)") ? head : nil) {
             return "\(model.labels.cleared) came off it at \(h.prefix(7))"
         }
         return state.decided.contains(e.id) ? "Diplomat took it off the fast track" : nil
@@ -1276,14 +1283,23 @@ final class PipelineSync {
     func track(_ i: Int) {
         let e = entries[i]
         let (ft, cl) = (model.labels.fastTrack, model.labels.cleared)
-        guard own(e), open(e), e.item.writable, partial[e.item.repo] == nil, has(e, ft) || has(e, cl) else { return }
+        guard own(e), open(e), e.item.writable, partial[e.item.repo] == nil else { return }
+        // Its takeover put `ft` on: a person took it off since.
+        if takenOver(e) && !has(e, ft) {
+            state.takenOver[e.id] = nil
+            log(e.id, .takeover, "takeover ended: \(ft) came off it")
+            return persist()
+        }
+        guard has(e, ft) || has(e, cl) else { return }
         if let why = offTrack(e) {
             let off = recheck(i) ? [ft, cl].filter { has(entries[i], $0) && remove(i, $0, .fastTrack) } : []
             if !off.isEmpty { log(e.id, .labelled, off.map { "-" + $0 }.joined(separator: " ") + ": \(why), for a human") }
             if !state.decided.contains(e.id) { state.decided.append(e.id) }
+            if state.takenOver.removeValue(forKey: e.id) != nil { log(e.id, .takeover, "takeover ended: \(why)") }
             return persist()
         }
-        guard has(e, ft), let head = e.item.headSha, e.item.cleanAt == head, rerates[e.id]?[head]?.isFastTrack == true,
+        guard has(e, ft), let head = e.item.headSha, e.item.cleanAt == head,
+              takenOver(e) || rerates[e.id]?[head]?.isFastTrack == true,
               !has(e, cl) || state.cleared[e.id] != head else { return }
         if !has(e, cl) {
             guard recheck(i), entries[i].item.headSha == head, has(entries[i], ft), add(i, cl, .fastTrack) else { return }
@@ -1314,6 +1330,66 @@ final class PipelineSync {
         }
     }
 
+    // MARK: - Takeover
+
+    func takenOver(_ e: PipelineEntry) -> Bool { state.takenOver[e.id] != nil }
+
+    /// Why `e` may not be taken over now. Never its rating, its triage, its diff floor or its
+    /// being off the fast track, which a takeover stands past.
+    func takeoverRefusal(_ e: PipelineEntry) -> String? {
+        if let why = e.unwritable { return why }
+        if e.root == nil { return "Linear team \(e.item.repo) has no root to fix it in" }
+        if let why = e.root.flatMap({ partial[$0.slug] }) { return why }
+        if let why = banHold(e) { return why }
+        if let stop = stops(e).first { return "it carries the label \(stop)" }
+        if e.item.kind == .pr { return settings.fastTrack ? nil : "Fast-track my PRs is off" }
+        if has(e, model.labels.fractured) || !e.children.isEmpty { return "it is split already" }
+        if !fixers(e).isEmpty { return "an open PR fixes it" }
+        if let issue = onGitHub(e) { return "it is tracked on GitHub as \(issue)" }
+        return twinHold(e)
+    }
+
+    /// The operator's revokes, then takeovers. A revoke needs no read: it forgets the
+    /// takeover, and a PR goes off the fast track for good, which `track` writes to its
+    /// labels. A takeover is recorded once a read right before refuses it nothing; a PR's
+    /// once `fastTrack` is on it, which forgets what came off it before.
+    func takeOver() {
+        for id in settings.force?.revoke ?? [] {
+            guard let kind = state.takenOver.removeValue(forKey: id) else { continue }
+            if kind == .pr && !state.decided.contains(id) { state.decided.append(id) }
+            log(id, .takeover, "takeover revoked from the Pipeline screen")
+            persist()
+        }
+        for id in settings.force?.takeover ?? [] where state.takenOver[id] == nil {
+            guard let i = pos[id] else {
+                notice("\(id) was not read, so it was not taken over")
+                continue
+            }
+            if let why = takeoverRefusal(entries[i]) {
+                notice("\(entries[i].item.label) was not taken over: \(why)")
+                continue
+            }
+            guard may(.forced), recheck(i) else { continue }
+            let e = entries[i]
+            if let why = takeoverRefusal(e) {
+                notice("\(e.item.label) was not taken over: \(why)")
+                continue
+            }
+            if e.item.kind == .pr {
+                guard add(i, model.labels.fastTrack, .fastTrack) else {
+                    notice("\(e.item.label) was not taken over: \(model.labels.fastTrack) could not be put on")
+                    continue
+                }
+                state.decided.removeAll { $0 == id }
+                state.untracked.removeAll { $0 == id }
+                state.cleared[id] = nil
+            }
+            state.takenOver[id] = e.item.kind
+            log(id, .takeover, "taken over from the Pipeline screen, whatever its rating")
+            persist()
+        }
+    }
+
     // MARK: - Fracture
 
     func fracture() {
@@ -1335,8 +1411,9 @@ final class PipelineSync {
         if settings.fracture {
             let auto = entries.indices.filter { i in
                 let e = entries[i]
-                guard !picks.contains(i), fractureRefusal(e) == nil, state.unsplit[e.id] == nil, !backingOff(e.id),
-                      let r = e.item.rating else { return false }
+                // A takeover is for the issue as it stands.
+                guard !picks.contains(i), !takenOver(e), fractureRefusal(e) == nil, state.unsplit[e.id] == nil,
+                      !backingOff(e.id), let r = e.item.rating else { return false }
                 return r.complexity >= .medium && r.risk != .high
             }.sorted(by: newer)
             picks += auto.prefix(1)
@@ -1633,13 +1710,13 @@ final class PipelineSync {
             } else if let why = offTrack(e) {
                 stage = .human
                 hold = "off the fast track for good: \(why)"
-            } else if labelled == nil {
+            } else if !takenOver(e), labelled == nil {
                 stage = e.item.rating == nil ? .unrated : .human
                 if e.item.rating != nil { hold = "off the fast track: its rating labels could not be written" }
-            } else if let r = labelled, !r.isFastTrack {
+            } else if !takenOver(e), let r = labelled, !r.isFastTrack {
                 stage = .human
                 hold = "off the fast track: it is " + PipelineGate.Hold.rated(r).message
-            } else if !floor.isFastTrack {
+            } else if !takenOver(e), !floor.isFastTrack {
                 stage = .human
                 hold = "off the fast track: " + PipelineGate.Hold.floor(floor).message
             } else if clearedByMe(e) {
@@ -1685,6 +1762,9 @@ final class PipelineSync {
                 lane = fixing.contains { entries[$0].item.lane == .fast } ? .fast : .human
             } else if has(e, model.labels.fractured) || !e.children.isEmpty {
                 (stage, lane) = (.fractured, .fractured)
+            } else if takenOver(e) && e.item.writable && onGitHub(e) == nil && twinHold(e) == nil {
+                (stage, lane) = (.candidate, .fast)
+                hold = candidateHold(e)
             } else if let r = e.item.rating {
                 if r.isFastTrack && e.item.writable && triaged(e) == nil && onGitHub(e) == nil && twinHold(e) == nil {
                     (stage, lane) = (.candidate, .fast)
@@ -1695,8 +1775,9 @@ final class PipelineSync {
             } else {
                 (stage, lane) = (.unrated, .unrated)
             }
-            // Rated or not.
-            let refused: String? = triaged(e).map { "triaged as \($0)" } ?? stops(e).first.map { "carries the label \($0)" }
+            // Rated or not; a takeover stands whatever its triage.
+            let refused: String? = (takenOver(e) ? nil : triaged(e).map { "triaged as \($0)" })
+                ?? stops(e).first.map { "carries the label \($0)" }
                 ?? onGitHub(e).map { "it is tracked on GitHub as \($0)" } ?? twinHold(e) ?? (e.linksPast ? Self.linksPast : nil)
             entries[i].item.stage = stage
             entries[i].item.lane = lane
@@ -1745,7 +1826,7 @@ final class PipelineSync {
         guard let root = e.root else { return "Linear team \(e.item.repo) has no root to fix it in" }
         if let why = incomplete[root.slug] { return "\(why), so a PR fixing it might not be seen" }
         if let why = partial[root.slug] ?? twinsUnread(e) { return why }
-        if e.item.ratedBy != "label" { return "its rating labels could not be written" }
+        if e.item.ratedBy != "label" && !takenOver(e) { return "its rating labels could not be written" }
         if e.item.source == .linear, e.item.repo.uppercased() == "GH" {
             return "GitHub reads Linear team GH's `Fixes \(e.item.label)` as closing #\(e.item.label.dropFirst(3))"
         }
@@ -1782,7 +1863,7 @@ final class PipelineSync {
             stopLabels: stops(e),
             requiredChecks: e.gate.map(\.requiredChecks) ?? [], passedChecks: e.gate?.passedChecks ?? [],
             baseRules: e.gate.map(\.baseRules) ?? [], unsignedCommits: e.gate?.unsignedCommits ?? false,
-            mergeFlag: mergeFlag(e) ?? ""),
+            mergeFlag: mergeFlag(e) ?? "", takenOver: takenOver(e)),
             me: e.root?.me ?? "")
     }
 

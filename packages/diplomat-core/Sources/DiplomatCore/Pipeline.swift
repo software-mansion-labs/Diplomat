@@ -38,8 +38,8 @@ public enum PipelineSource: String, Codable, Sendable { case github, linear }
 
 public enum PipelineKind: String, Codable, Sendable { case issue, pr }
 
-/// Where an item stands. An issue: `unrated`, then `human` or `candidate` (low/low), or
-/// `fractured` into children; `fixing` once an open PR fixes it; `closed`. A PR:
+/// Where an item stands. An issue: `unrated`, then `human` or `candidate` (low/low, or taken
+/// over), or `fractured` into children; `fixing` once an open PR fixes it; `closed`. A PR:
 /// `unrated`, then `human` or `fast-track`; `clean` once a Diplomat clean marker names its
 /// head; `cleared` once this Diplomat rated it low/low again at that head (its log says so:
 /// the `cleared` label alone, which anyone with triage rights can add, does not); `merged`
@@ -99,6 +99,12 @@ public struct PipelineItem: Codable, Equatable, Sendable {
     /// a front-end gates those buttons on.
     public var rateRefused: String?
     public var fractureRefused: String?
+    /// The operator took it over: an issue is a candidate and a PR on the fast track,
+    /// whatever either is rated. Nil when not.
+    public var takenOver: Bool?
+    /// Why a sync would refuse to take it over; nil when it would go ahead, or it is taken
+    /// over already.
+    public var takeoverRefused: String?
 
     public init(id: String, source: PipelineSource, kind: PipelineKind, label: String,
                 title: String, repo: String, state: String, author: String? = nil,
@@ -106,7 +112,8 @@ public struct PipelineItem: Codable, Equatable, Sendable {
                 ratedBy: String? = nil, why: String? = nil, floor: PipelineRating? = nil,
                 stage: PipelineStage, lane: PipelineLane, hold: String? = nil,
                 headSha: String? = nil, cleanAt: String? = nil, updatedAt: Date? = nil,
-                splitFrom: String? = nil, rateRefused: String? = nil, fractureRefused: String? = nil) {
+                splitFrom: String? = nil, rateRefused: String? = nil, fractureRefused: String? = nil,
+                takenOver: Bool? = nil, takeoverRefused: String? = nil) {
         self.id = id
         self.source = source
         self.kind = kind
@@ -130,6 +137,8 @@ public struct PipelineItem: Codable, Equatable, Sendable {
         self.splitFrom = splitFrom
         self.rateRefused = rateRefused
         self.fractureRefused = fractureRefused
+        self.takenOver = takenOver
+        self.takeoverRefused = takeoverRefused
     }
 }
 
@@ -179,7 +188,7 @@ public struct PipelineGraph: Codable, Equatable, Sendable {
 public struct PipelineEvent: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case rated, labelled, fastTrack = "fast-track", clean, rerated, cleared, merged, held
-        case fractured, child, asked, error
+        case fractured, child, asked, takeover, error
     }
 
     public var at: Date
@@ -339,23 +348,32 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
         }
     }
 
-    /// What the operator asked for from the view, ahead of every limit.
+    /// What the operator asked for from the view, ahead of every limit: items to rate, to
+    /// split, to take over and whose takeover to revoke.
     public struct Force: Codable, Equatable, Sendable {
         public var rate: [String]
         public var fracture: [String]
+        public var takeover: [String]
+        public var revoke: [String]
 
-        public init(rate: [String] = [], fracture: [String] = []) {
+        public init(rate: [String] = [], fracture: [String] = [], takeover: [String] = [], revoke: [String] = []) {
             self.rate = rate
             self.fracture = fracture
+            self.takeover = takeover
+            self.revoke = revoke
         }
 
-        private enum CodingKeys: String, CodingKey { case rate, fracture }
+        private enum CodingKeys: String, CodingKey { case rate, fracture, takeover, revoke }
 
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             self.init(rate: try c.decodeIfPresent([String].self, forKey: .rate) ?? [],
-                      fracture: try c.decodeIfPresent([String].self, forKey: .fracture) ?? [])
+                      fracture: try c.decodeIfPresent([String].self, forKey: .fracture) ?? [],
+                      takeover: try c.decodeIfPresent([String].self, forKey: .takeover) ?? [],
+                      revoke: try c.decodeIfPresent([String].self, forKey: .revoke) ?? [])
         }
+
+        public var isEmpty: Bool { rate.isEmpty && fracture.isEmpty && takeover.isEmpty && revoke.isEmpty }
     }
 
     public var roots: [Root]

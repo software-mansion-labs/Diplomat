@@ -65,6 +65,8 @@ struct PipelineState: Codable, Equatable {
     var labelsMade: [String: [String]] = [:]
     /// PRs Diplomat took off the fast track for good. Only a cache: the labels say it.
     var decided: [String] = []
+    /// The items the operator took over, and what each is.
+    var takenOver: [String: PipelineKind] = [:]
     /// PRs the fast-track label could not be put on at their first rating.
     var untracked: [String] = []
     /// Issues that would not split, or whose split stopped part-way, and why: not tried
@@ -98,8 +100,8 @@ struct PipelineState: Codable, Equatable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case labelsMade, decided, untracked, unsplit, splitting, parts, rerated, cleared, retry, syncs, lineage, seen,
-             holds, clean, asked, notices
+        case labelsMade, decided, takenOver, untracked, unsplit, splitting, parts, rerated, cleared, retry, syncs,
+             lineage, seen, holds, clean, asked, notices
     }
 
     /// A field missing is empty; one there but not of its type fails the whole file.
@@ -107,6 +109,7 @@ struct PipelineState: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         labelsMade = try c.decodeIfPresent([String: [String]].self, forKey: .labelsMade) ?? [:]
         decided = try c.decodeIfPresent([String].self, forKey: .decided) ?? []
+        takenOver = try c.decodeIfPresent([String: PipelineKind].self, forKey: .takenOver) ?? [:]
         untracked = try c.decodeIfPresent([String].self, forKey: .untracked) ?? []
         unsplit = try c.decodeIfPresent([String: String].self, forKey: .unsplit) ?? [:]
         splitting = try c.decodeIfPresent([String: [String]].self, forKey: .splitting) ?? [:]
@@ -149,6 +152,7 @@ struct PipelineState: Codable, Equatable {
         seen = seen.filter { !done.contains($0.key) && $0.value >= cutoff }
         func live(_ id: String) -> Bool { seen[id] != nil }
         decided.removeAll { !live($0) }
+        takenOver = takenOver.filter { live($0.key) }
         untracked.removeAll { !live($0) }
         unsplit = unsplit.filter { live($0.key) }
         splitting = splitting.filter { live($0.key) }
