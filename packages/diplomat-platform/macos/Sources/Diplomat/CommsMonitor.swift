@@ -30,6 +30,7 @@ extension Store.RequestedConfig {
         case .review(let cfg): return cfg.checkout
         case .issues(let cfg): return cfg.checkout
         case .investigate(let cfg): return cfg.checkout
+        case .rate: return nil
         }
     }
 }

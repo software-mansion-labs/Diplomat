@@ -1144,7 +1144,7 @@ enum PipelineTest {
                        of asks: [Store.RequestedWork] = asks) -> [String] {
             Store.pipelineWithdrawn(asks, by: PipelineTickResult(at: Date(), items: seen, effects: effects,
                                                                  unread: unread, fixable: fixable, read: read),
-                                    fix: true, fastTrack: true).sorted()
+                                    fix: true, fastTrack: true, rate: true).sorted()
         }
         var assigned = items
         assigned[0].writable = false
@@ -1174,12 +1174,12 @@ enum PipelineTest {
         check("…an ask whose item a whole read left out goes (closed)",
               withdrawn([], []) == [fixKey, linearKey, reviewKey].sorted())
         check("…and one a sync queued goes while its switch is off, in an unread root or with no result",
-              Store.pipelineWithdrawn(asks, by: result([fix, fixLinear, review]), fix: false, fastTrack: true).sorted()
+              Store.pipelineWithdrawn(asks, by: result([fix, fixLinear, review]), fix: false, fastTrack: true, rate: true).sorted()
                   == [fixKey, linearKey].sorted()
                   && Store.pipelineWithdrawn(asks, by: PipelineTickResult(at: Date(), unread: ["o/r"]),
-                                             fix: true, fastTrack: false) == [reviewKey]
-                  && Store.pipelineWithdrawn(fromScreen, by: nil, fix: false, fastTrack: false) == [reviewKey]
-                  && Store.pipelineWithdrawn(asks, by: nil, fix: true, fastTrack: true).isEmpty)
+                                             fix: true, fastTrack: false, rate: true) == [reviewKey]
+                  && Store.pipelineWithdrawn(fromScreen, by: nil, fix: false, fastTrack: false, rate: true) == [reviewKey]
+                  && Store.pipelineWithdrawn(asks, by: nil, fix: true, fastTrack: true, rate: true).isEmpty)
         clearQueue()
         store.savePipelineAttempts([:])
         await store.applyPipeline(result([fix]))
@@ -1292,6 +1292,281 @@ enum PipelineTest {
         check("…until it is read again", ids() == [fixKey] && store.pipelineBanUnread == nil
                   && store.pipelineBan(item(issue, .issue, author: "carol")) == nil)
         try? FileManager.default.removeItem(at: banDir.appendingPathComponent("banned.json"))
+        clearQueue()
+        store.savePipelineAttempts([:])
+
+        print("\npipeline: ratings")
+        clearQueue()
+        store.savePipelineAttempts([:])
+        func rate(_ url: String = issue, number: Int = 90010, stamp: String, forced: Bool = false,
+                  author: String = "bob") -> PipelineEffect {
+            .rate(repo: "o/r", number: number, url: url, stamp: stamp, forced: forced, author: author)
+        }
+        let rateKey = "rate:o/r#90010", prRateKey = "rate:o/r#90011", linearRateKey = "rate:linear:ENG-90010"
+        func rated(_ key: String = rateKey) -> (stamp: String, forced: Bool, byHand: Bool)? {
+            guard let a = ask(key), case .rate(let cfg) = a.config else { return nil }
+            return (cfg.stamp, cfg.forced, a.byHand)
+        }
+        let rateLines = feed("pipeline-rate").count
+        func rateFeed() -> [String] { Array(feed("pipeline-rate").dropFirst(rateLines)) }
+        await store.applyPipeline(result([rate(stamp: "100")]), now: now)
+        check("a rate effect queues one rating ask at its stamp, in the band ahead of the fixes",
+              ids() == [rateKey] && rated().map { $0 == ("100", false, false) } == true
+                  && AgentTaskQueue.band(rateKey) == 2)
+        check("…its job a rating of its item: no PR number, its author's ban, held by the pipeline's switch",
+              job(rateKey).map {
+                  $0.rating == Store.RateConfig(url: issue, stamp: "100", forced: false)
+                      && $0.kind == AgentTaskQueue.rateAction && $0.prURL == issue && $0.prNumber == nil
+                      && $0.authorLogin == "bob" && $0.counter == .pipeline && $0.label == "Rating · r#90010"
+              } == true)
+        check("…with no attempt record, said once in the feed",
+              store.loadPipelineAttempts().isEmpty && rateFeed() == ["auto Rating · r#90010 queued"])
+        check("…its Cancel saying only Rate now asks again",
+              job(rateKey).flatMap(Store.pipelineCancelHelp) == "Drop this rating from the queue without running it. "
+                  + "The pipeline does not ask for it again; Rate now on the Pipeline screen does.")
+        check("…labelled as the other asks name its item, with no depth: #90010 in one root, r#90010 in several, "
+                  + "a Linear issue's identifier",
+              ask(rateKey)?.label == "Rating · #90010" && ask(rateKey)?.label(roots: 2) == "Rating · r#90010"
+                  && store.pipelineAsk(rate(linear, number: 0, stamp: "7"))?.label(roots: 2) == "Rating · ENG-90010")
+        await store.applyPipeline(result([fix, rate(stamp: "100"), review]), now: now)
+        check("…waiting between a fast-track review and a fix", ids() == [reviewKey, rateKey, fixKey])
+        store.forgetRequested(fixKey)
+        store.forgetRequested(reviewKey)
+        store.dropQueuedTask(fixKey)
+        store.dropQueuedTask(reviewKey)
+        store.savePipelineAttempts([:])
+        await store.applyPipeline(result([rate(stamp: "100")]), now: now)
+        check("the same stamp again: the one ask, no second line", ids() == [rateKey] && rateFeed().count == 1)
+        await store.applyPipeline(result([rate(stamp: "100", forced: true)]), now: now)
+        check("…by Rate now: the same ask made the operator's, in its place, no line",
+              ids() == [rateKey] && rated().map { $0 == ("100", true, true) } == true
+                  && job(rateKey)?.rating?.forced == true && rateFeed().count == 1)
+        await store.applyPipeline(result([rate(stamp: "100")]), now: now)
+        check("…and kept the operator's by the next sync", rated()?.byHand == true)
+        await store.applyPipeline(result([rate(stamp: "200")]), now: now)
+        check("a new stamp replaces the queued ask",
+              ids() == [rateKey] && store.requestedWork.count == 1 && rated().map { $0 == ("200", false, false) } == true
+                  && job(rateKey)?.rating?.stamp == "200" && rateFeed().last == "auto Rating · r#90010 queued")
+        await store.applyPipeline(result([rate(stamp: "300", forced: true)]), now: now)
+        check("…Rate now's said so", rated().map { $0 == ("300", true, true) } == true
+              && rateFeed().last == "auto Rating · r#90010 queued (Rate now)" && rateFeed().count == 3)
+        clearQueue()
+        let ratingRun = Store.PipelineRateRun(key: rateKey, label: "Rating · r#90010", url: issue,
+                                              startedAt: Date(), forced: false)
+        store.pipelineRateRuns = [ratingRun]
+        await store.applyPipeline(result([rate(stamp: "400")]), now: now)
+        check("one whose job is running is not queued beside it", ids().isEmpty && store.requestedWork.isEmpty)
+        check("…and badges its item as worked on, a queued one as queued",
+              store.pipelineBadges == ["o/r#90010": .agent]
+                  && Store.pipelineBadges(rows: [], waiting: [], asks: [store.pipelineAsk(rate(stamp: "1"))!])
+                      == ["o/r#90010": .queued])
+        store.pipelineRateRuns = []
+        await store.applyPipeline(result([rate(stamp: "400")]), now: now)
+        if let task = store.queuedTasks.first(where: { $0.id == rateKey }) { store.beginStarting(task) }
+        await store.applyPipeline(result([rate(stamp: "500")]), now: now)
+        check("…nor one starting replaced", store.startingTasks.map(\.id) == [rateKey] && rated()?.stamp == "400")
+        store.endStarting(rateKey)
+        clearQueue()
+        try? FileManager.default.createDirectory(at: banDir, withIntermediateDirectories: true)
+        try? Data(#"{"banned":[{"login":"mallory","reason":"prompt injection"}]}"#.utf8)
+            .write(to: banDir.appendingPathComponent("banned.json"))
+        await store.applyPipeline(result([rate(stamp: "100", author: "mallory")]), now: now)
+        let bannedQueued = ids()
+        try? Data("{".utf8).write(to: banDir.appendingPathComponent("banned.json"))
+        await store.applyPipeline(result([rate(stamp: "100")]), now: now)
+        check("a banned author's, or any while the ban list is unreadable, is not queued",
+              bannedQueued.isEmpty && ids().isEmpty)
+        try? FileManager.default.removeItem(at: banDir.appendingPathComponent("banned.json"))
+        store.refreshBanList()
+
+        print("\npipeline: ratings no longer owed")
+        let linearRate = rate(linear, number: 0, stamp: "7", forced: true, author: "Bob")
+        await store.applyPipeline(result([rate(stamp: "100"), linearRate]), now: now)
+        let drops = feed("queue-drop").count
+        store.pipelineRate = false
+        check("Rate off withdraws a sync's rating, not Rate now's",
+              ids() == [linearRateKey] && store.requestedWork.map(\.key) == [linearRateKey]
+                  && feed("queue-drop").dropFirst(drops)
+                      == ["panel Rating · r#90010 - the pipeline no longer owes it, not run"])
+        await store.applyPipeline(result([rate(stamp: "100"), linearRate]), now: now)
+        check("…queues none while off, but Rate now's still", ids() == [linearRateKey]
+              && rateFeed().last == "auto Rating · ENG-90010 queued (Rate now)")
+        await store.applyPipeline(result([]), now: now)
+        check("…which a sync that judged its item and owes it no rating withdraws", ids().isEmpty)
+        store.pipelineRate = true
+        let rateAsk = store.pipelineAsk(rate(stamp: "100"))!
+        var forcedAsk = store.pipelineAsk(rate(stamp: "100", forced: true))!
+        let fixAsk = store.pipelineAsk(fix)!, reviewAsk = store.pipelineAsk(review)!
+        func unowed(_ asks: [Store.RequestedWork], _ effects: [PipelineEffect]?, rate on: Bool = true,
+                  unread: [String] = []) -> [String] {
+            Store.pipelineWithdrawn(asks, by: effects.map { PipelineTickResult(at: Date(), items: items, effects: $0,
+                                                                               unread: unread) },
+                                    fix: true, fastTrack: true, rate: on).sorted()
+        }
+        check("a rating stays while its stamp is owed, and goes at another stamp or none",
+              unowed([rateAsk], [rate(stamp: "100")]).isEmpty && unowed([rateAsk], [rate(stamp: "200")]) == [rateKey]
+                  && unowed([rateAsk], []) == [rateKey])
+        check("…nor is it owed by a fix or a review of its item, nor they by a rating",
+              unowed([rateAsk], [fix]) == [rateKey]
+                  && unowed([fixAsk, reviewAsk], [rate(stamp: "1"), rate(pr, number: 90011, stamp: "1")])
+                      == [fixKey, reviewKey].sorted())
+        check("…kept in a root not judged in full",
+              unowed([rateAsk, forcedAsk], [], unread: ["o/r"]).isEmpty)
+        check("…a sync's by the switch alone, Rate now's never",
+              unowed([rateAsk, forcedAsk], nil, rate: false) == [rateKey] && unowed([forcedAsk], nil, rate: false).isEmpty
+                  && unowed([forcedAsk], [rate(stamp: "100", forced: true)], rate: false).isEmpty
+                  && unowed([forcedAsk], [], rate: false) == [rateKey])
+        forcedAsk.byHand = false
+        check("…its switch on, by the result alone", unowed([forcedAsk], nil).isEmpty)
+        store.pipelineResult = result([rate(stamp: "1"), fix])
+        check("Start fix takes the sync's fix effect, never a rating",
+              store.pipelineFixEffect(for: items[0]) == fix)
+        store.pipelineResult = result([rate(stamp: "1")])
+        check("…or a fix built from the link with only a rating emitted",
+              store.pipelineFixEffect(for: items[0]) == .fixIssue(repo: "o/r", number: 90010, url: issue, author: "bob"))
+
+        print("\npipeline: a rating's bay")
+        let limitBefore = store.autoTaskLimit
+        store.autoTaskLimit = 2
+        store.pinAutoTasksMeasured(0)
+        await store.applyPipeline(result([rate(stamp: "100")]), now: now)
+        let freeIdle = store.freeAutoSlots, roomIdle = store.drainHasRoom(capLoad: 1)
+        store.pipelineRateRuns = [Store.PipelineRateRun(key: prRateKey, label: "Rating · #90011", url: pr,
+                                                        startedAt: Date(), forced: false)]
+        check("a running rating holds a slot of the cap",
+              freeIdle == 2 && store.freeAutoSlots == 1 && roomIdle && !store.drainHasRoom(capLoad: 1))
+        store.autoTaskLimit = 1
+        let sweepJob = Store.AgentJob(kind: AgentTaskQueue.reviewAction, auditAction: AgentTaskQueue.reviewAction,
+                                      label: "Review · #90021 · deep", prompt: "",
+                                      prURL: "https://github.com/o/r/pull/90021", prNumber: 90021,
+                                      authorLogin: nil, counter: nil)
+        check("…which a monitor's dispatch counts", await store.dispatchAgent(sweepJob, source: .auto) == .atCapacity)
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        check("…and the drain: a queued rating waits at the cap", ids() == [rateKey]
+              && store.pipelineRateRuns.map(\.key) == [prRateKey])
+        setenv(DiplomacyNetwork.package.baseEnv, scratch.appendingPathComponent("network").path, 1)
+        store.networkEnabled = true
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        check("…with the network on too: a rating is never offered, and runs under this cap",
+              ids() == [rateKey] && store.networkOffering.isEmpty && !store.drainHasRoom(capLoad: 0)
+                  && job(rateKey).map(store.offersToNetwork) == false && store.offersToNetwork(sweepJob))
+        store.networkEnabled = false
+        store.pipelineRateRuns = []
+        store.autoTaskLimit = 2
+        store.queueAutoRun = false
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        let autoOff = ids() == [rateKey] && store.pipelineRateRuns.isEmpty
+        store.queueAutoRun = true
+        check("Auto-execute off holds it queued", autoOff)
+        setenv(DiskFloor.envOverride, "99999999999999999999", 1)
+        let lowDiskLines = feed("low-disk").count
+        if Store.agentDisk()?.low == true {
+            await store.drainQueuedTasks(snaps: [], closed: [])
+            check("…so does a low disk, said in the feed",
+                  store.requestedWork.map(\.key) == [rateKey] && store.pipelineRateRuns.isEmpty
+                      && feed("low-disk").count == lowDiskLines + 1)
+        } else {
+            check("the disk floor holds every dispatch for the low-disk check", false)
+        }
+        setenv(DiskFloor.envOverride, "0", 1)
+        store.offerRequestedWork()
+        store.commitQueue()
+        let budgetLines = feed("no-budget").count
+        AutoBudget.pinForSelfTest(AgentDispatchGate.Budget(affordable: false, window: AgentDispatchGate.windowWeek,
+                                                           left: 1, needed: 5, measured: true))
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        AutoBudget.resetCache()
+        check("…and a spent budget, said in the feed",
+              store.requestedWork.map(\.key) == [rateKey] && store.pipelineRateRuns.isEmpty
+                  && feed("no-budget").count == budgetLines + 1)
+        store.offerRequestedWork()
+        store.commitQueue()
+        check("…each leaving it queued", ids() == [rateKey])
+
+        print("\npipeline: a rating cancelled, and run")
+        func rateFile(_ item: String, _ stamp: String, _ kind: String) -> URL {
+            var h: UInt64 = 0xcbf2_9ce4_8422_2325
+            for b in item.utf8 { h = (h ^ UInt64(b)) &* 0x0000_0100_0000_01b3 }
+            return scratch.appendingPathComponent("pipeline/rate/\(String(h, radix: 16))-\(stamp).\(kind).json")
+        }
+        func writeRateJob(_ item: String, _ stamp: String) {
+            let url = rateFile(item, stamp, "job")
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let fields = ["item": item, "stamp": stamp, "model": "haiku", "prompt": "Rate it.", "input": "{}",
+                          "cwd": scratch.path]
+            try? JSONSerialization.data(withJSONObject: fields).write(to: url)
+        }
+        func rateAnswer(_ item: String, _ stamp: String) -> [String: Any]? {
+            (try? Data(contentsOf: rateFile(item, stamp, "answer")))
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        }
+        writeRateJob(issue, "100")
+        store.cancelRequestedWork(rateKey)
+        check("Cancel answers its job cancelled and drops the ask, recording nothing",
+              rateAnswer(issue, "100").map { $0["cancelled"] as? Bool == true && $0["stamp"] as? String == "100" } == true
+                  && ids().isEmpty && store.requestedWork.isEmpty && store.loadPipelineAttempts().isEmpty
+                  && feed("queue-cancel").last == "panel Rating · r#90010 — cancelled, not run")
+
+        let claudeBefore = ProcessInfo.processInfo.environment["DIPLOMAT_CLAUDE"]
+        let rater = scratch.appendingPathComponent("rater.sh")
+        try? Data("""
+            #!/bin/sh
+            cat > /dev/null
+            sleep 1
+            echo '{"type":"result","is_error":false,"structured_output":{"risk":"low","complexity":"low","why":"x"}}'
+            """.utf8).write(to: rater)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: rater.path)
+        setenv("DIPLOMAT_CLAUDE", rater.path, 1)
+        ticks = []
+        Store.pipelineTickOverride = { settings in
+            ticks.append(settings)
+            return result([])
+        }
+        func untilRated() async {
+            for _ in 0..<300 where !store.pipelineRateRuns.isEmpty { try? await Task.sleep(nanoseconds: 50_000_000) }
+        }
+        store.autoTaskLimit = 1
+        writeRateJob(issue, "500")
+        await store.applyPipeline(result([rate(stamp: "500"), rate(pr, number: 90011, stamp: "501", author: "")]),
+                                  now: now)
+        let (terminals, booked) = (AgentSpawner.refusedTerminals, AgentRegistry.load().count)
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        check("the drain starts a rating's job in a bay, the next rating waiting at the cap",
+              store.pipelineRateRuns.map { [$0.key, $0.label, $0.url] } == [[rateKey, "Rating · r#90010", issue]]
+                  && ids() == [prRateKey] && store.requestedWork.map(\.key) == [prRateKey]
+                  && store.freeAutoSlots == 0)
+        check("…headless: no terminal, no run book record, no attempt record",
+              AgentSpawner.refusedTerminals == terminals && AgentRegistry.load().count == booked
+                  && store.loadPipelineAttempts().isEmpty)
+        await untilRated()
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        check("its return frees the bay and says the rating, its answer left for the next sync",
+              store.pipelineRateRuns.isEmpty && store.freeAutoSlots == 1
+                  && rateFeed().last == "auto Rating · r#90010 rated: low risk, low complexity"
+                  && rateAnswer(issue, "500").map { $0["status"] as? Int == 0 } == true)
+        check("…a sync's starting no sync", ticks.isEmpty)
+        clearQueue()
+        writeRateJob(issue, "600")
+        await store.applyPipeline(result([rate(stamp: "600", forced: true)]), now: now)
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        let forcedRun = store.pipelineRateRuns.map(\.forced) == [true]
+        await untilRated()
+        for _ in 0..<100 where ticks.isEmpty { try? await Task.sleep(nanoseconds: 50_000_000) }
+        check("Rate now's return starts a sync", forcedRun && store.pipelineRateRuns.isEmpty && ticks.count == 1)
+        let failedRun = Store.PipelineRateRun(key: rateKey, label: "Rating · r#90010", url: issue,
+                                              startedAt: Date(), forced: false)
+        store.pipelineRateRuns = [failedRun]
+        store.finishPipelineRate(failedRun, .failed("the rater's answer named no risk and complexity"))
+        let failedLine = rateFeed().last
+        let linesNow = rateFeed().count
+        store.finishPipelineRate(failedRun, .superseded)
+        store.finishPipelineRate(failedRun, .answered)
+        check("a failed one says why; one superseded or answered already says nothing",
+              failedLine == "auto Rating · r#90010 was not rated: the rater's answer named no risk and complexity"
+                  && rateFeed().count == linesNow && store.pipelineRateRuns.isEmpty)
+        if let claudeBefore { setenv("DIPLOMAT_CLAUDE", claudeBefore, 1) } else { unsetenv("DIPLOMAT_CLAUDE") }
+        Store.pipelineTickOverride = nil
+        store.autoTaskLimit = limitBefore
         clearQueue()
         store.savePipelineAttempts([:])
 
