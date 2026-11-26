@@ -28,7 +28,7 @@ class CoreBinaryMissing(RuntimeError):
 
 
 def installed_bin() -> Path:
-    """Where ``build-core.sh`` installs diplomat-core (``~/.local/share/diplomat/diplomat-core``)."""
+    """Where ``build-core.sh`` installs diplomat-core."""
     data = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
     return data / "diplomat" / "diplomat-core"
 

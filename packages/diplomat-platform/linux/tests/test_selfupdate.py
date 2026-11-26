@@ -192,8 +192,8 @@ def _short(repo: Path) -> str:
 
 
 def test_a_merge_whose_core_build_failed_is_still_behind(repos, monkeypatch):
-    """The merge lands before the build, so by the checkout alone the 06:00 run would
-    read as up to date every morning after and never build it again."""
+    """The merge lands before the build, so a failed build leaves the checkout at
+    upstream and the core behind it, and the next 06:00 run builds again."""
     origin, clone, marker = repos
     selfupdate.build_core()
     (marker / "built").unlink()
@@ -252,9 +252,8 @@ case "$*" in
     git -c user.name=Test -c user.email=test@example.com commit -q --allow-empty -m later
     [ "$FAKE_SWIFT_FAILS" != build ] || exit 1
     mkdir -p "$FAKE_SWIFT_BIN"
-    printf '#!/bin/sh
-exit %d
-' "$([ "$FAKE_SWIFT_FAILS" = smoke ] && echo 1 || echo 0)"       > "$FAKE_SWIFT_BIN/diplomat-core"
+    printf '#!/bin/sh\nexit %d\n' "$([ "$FAKE_SWIFT_FAILS" = smoke ] && echo 1 || echo 0)" \
+      > "$FAKE_SWIFT_BIN/diplomat-core"
     chmod +x "$FAKE_SWIFT_BIN/diplomat-core"
     ;;
 esac
