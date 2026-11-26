@@ -5,7 +5,9 @@ Exec points at this package's ``diplomat`` launcher), so "update" is three steps
 fast-forward the checkout to its upstream, re-run ``install/build-core.sh`` to
 refresh the installed diplomat-core binary, and start the launcher again. Relaunching is all
 the "reinstall" needed — the singleton is newest-wins (see ``singleton.py``),
-so the fresh instance asks the old one to quit the moment it starts.
+so the fresh instance asks the old one to quit the moment it starts. Being behind is
+judged by what runs, not by the checkout (:func:`check`), so an update whose build or
+relaunch failed is still due.
 
 Everything here is synchronous and shell-based; the Store wraps it in daemon
 threads (``refresh_update_status_async`` / ``update_applet_async``) the same
@@ -23,7 +25,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from diplomat_runtime import diskfloor
+from diplomat_runtime import diskfloor, promptcore
 
 from .singleton import SingleInstance, headless_markers
 
@@ -74,8 +76,34 @@ def _upstream(root: Path) -> str:
         return "origin/main"
 
 
+_started_commit: str | None = None
+
+
+def note_started() -> None:
+    """Remember the checkout's HEAD as the code this GUI runs, for :func:`check`."""
+    global _started_commit
+    try:
+        _started_commit = _git(repo_root(), "rev-parse", "HEAD")
+    except (UpdateError, OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _core_commit(root: Path) -> str | None:
+    """The commit ``build-core.sh`` stamped the installed diplomat-core with, if this
+    checkout has it: the install is per-user, so another clone may have built it."""
+    try:
+        stamp = promptcore.installed_bin().with_suffix(".commit").read_text().strip()
+        return _git(root, "rev-parse", "--verify", "--quiet", f"{stamp}^{{commit}}")
+    except (OSError, ValueError, UpdateError):
+        return None
+
+
 def check() -> dict:
-    """Fetch origin and report where the checkout stands vs its upstream.
+    """Fetch origin and report where this build stands vs the checkout's upstream.
+
+    The build is this process's code - HEAD when the GUI started (:func:`note_started`),
+    else HEAD now - and the installed diplomat-core's commit (:func:`_core_commit`).
+    ``commit``, ``ahead`` and ``behind`` are those of whichever is further behind.
 
     Never raises (same contract as ``deviceallocator.check``): an unreachable
     remote still yields the local commit plus an ``error`` string.
@@ -91,17 +119,21 @@ def check() -> dict:
         "error": None,
     }
     try:
-        out["commit"] = _git(root, "rev-parse", "--short", "HEAD")
+        code = _started_commit or _git(root, "rev-parse", "HEAD")
+        out["commit"] = _git(root, "rev-parse", "--short", code)
         out["branch"] = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
         _git(root, "fetch", "--quiet", "origin")
         up = _upstream(root)
         out["upstream"] = up
-        # left = commits only on HEAD (ahead), right = only on upstream (behind).
-        ahead, behind = _git(
-            root, "rev-list", "--left-right", "--count", f"HEAD...{up}"
-        ).split()
-        out["ahead"] = int(ahead)
-        out["behind"] = int(behind)
+        counts = []
+        for sha in filter(None, (code, _core_commit(root))):
+            # left = commits only on sha (ahead), right = only on upstream (behind).
+            ahead, behind = _git(
+                root, "rev-list", "--left-right", "--count", f"{sha}...{up}"
+            ).split()
+            counts.append((int(behind), int(ahead), sha))
+        out["behind"], out["ahead"], sha = max(counts, key=lambda c: c[0])
+        out["commit"] = _git(root, "rev-parse", "--short", sha)
     except (UpdateError, OSError, subprocess.TimeoutExpired, ValueError) as exc:
         out["error"] = str(exc)
     return out
@@ -504,11 +536,12 @@ def run_watchdog() -> int:
 def run_scheduled() -> int:
     """Headless daily update for the 6AM timer. Never raises; returns an exit code.
 
-    Fetches, and if the checkout is behind, merges upstream and rebuilds
-    diplomat-core, then relaunches a running app onto the new build. On every
-    other path an app that is not running is launched unless the operator quit it
-    (``revive``). A conflict or an unreachable origin is logged and left for a
-    human rather than retried destructively.
+    Fetches, and if the checkout or the installed diplomat-core is behind
+    (:func:`check`), merges upstream and rebuilds diplomat-core, then relaunches a
+    running app onto the new build. On every other path an app that is not running
+    is launched unless the operator quit it (``revive``). A conflict or an
+    unreachable origin is logged and left for a human rather than retried
+    destructively.
 
     Nothing is fetched, merged or built while the checkout's volume is below the
     free-disk floor (:mod:`diskfloor`): a merge that hits ENOSPC halfway leaves a

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the diplomat-core CLI (the Swift prompt engine the applet shells out to)
-# and install it to ~/.local/share/diplomat/diplomat-core.
+# and install it to ~/.local/share/diplomat/diplomat-core. Once it passes its smoke
+# check, diplomat-core.commit beside it names the commit it was built from.
 #
 # diplomat-core is a statically-linked, self-contained binary (Swift stdlib + core
 # baked in): its only non-glibc deps are libstdc++/libgcc_s, so it runs on any
@@ -36,10 +37,15 @@ fi
 
 echo "Building diplomat-core (static) with $(swift --version 2>/dev/null | head -1)…"
 cd "$CORE_PKG"
+# Before the build, so it never names a newer tree than the one compiled.
+COMMIT="$(git rev-parse HEAD)"
 swift build --product diplomat-core --static-swift-stdlib -c release
 
 BIN="$(swift build --product diplomat-core -c release --show-bin-path)/diplomat-core"
 mkdir -p "$DEST_DIR"
 install -m 0755 "$BIN" "$DEST"
 echo "Installed: $DEST"
-"$DEST" build-prompt <<<'{"kind":"audit"}' >/dev/null && echo "Smoke check: OK"
+# Not an && list: set -e does not stop at a failure inside one.
+"$DEST" build-prompt <<<'{"kind":"audit"}' >/dev/null
+echo "Smoke check: OK"
+echo "$COMMIT" > "$DEST_DIR/diplomat-core.commit"

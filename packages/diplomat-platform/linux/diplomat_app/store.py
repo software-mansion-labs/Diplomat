@@ -6486,7 +6486,7 @@ class Store(QObject):
     # MARK: self-update
 
     def refresh_update_status_async(self) -> None:
-        """Fetch origin and compare HEAD to upstream, off the UI thread."""
+        """Fetch origin and compare this build to upstream, off the UI thread."""
         if (self.update_state or {}).get("phase") in ("checking", "updating", "restarting"):
             return
 
