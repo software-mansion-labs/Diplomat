@@ -313,6 +313,7 @@ def run_app() -> int:
     SingleInstance.acquire_newest_wins()
     selfupdate.clear_operator_quit()
     selfupdate.record_display_env()
+    selfupdate.note_started()
     app = DiplomatApp()
     if not background:
         app.show_window()

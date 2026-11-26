@@ -5407,7 +5407,7 @@ final class Store: ObservableObject {
 
     // MARK: - self-update
 
-    /// Fetch origin and compare HEAD to upstream, off the UI thread. Guards against
+    /// Fetch origin and compare this build to upstream, off the UI thread. Guards against
     /// re-entry while an update is already in flight.
     func refreshUpdateStatus() {
         switch updateState {

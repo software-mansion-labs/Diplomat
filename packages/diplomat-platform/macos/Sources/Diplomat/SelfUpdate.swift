@@ -17,8 +17,8 @@ enum SelfUpdate {
         var errorDescription: String? { message }
     }
 
-    /// Where the checkout stands vs its upstream — the payload behind the Settings
-    /// "UPDATE" section. Mirrors `selfupdate.check`'s dict.
+    /// Where the running build stands vs the checkout's upstream — the payload behind
+    /// the Settings "UPDATE" section. Mirrors `selfupdate.check`'s dict.
     struct CheckResult: Equatable {
         var commit: String?
         var branch: String?
@@ -69,22 +69,29 @@ enum SelfUpdate {
 
     // MARK: - public surface
 
-    /// Fetch origin and report where the checkout stands vs its upstream. Never throws —
-    /// an unreachable remote still yields the local commit plus an `error` string.
-    static func check() -> CheckResult {
+    /// Fetch origin and report where this build stands vs the checkout's upstream, so a
+    /// merge whose rebuild or relaunch failed still reads as behind. `built` is the
+    /// commit `build-app.sh` stamped into the bundle this process started from (read at
+    /// launch, so a bundle swapped in since does not count); unbundled (`swift run`), the
+    /// build is the checkout's HEAD. Never throws — an unreachable remote still yields
+    /// the build's commit plus an `error` string.
+    static func check(
+        built: String? = Bundle.main.object(forInfoDictionaryKey: "DiplomatCommit") as? String
+    ) -> CheckResult {
         var out = CheckResult()
         guard RepoPaths.checkoutPresent else {
             out.error = "no checkout at \(root.path) — set DIPLOMAT_SELF_REPO"
             return out
         }
         do {
-            out.commit = try git(["rev-parse", "--short", "HEAD"])
+            let build = try built ?? git(["rev-parse", "HEAD"])
+            out.commit = try git(["rev-parse", "--short", build])
             out.branch = try git(["rev-parse", "--abbrev-ref", "HEAD"])
             try git(["fetch", "--quiet", "origin"])
             let up = upstream()
             out.upstream = up
-            // left = commits only on HEAD (ahead), right = only on upstream (behind).
-            let counts = try git(["rev-list", "--left-right", "--count", "HEAD...\(up)"])
+            // left = commits only in the build (ahead), right = only on upstream (behind).
+            let counts = try git(["rev-list", "--left-right", "--count", "\(build)...\(up)"])
                 .split(whereSeparator: \.isWhitespace)
             if counts.count == 2 {
                 out.ahead = Int(counts[0])
@@ -299,10 +306,10 @@ enum SelfUpdate {
 
     // MARK: - unattended (launchd) paths
 
-    /// What the unattended paths do to the machine. The real steps by default;
-    /// `WatchdogTest` swaps in fixtures.
+    /// What the unattended paths do to the machine. The real steps by default; the
+    /// self-tests swap in fixtures.
     struct Host {
-        var check: () -> CheckResult = SelfUpdate.check
+        var check: () -> CheckResult = { SelfUpdate.check() }
         var pull: () throws -> String = SelfUpdate.pull
         var rebuild: () throws -> Void = SelfUpdate.rebuild
         var appRunning: () -> Bool = SingleInstance.isRunning
@@ -314,9 +321,9 @@ enum SelfUpdate {
 
     /// Headless daily update for the launchd 6AM job. Never throws; returns an exit code.
     ///
-    /// Fetches, and if behind, merges upstream and rebuilds, then relaunches a running
-    /// app onto the new build. On every other path an app that is not running is
-    /// launched unless the operator quit it (`revive`). A conflict or unreachable origin
+    /// Fetches, and if this build is behind, merges upstream and rebuilds, then relaunches
+    /// a running app onto the new build. On every other path an app that is not running
+    /// is launched unless the operator quit it (`revive`). A conflict or unreachable origin
     /// is logged and left for a human rather than retried destructively, and so is a
     /// checkout whose volume is below the free-disk floor. Mirrors
     /// `selfupdate.run_scheduled`.

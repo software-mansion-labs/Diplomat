@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import functools
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -26,6 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from diplomat_app import selfupdate  # noqa: E402
+from diplomat_runtime import promptcore  # noqa: E402
 
 
 def _run(cwd: Path, *args: str) -> str:
@@ -55,12 +57,16 @@ _PROBE_PASSES = '[ "${DIPLOMAT_UPDATE_PROBE:-}" = 1 ] && exit 0\n'
 
 
 def _make_origin(tmp_path: Path) -> Path:
-    """A fake upstream whose build/launch scripts just drop marker files."""
+    """A fake upstream whose build/launch scripts drop marker files, the build also the
+    commit stamp the real one writes."""
     origin = tmp_path / "origin"
     linux_pkg = origin / "packages" / "diplomat-platform" / "linux"
     (linux_pkg / "install").mkdir(parents=True)
     (linux_pkg / "install" / "build-core.sh").write_text(
-        "#!/usr/bin/env bash\ntouch \"$MARKER_DIR/built\"\n"
+        "#!/usr/bin/env bash\nset -e\n"
+        "mkdir -p \"$XDG_DATA_HOME/diplomat\"\n"
+        "git rev-parse HEAD > \"$XDG_DATA_HOME/diplomat/diplomat-core.commit\"\n"
+        "touch \"$MARKER_DIR/built\"\n"
     )
     # Writes down the environment it was started with, for the revival tests, then
     # stays up, as a launcher that exits inside the relaunch's watch window is a
@@ -93,6 +99,8 @@ def repos(tmp_path, monkeypatch):
     monkeypatch.setenv("DIPLOMAT_SELF_REPO", str(clone))
     monkeypatch.setenv("MARKER_DIR", str(marker))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    # Where the build stamps the core, out of reach of the real install's stamp.
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     # Isolate the singleton pidfile so running_pid() can't see a real tray, and the
     # /proc scan, which would.
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
@@ -177,6 +185,107 @@ def test_check_reports_ahead_when_diverged(repos):
     s = selfupdate.check()
     assert s["ahead"] == 1
     assert s["behind"] == 1
+
+
+def _short(repo: Path) -> str:
+    return _git(repo, "rev-parse", "--short", "HEAD")
+
+
+def test_a_merge_whose_core_build_failed_is_still_behind(repos, monkeypatch):
+    """The merge lands before the build, so a failed build leaves the checkout at
+    upstream and the core behind it, and the next 06:00 run builds again."""
+    origin, clone, marker = repos
+    selfupdate.build_core()
+    (marker / "built").unlink()
+    built_at = _short(clone)
+    _advance_origin(origin)
+
+    def build_core():
+        raise selfupdate.UpdateError("build-core.sh: exit 1")
+
+    with monkeypatch.context() as m:
+        m.setattr(selfupdate, "build_core", build_core)
+        assert selfupdate.run_scheduled() == 1
+    assert _git(clone, "rev-parse", "HEAD") == _git(origin, "rev-parse", "HEAD")
+
+    s = selfupdate.check()
+    assert (s["error"], s["behind"], s["ahead"], s["commit"]) == (None, 1, 0, built_at)
+    assert selfupdate.run_scheduled() == 0
+    assert (marker / "built").exists()
+    assert f"1 behind at {built_at} — merging origin/main" in _log()
+    assert selfupdate.check()["behind"] == 0
+
+
+def test_a_gui_still_on_the_code_it_started_on_is_behind(repos):
+    """The Update button merged and built, and its relaunch failed: the checkout and the
+    core moved on, the code this GUI runs did not."""
+    origin, clone, _marker = repos
+    selfupdate.note_started()
+    started_at = _short(clone)
+    _advance_origin(origin)
+    selfupdate.pull()
+    selfupdate.build_core()
+
+    s = selfupdate.check()
+    assert (s["error"], s["behind"], s["ahead"], s["commit"]) == (None, 1, 0, started_at)
+
+
+def test_a_core_built_from_a_commit_this_checkout_lacks_is_not_compared(repos):
+    """The install is per-user, so another clone may have built it; an error here would
+    skip every 06:00 run as an unreachable origin."""
+    _origin, clone, _marker = repos
+    stamp = promptcore.installed_bin().with_suffix(".commit")
+    stamp.parent.mkdir(parents=True)
+    stamp.write_text("f" * 40 + "\n")
+
+    s = selfupdate.check()
+    assert (s["error"], s["behind"], s["ahead"], s["commit"]) == (None, 0, 0, _short(clone))
+
+
+#: Stands in for the toolchain: the build "compiles" a core whose smoke check passes
+#: unless told otherwise, and commits on top of the tree it compiled.
+_FAKE_SWIFT = r"""#!/usr/bin/env bash
+case "$*" in
+  --version) echo "Swift version 0 (stand-in)" ;;
+  *--show-bin-path*) echo "$FAKE_SWIFT_BIN" ;;
+  build*)
+    git -c user.name=Test -c user.email=test@example.com commit -q --allow-empty -m later
+    [ "$FAKE_SWIFT_FAILS" != build ] || exit 1
+    mkdir -p "$FAKE_SWIFT_BIN"
+    printf '#!/bin/sh\nexit %d\n' "$([ "$FAKE_SWIFT_FAILS" = smoke ] && echo 1 || echo 0)" \
+      > "$FAKE_SWIFT_BIN/diplomat-core"
+    chmod +x "$FAKE_SWIFT_BIN/diplomat-core"
+    ;;
+esac
+"""
+
+
+@pytest.mark.parametrize("fails", ["", "build", "smoke"])
+def test_build_core_stamps_the_commit_it_built_once_it_works(tmp_path, monkeypatch, fails):
+    """The real ``build-core.sh``, in a checkout of its own."""
+    repo = tmp_path / "repo"
+    script = selfupdate.linux_package(repo) / "install" / "build-core.sh"
+    script.parent.mkdir(parents=True)
+    shutil.copy(Path(__file__).resolve().parents[1] / "install" / "build-core.sh", script)
+    (repo / "packages" / "diplomat-core").mkdir()
+    (repo / "packages" / "diplomat-core" / "Package.swift").write_text("")
+    _git(repo, "init", "-q", "-b", "main")
+    _commit_all(repo, "core")
+    compiled = _git(repo, "rev-parse", "HEAD")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "swift").write_text(_FAKE_SWIFT)
+    (bin_dir / "swift").chmod(0o755)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    env = {**os.environ, "HOME": str(tmp_path / "home"),
+           "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+           "FAKE_SWIFT_BIN": str(tmp_path / "swift-out"), "FAKE_SWIFT_FAILS": fails}
+
+    proc = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True,
+                          timeout=60)
+    assert (proc.returncode == 0) == (not fails), proc.stdout + proc.stderr
+    assert _git(repo, "rev-parse", "HEAD") != compiled
+    assert selfupdate._core_commit(repo) == (None if fails else compiled)
 
 
 def test_pull_merges_diverged_local_commit(repos):
@@ -411,8 +520,8 @@ def test_the_update_button_relaunches_in_the_foreground(repos):
 
 
 def test_a_quit_leaves_the_mark_and_the_next_launch_clears_it(monkeypatch):
-    """Quitting from the tray marks; starting the tray clears the mark and records
-    the display a revival will launch onto."""
+    """Quitting from the tray marks; starting the tray clears the mark, records the
+    display a revival will launch onto and notes the commit it runs."""
     from diplomat_app import app as app_module
     from diplomat_app.app import DiplomatApp, SingleInstance
 
@@ -442,6 +551,7 @@ def test_a_quit_leaves_the_mark_and_the_next_launch_clears_it(monkeypatch):
     assert app_module.run_app() == 0
     assert not selfupdate.operator_quit()
     assert selfupdate._recorded_display_env().get("WAYLAND_DISPLAY") == "wayland-3"
+    assert selfupdate._started_commit == _git(selfupdate.repo_root(), "rev-parse", "HEAD")
 
     # A start with no display to show on keeps the one a revival can use.
     monkeypatch.delenv("WAYLAND_DISPLAY")

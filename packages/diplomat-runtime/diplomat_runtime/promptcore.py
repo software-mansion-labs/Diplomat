@@ -27,17 +27,22 @@ class CoreBinaryMissing(RuntimeError):
     """Raised when the diplomat-core binary can't be located."""
 
 
+def installed_bin() -> Path:
+    """Where ``build-core.sh`` installs diplomat-core."""
+    data = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
+    return data / "diplomat" / "diplomat-core"
+
+
 def core_bin() -> str:
-    """Locate the diplomat-core binary: ``$DIPLOMAT_CORE_BIN``, then ``PATH``, then the
-    XDG install location (``~/.local/share/diplomat/diplomat-core``)."""
+    """Locate the diplomat-core binary: ``$DIPLOMAT_CORE_BIN``, then ``PATH``, then
+    :func:`installed_bin`."""
     override = os.environ.get("DIPLOMAT_CORE_BIN")
     if override and os.path.exists(override):
         return override
     found = shutil.which("diplomat-core")
     if found:
         return found
-    data = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
-    candidate = data / "diplomat" / "diplomat-core"
+    candidate = installed_bin()
     if candidate.exists():
         return str(candidate)
     raise CoreBinaryMissing(

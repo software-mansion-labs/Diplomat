@@ -63,7 +63,7 @@ printf '{"kind": "audit"}' > "$SCRATCH/audit.json"
 
 echo "full-disk: the bundle assembly"
 check "assemble-app.sh lays out a bundle on an empty volume" \
-  exits 0 "$ASSEMBLE" "$SCRATCH/old-bin" "$ASSETS" /checkout "$APP"
+  exits 0 "$ASSEMBLE" "$SCRATCH/old-bin" "$ASSETS" /checkout 0123abc "$APP"
 manifest "$APP" > "$SCRATCH/old.manifest"
 for f in err.log out.txt probe.log sink; do block_full "$VOL/$f"; done
 head -c 1048576 /dev/urandom > "$VOL/spacer"
@@ -87,7 +87,7 @@ check "the filled volume refuses an append to a log" fails sh -c 'printf x >> "$
 check "…and a new directory" fails mkdir "$VOL/probe"
 
 check "with no room at all, assembly fails" \
-  fails "$ASSEMBLE" "$SCRATCH/new-bin" "$ASSETS" /checkout "$APP"
+  fails "$ASSEMBLE" "$SCRATCH/new-bin" "$ASSETS" /checkout 0123abc "$APP"
 manifest "$APP" > "$SCRATCH/after.manifest" 2>/dev/null || true
 check "…and the last good bundle is byte-identical" cmp -s "$SCRATCH/old.manifest" "$SCRATCH/after.manifest"
 check "…and nothing it staged is left" only_expected
@@ -116,18 +116,18 @@ check "…and every one of those writes really failed" \
 
 rm "$VOL/spacer"
 check "with room for part of the new bundle, assembly fails" \
-  fails "$ASSEMBLE" "$SCRATCH/new-bin" "$ASSETS" /checkout "$APP"
+  fails "$ASSEMBLE" "$SCRATCH/new-bin" "$ASSETS" /checkout 0123abc "$APP"
 manifest "$APP" > "$SCRATCH/after.manifest" 2>/dev/null || true
 check "…and the last good bundle is byte-identical" cmp -s "$SCRATCH/old.manifest" "$SCRATCH/after.manifest"
 check "…and nothing it staged is left" only_expected
 
 echo "full-disk: once the disk has room again"
 bash "$FV" drain "$VOL"
-check "assembly succeeds" exits 0 "$ASSEMBLE" "$SCRATCH/new-bin" "$ASSETS" /checkout "$APP"
+check "assembly succeeds" exits 0 "$ASSEMBLE" "$SCRATCH/new-bin" "$ASSETS" /checkout 0123abc "$APP"
 check "…the new binary is in the bundle" cmp -s "$SCRATCH/new-bin" "$APP/Contents/MacOS/Diplomat"
 check "…with the assets" diff -r "$ASSETS" "$APP/Contents/Resources/assets"
-check "…and the checkout it was built from" \
-  test "$(plutil -extract DiplomatCheckout raw "$APP/Contents/Info.plist")" = /checkout
+check "…and the checkout and commit it was built from" \
+  test "$(plutil -extract DiplomatCheckout raw "$APP/Contents/Info.plist") $(plutil -extract DiplomatCommit raw "$APP/Contents/Info.plist")" = "/checkout 0123abc"
 check "…and nothing it staged is left" only_expected
 check "diplomat-core build-prompt writes the prompt" \
   exits 0 sh -c '"$1" build-prompt < "$2" >> "$3"' _ "$CORE_BIN" "$SCRATCH/audit.json" "$VOL/out.txt"

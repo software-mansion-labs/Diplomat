@@ -286,6 +286,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if env["DIPLOMAT_WATCHDOG_TEST"] == "1" {
             exit(WatchdogTest.run() ? 0 : 1)
         }
+        // What the Update section and the 06:00 run compare with upstream, over a scratch
+        // checkout. Exit code = pass/fail.
+        if env["DIPLOMAT_UPDATE_TEST"] == "1" {
+            exit(UpdateTest.run() ? 0 : 1)
+        }
     }
 
     /// A click on the Dock icon, or a launch of the running bundle, brings the window

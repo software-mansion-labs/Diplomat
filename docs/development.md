@@ -115,8 +115,8 @@ instance that greets you at login is the one **Update** rebuilds; nothing is cop
 
 It also installs a **second** agent, `com.ignacy.diplomat.autoupdate`, which fires
 daily at **06:00** and runs the app binary headless (`DIPLOMAT_SELF_UPDATE=1`):
-merge upstream if behind, rebuild the bundle, and relaunch a running instance onto
-it - unless the checkout's volume is below the
+merge upstream if the bundle's build is behind, rebuild the bundle, and relaunch a
+running instance onto it - unless the checkout's volume is below the
 [free-disk floor](automation.md#the-free-disk-floor), when it logs a `skip:` and does
 neither. It's the unattended twin of the Settings **Update** button, and it logs to
 `~/Library/Logs/diplomat-autoupdate.log`. Manage it on its own with:
@@ -268,12 +268,15 @@ DIPLOMAT_NETWORK_TEST=1  ...                     # self-test: the Diplomacy Netw
 DIPLOMAT_APIWATCH_TEST=1 ...                     # self-test: who a scan may type into (an agent's session,
                                                      #   including one a terminal only shows through tmux;
                                                      #   never a plain shell). Reads no terminal, sends nothing
-DIPLOMAT_SELF_UPDATE=1   ...                     # the unattended 06:00 update: merge if behind, rebuild,
-                                                     #   relaunch a running instance, launch a dead one
+DIPLOMAT_SELF_UPDATE=1   ...                     # the unattended 06:00 update: merge if the build is behind,
+                                                     #   rebuild, relaunch a running instance, launch a dead one
 DIPLOMAT_WATCHDOG=1      ...                     # the 5-minute check: launch the app if no instance is up
                                                      #   and the operator did not quit it
 DIPLOMAT_WATCHDOG_TEST=1 ...                     # self-test: who brings a dead app back and who leaves it
                                                      #   closed, over fixture job steps; exit code = verdict
+DIPLOMAT_UPDATE_TEST=1 ...                       # self-test: Update and the 06:00 run measure the build the
+                                                     #   app runs against upstream, not the checkout; scratch
+                                                     #   checkout, real git; exit code = verdict
 DIPLOMAT_RELAUNCH_TEST=1 ...                     # self-test: a relaunch is judged on the instance `open`
                                                      #   started, which gets no headless marker; opens only
                                                      #   throwaway bundles; exit code = verdict

@@ -443,6 +443,17 @@ def isolated_agent_registry(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_noted_start(monkeypatch):
+    """Forget the commit a test's ``run_app`` noted (:func:`selfupdate.note_started`):
+    module state naming the real checkout, which every later update check would
+    measure from."""
+    from diplomat_app import selfupdate
+
+    monkeypatch.setattr(selfupdate, "_started_commit", None)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_probe_cache():
     """Drop the shared ``ps`` cache between tests — it is module state, and a test that
     stubs the process table would otherwise be answered from the previous test's real
