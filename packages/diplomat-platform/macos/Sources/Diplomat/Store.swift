@@ -1039,8 +1039,11 @@ final class Store: ObservableObject {
     @Published var pipelineStale: Set<String> = []
     /// The rating jobs the queue dispatched that have not returned, each holding a bay of
     /// the task cap (`startPipelineRate`, in `PipelineMonitor.swift`). In memory only: a
-    /// job running at a quit leaves its answer for the next sync.
+    /// job a quit cuts off leaves no answer, so the next sync asks for it again.
     @Published var pipelineRateRuns: [PipelineRateRun] = []
+    /// The bays of the task cap held outside `capLoad`: the ratings running, and the runs
+    /// this machine executes for the network (`NetworkAdmit.running`).
+    var ratingsAndPoolRuns: Int { pipelineRateRuns.count + NetworkAdmit.running(networkState) }
 
     /// Every dispatched agent run the panel draws, in reading order: the sessions this
     /// machine spawned, and any live agent nobody dispatched at all.
@@ -2838,7 +2841,7 @@ final class Store: ObservableObject {
     /// With the network on the room is the pool's, which has it whenever its daemon
     /// answers and the settings can be read; a rating's is this device's either way.
     func drainHasRoom(capLoad: Int) -> Bool {
-        let here = capLoad + pipelineRateRuns.count < autoTaskLimit
+        let here = capLoad + ratingsAndPoolRuns < autoTaskLimit
         let pool = networkAnswered != false && networkSettingsUnknown.isEmpty
         return drainableTasks.contains { offersToNetwork($0.job) ? pool : here }
     }
@@ -3724,7 +3727,7 @@ final class Store: ObservableObject {
             guard queuedTasks.contains(where: { $0.id == entry.id }), !outside(entry),
                   !stopped.contains(here) else { continue }
             // A job offered to the network takes no bay of this device's cap.
-            if here, await agentTick().tick.capLoad.count + pipelineRateRuns.count >= autoTaskLimit {
+            if here, await agentTick().tick.capLoad.count + ratingsAndPoolRuns >= autoTaskLimit {
                 stopped.insert(here)
                 continue
             }
@@ -3855,8 +3858,8 @@ final class Store: ObservableObject {
         var repo: String
         /// The network task this ask is offered as; "" while no offer carries it.
         var offered = ""
-        /// Queued by the Pipeline screen's Start fix, not by a sync, or a rating Rate now
-        /// forced (`pipelineWithdrawn`).
+        /// Asked for by the operator, not by a sync: a fix by the Pipeline screen's Start
+        /// fix, a rating by Rate now (`pipelineWithdrawn`).
         var byHand = false
 
         /// This ask's identity everywhere it has one: the queued task's id, the row
@@ -4664,7 +4667,7 @@ final class Store: ObservableObject {
         var atCapacity = false, full = false, paused = false
         if source == .auto, !agentOnPR, !bypassCapacity, !lowDisk {
             if !network {
-                full = await agentTick().tick.capLoad.count + pipelineRateRuns.count >= autoTaskLimit
+                full = await agentTick().tick.capLoad.count + ratingsAndPoolRuns >= autoTaskLimit
                 if !full { capacityLogged = false }
             }
             // A switched-off monitor has no room for its own work, whatever the

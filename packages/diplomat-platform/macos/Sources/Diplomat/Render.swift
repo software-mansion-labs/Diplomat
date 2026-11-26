@@ -980,12 +980,16 @@ enum Render {
         // is the state a click leaves behind, and seeding the band directly would
         // prove the row draws without proving the queue lets go of it.
         store.beginStarting(starting)
+        store.pipelineRateRuns = [Store.PipelineRateRun(
+            key: "rate:software-mansion/argent#519", label: "Rating · #519",
+            url: "https://github.com/software-mansion/argent/issues/519",
+            startedAt: Date(timeIntervalSince1970: now - 300), forced: false)]
         // Pinned like the rows above, and for the same reason: the cap comes from the
         // shared config file, so an operator who raised theirs would change how many
-        // empty bays this picture has. Two are held — the untracked agent and the one
-        // nothing is known about, both automatic - which leaves two free beside the one
-        // the starting task has taken.
-        store.autoTaskLimit = 5
+        // empty bays this picture has. Three are held — the untracked agent and the one
+        // nothing is known about, both automatic, and the rating - which leaves two free
+        // beside the one the starting task has taken.
+        store.autoTaskLimit = 6
         store.pinAutoTasksMeasured(2)
         return true
     }

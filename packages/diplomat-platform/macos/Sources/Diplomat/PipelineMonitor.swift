@@ -877,8 +877,7 @@ extension Store {
 
     /// Runs the dispatched `rating`'s job off the main actor, its bay held
     /// (`pipelineRateRuns`) until it returns; then says in the feed what it did, frees the
-    /// bay and, for Rate now, syncs to apply it. Not awaited at a quit: the next sync
-    /// applies the answer it leaves.
+    /// bay and, for Rate now, syncs to apply it. Not awaited at a quit.
     func startPipelineRate(_ rating: RateConfig, label: String) {
         let run = PipelineRateRun(
             key: AgentTaskQueue.key(auditAction: AgentTaskQueue.rateAction, item: Store.pipelineIdentity(rating.url)),

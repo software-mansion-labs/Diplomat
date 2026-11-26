@@ -1249,8 +1249,8 @@ private struct RatingTaskRow: View {
     let tint: Color
 
     private static let help = """
-        Rating this item headless, in a slot of the cap. The next Pipeline sync applies \
-        its answer.
+        A Pipeline rating running on this machine, with no window. It holds a slot of the \
+        automatic-task cap while it works.
         """
 
     var body: some View {
@@ -1261,9 +1261,10 @@ private struct RatingTaskRow: View {
                 TimelineView(.periodic(from: Date(), by: 30)) { ctx in
                     HStack(spacing: 3) {
                         AgentTaskStatusLabel(status: .running)
-                        Text("· " + Fmt.duration(ctx.date.timeIntervalSince(run.startedAt)))
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
+                        let age = Fmt.duration(ctx.date.timeIntervalSince(run.startedAt))
+                        if age != "just now" {
+                            Text("· for " + age).font(.system(size: 9)).foregroundStyle(.secondary)
+                        }
                     }
                 }
             }

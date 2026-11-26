@@ -1350,6 +1350,10 @@ enum PipelineTest {
         await store.applyPipeline(result([rate(stamp: "300", forced: true)]), now: now)
         check("…Rate now's said so", rated().map { $0 == ("300", true, true) } == true
               && rateFeed().last == "auto Rating · r#90010 queued (Rate now)" && rateFeed().count == 3)
+        await store.applyPipeline(result([rate(stamp: "400")]), judged: false, now: now)
+        check("…replaced too by a sync that judged nothing, so withdrew nothing",
+              store.requestedWork.count == 1 && rated().map { $0 == ("400", false, false) } == true
+                  && rateFeed().count == 4)
         clearQueue()
         let ratingRun = Store.PipelineRateRun(key: rateKey, label: "Rating · r#90010", url: issue,
                                               startedAt: Date(), forced: false)
@@ -1450,6 +1454,12 @@ enum PipelineTest {
         check("…with the network on too: a rating is never offered, and runs under this cap",
               ids() == [rateKey] && store.networkOffering.isEmpty && !store.drainHasRoom(capLoad: 0)
                   && job(rateKey).map(store.offersToNetwork) == false && store.offersToNetwork(sweepJob))
+        store.pipelineRateRuns = []
+        store.networkState = NetworkSnapshot(["runs": [["runId": "r1", "taskId": "x", "state": "running"]]])
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        check("…in which a run it executes for the network holds a bay too",
+              ids() == [rateKey] && store.pipelineRateRuns.isEmpty && !store.drainHasRoom(capLoad: 0))
+        store.networkState = nil
         store.networkEnabled = false
         store.pipelineRateRuns = []
         store.autoTaskLimit = 2
