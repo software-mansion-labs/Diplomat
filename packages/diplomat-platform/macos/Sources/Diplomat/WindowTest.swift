@@ -7,7 +7,8 @@ import DiplomatCore
 /// What a launch decides before anything is on screen: an unattended start is read off
 /// the environment and removed from it, and the window is a regular one that a close
 /// keeps for the next open; its tooltips are AppKit's; its scroll views keep to their
-/// top-left; and an older login agent gets the unattended mark, on a scratch plist.
+/// top-left; the Pipeline screen fills it; and an older login agent gets the unattended
+/// mark, on a scratch plist.
 /// Orders no window in, so it takes no focus; showing, reopening and focus are checked
 /// by `scripts/macos-vm-test.sh` in a VM.
 ///
@@ -57,6 +58,7 @@ enum WindowTest {
               w.contentMinSize.width < MainRoot.width && w.contentMinSize.width > 0,
               "min \(w.contentMinSize.width)")
         check("a close keeps it for the next open", !w.isReleasedWhenClosed)
+        check("it opens with no field focused", w.initialFirstResponder === w.contentView)
 
         print("tooltips: plain AppKit strings, gone with their view")
         w.contentView?.layoutSubtreeIfNeeded()
@@ -128,6 +130,42 @@ enum WindowTest {
               scrolling.allSatisfy { $0.contentView.bounds.origin == .zero },
               "\(scrolling.map(\.contentView.bounds.origin))")
         pipeline.close()
+
+        print("Pipeline: fills the window; the panel keeps its screen")
+        let filled = MainWindow(store: wide, screen: .pipeline).window
+        filled.setContentSize(NSSize(width: MainRoot.fullWidth + 300, height: 800))
+        settle(filled)
+        let size = filled.contentView?.bounds.size ?? .zero
+        let graph = scrollViews(in: filled.contentView).dropFirst().first.map { $0.convert($0.bounds, to: nil) }
+        check("the Pipeline graph spans the window but for the margins and the detail column",
+              graph.map {
+                  abs($0.minX - 10) < 0.5 && abs($0.minY - 10) < 0.5
+                      && abs($0.maxX - (size.width - 10 - 12 - PipelineView.detailWidth)) < 0.5
+              } == true,
+              "\(graph.map { "\($0)" } ?? "no graph") in \(size)")
+        let settingsTip = "Show what each setting does, in full"
+        NotificationCenter.default.post(name: MainWindow.openSettings, object: nil)
+        settle(filled)
+        check("a switch from it to Settings lands there",
+              toolTips(in: filled.contentView).contains(settingsTip))
+        filled.setContentSize(NSSize(width: MainRoot.width - 300, height: 800))
+        settle(filled)
+        check("…and Settings stays up as the window narrows past the panel",
+              toolTips(in: filled.contentView).contains(settingsTip))
+        filled.close()
+        let short = NSWindow(contentRect: NSRect(x: 0, y: 0, width: MainRoot.width, height: 200),
+                             styleMask: [.titled], backing: .buffered, defer: true)
+        short.isReleasedWhenClosed = false
+        short.contentView = NSHostingView(rootView: PipelineView(isPresented: .constant(true), seedSelected: ids[0])
+            .environmentObject(wide).frame(width: MainRoot.width, height: 200))
+        settle(short)
+        let beside = scrollViews(in: short.contentView)
+        check("a selected card's detail taller than the screen scrolls beside the graph",
+              beside.count == 2 && beside.allSatisfy {
+                  short.contentView?.bounds.contains($0.convert($0.bounds, to: nil)) == true
+              },
+              "\(beside.map { $0.convert($0.bounds, to: nil) })")
+
         let busy = Store()
         let panel = MainWindow(store: busy).window
         panel.setContentSize(NSSize(width: MainRoot.width - 300, height: 500))
@@ -186,6 +224,12 @@ enum WindowTest {
     private static func scrollViews(in view: NSView?) -> [NSScrollView] {
         guard let view else { return [] }
         return [view as? NSScrollView].compactMap { $0 } + view.subviews.flatMap(scrollViews)
+    }
+
+    /// Lets a switch's animation finish.
+    private static func settle(_ w: NSWindow) {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        w.contentView?.layoutSubtreeIfNeeded()
     }
 
     private static func toolTips(in view: NSView?) -> Set<String> {

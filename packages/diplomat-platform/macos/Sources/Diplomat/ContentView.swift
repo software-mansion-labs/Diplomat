@@ -86,6 +86,7 @@ struct ContentView: View {
             }
         }
         .padding(10)
+        .preference(key: MainRoot.Fills.self, value: screen == .pipeline)
         .background(cmdFCatcher)
         .animation(.easeInOut(duration: 0.18), value: store.agentRows)
         .animation(.easeInOut(duration: 0.18), value: store.queuedTasks)
