@@ -3,7 +3,8 @@
 Every open issue of the GitHub repo roots and the tracked Linear teams, and every open PR of yours,
 rated for risk and complexity and routed: a low-risk, low-complexity issue goes down the **fast
 track**, from issue to fix PR to merge with no person reading the change; everything else is left
-to a person. It ships **off**, every switch of it too, and its state is the trackers' own labels.
+to a person, unless you [hand it to Diplomat](#takeover). It ships **off**, every switch of it too,
+and its state is the trackers' own labels.
 
 ## What it does
 
@@ -46,7 +47,7 @@ What it does not do:
 - approve a PR: GitHub does not let you approve your own, so the clean review is a COMMENT and the
   merge uses your [admin rights](#the-merge);
 - fast-track a PR of yours that closes no issue or one that is not a `candidate`, that was rated while
-  **Fast-track my PRs** was off, or that a person took a fast-track label off;
+  **Fast-track my PRs** was off, or that a person took a fast-track label off, unless you take it over;
 - comment on, assign or close a Linear issue, or hand its login to an agent;
 - read GitLab roots.
 
@@ -57,7 +58,7 @@ An issue, the first row that holds from the bottom up:
 | Stage | When | Lane |
 |---|---|---|
 | `unrated` | no rating yet | Unrated |
-| `candidate` | rated low/low, not triaged, and Diplomat may write to it | Fast |
+| `candidate` | rated low/low and not triaged, or [taken over](#takeover), and Diplomat may write to it | Fast |
 | `human` | rated anything else, or low/low but assigned to someone else, triaged, tracked on GitHub, or held by a Linear issue tracking it | Human |
 | `fractured` | labelled `diplomat:fractured`, or it has sub-issues (Linear: children) | Fractured |
 | `fixing` | an open PR fixes it | the PR's: Fast while it is on the fast track, else Human |
@@ -69,9 +70,9 @@ A PR:
 |---|---|---|
 | `unrated` | no rating yet | Unrated |
 | `human` | rated, and not on the fast track; every PR that is not yours, once a person labelled it | Human |
-| `fast-track` | yours, labelled `diplomat:fast-track`, closing only `candidate` issues, no clean marker at its head | Fast |
+| `fast-track` | yours, labelled `diplomat:fast-track`, closing only `candidate` issues, at least one unless taken over, no clean marker at its head | Fast |
 | `clean` | the same, with a clean marker at its head | Fast |
-| `cleared` | labelled `diplomat:cleared`, clean at its head, and rated low/low again there by this Diplomat (its state or log says so) | Fast |
+| `cleared` | labelled `diplomat:cleared`, clean at its head, and rated low/low again there by this Diplomat (its state or log says so), or, taken over, labelled so there by this Diplomat | Fast |
 | `merged`, `closed` | one of the repo's 20 merged or closed PRs updated last, carrying a pipeline label, or read for an ask waiting on it | Done |
 
 An issue labelled `wontfix`, `wont fix`, `won't fix`, `duplicate`, `invalid`, `question`,
@@ -123,6 +124,24 @@ it to a person: Diplomat never puts that label back.
 An issue's rating covers its title and body when rated, though its fix run also reads later edits
 and comments: what merges is judged on the PR itself, by its rating, its diff floor, the review and
 the rating at the clean head.
+
+### Takeover
+
+**Authorize takeover** on the screen hands Diplomat an item it leaves to a person, **whatever its
+rating, triage or diff floor**:
+
+- An issue becomes a `candidate`: its fix is asked for as any candidate's (**Open fix PRs**, else
+  **Start fix**), and it is split only if you press **Fracture**. The PR that fix opens is rated on
+  its own, and goes down the fast track only if low/low or taken over itself.
+- A PR of yours, with **Fast-track my PRs** on, is labelled `diplomat:fast-track` and reviewed until
+  clean. It may close no issue, is cleared at its clean head with no second rating, and so merges
+  (**Merge cleared PRs**) at any rating or floor. Every other [hold](#the-merge) still stands.
+
+What took a PR off the fast track before, a re-rating or a label a person took off, no longer
+counts. A takeover is refused for an item Diplomat may not write to, one carrying a stop label or of
+a banned author, and an issue split already, fixed by an open PR, tracked on GitHub or held by a
+Linear issue tracking it. **Revoke takeover** takes it back, a PR off the fast track until taken over
+again; a PR's takeover also ends when a person takes a fast-track label off it.
 
 ## Ratings
 
@@ -216,7 +235,7 @@ the workspace's, made if there is neither.
 ## Fracturing
 
 With **Split big issues** on, a sync splits at most one issue Diplomat may write to that is medium or
-high complexity and not high risk, not triaged, with no stop label, no sub-issues, no open PR fixing it (nor, on
+high complexity and not high risk, not triaged or taken over, with no stop label, no sub-issues, no open PR fixing it (nor, on
 Linear, attachments past what one read lists), and a repo root to read its code in that this sync
 read whole. **Fracture** on the screen splits one at once, whatever its
 rating. One `claude -p` call (`sonnet`, sandboxed as a rating is) reads the code and answers up to
@@ -280,15 +299,15 @@ its commits, its base branch and the checks it requires read only for a PR nothi
 - a stop label: `do not merge`, `do-not-merge`, `don't merge`, `blocked`, `on hold`, `wip` or
   `work in progress`, matched as triage labels are (`pipeline.json` `stopLabels`);
 - it lacks either fast-track label, or is off the fast track for good;
-- it closes no open issue, or one that is not a `candidate`, carries a stop label, or is held by a
-  Linear issue tracking it, as read right before the merge, or one a merge this sync asked for may
-  have closed;
+- it closes no open issue (unless taken over), or one that is not a `candidate`, carries a stop
+  label, or is held by a Linear issue tracking it, as read right before the merge, or one a merge
+  this sync asked for may have closed;
 - it would close an issue no read judged: one this sync did not read, more than the closing
   references one read lists, one a closing word names that GitHub does not list among them, or a
   Linear issue of a team not tracked or that could not be read; with Linear teams set, also when
   Linear cannot say which issues link it or an open GitHub issue it would close, or one that does is
   of a team not tracked or could not be read;
-- its rating, or its diff floor, is not low/low;
+- its rating, or its diff floor, is not low/low, unless it is taken over;
 - it conflicts with its base, is behind it or could not be compared with it, or GitHub has not computed
   whether it can merge;
 - CI was read for an older commit, is still running, or failed; it has no checks (so a repo without
@@ -335,8 +354,8 @@ team's repo, and each group with no card in any root, whole.
   labelled, the rater's sentence and the diff floor; its hold; who may act on it, who opened it and
   who it is assigned to, and for a PR its head and whether a clean marker names it; its
   **traversal**, newest first: each step the sync took or saw (`rated`, `labelled`, `fast-track`,
-  `clean`, `rerated`, `cleared`, `merged`, `held`, `fractured`, `child`, `asked`); a sync's errors
-  are its notices, under the status line. And its actions:
+  `clean`, `rerated`, `cleared`, `merged`, `held`, `fractured`, `child`, `asked`, `takeover`); a
+  sync's errors are its notices, under the status line. And its actions:
   - **Open** - the issue or PR in the browser.
   - **Rate now** (your open PR, or an open issue whose code a sync can read) - rated by a sync
     started at once, ahead of every limit, even with **Rate issues and PRs** off.
@@ -345,9 +364,11 @@ team's repo, and each group with no card in any root, whole.
   - **Start fix** (a `candidate` issue no hold stops) - its fix queued at once, past its attempt record, to wait
     for a bay like every ask. A Linear issue's only while **Open fix PRs** is on, since its text
     reaches the fix run through the sync.
+  - **Authorize takeover** (an open item Diplomat may write to, unrated or a person's) - a
+    [takeover](#takeover) by a sync started at once; **Revoke takeover** once it is taken over.
 
-Every action but **Open** is disabled while the pipeline is off, and **Rate now** and **Fracture**, with
-the reason, where the last sync found it would refuse them.
+Every action but **Open** is disabled while the pipeline is off, and **Rate now**, **Fracture** and
+**Authorize takeover**, with the reason, where the last sync found it would refuse them.
 
 ## Settings
 
@@ -427,7 +448,7 @@ labels are the state; this is what a sync needs besides:
 - `last.json` - the last sync's result, which the screen shows until the next one.
 - `ratings.json` - the ratings of items Diplomat may not label, kept while the item is unchanged, and
   of those whose labels could not be written, until they are; the rater's sentence for the rest.
-- `state.json` - the labels made per repo, and the guards against repeating a step: each PR's
+- `state.json` - the labels made per repo, the items taken over, and the guards against repeating a step: each PR's
   re-rates by head, which prove a `cleared` label this Diplomat's own, and the head it was cleared
   at; the PRs Diplomat took off the fast track, or could not put on it; the items whose rating, its
   labels or split failed, and when to

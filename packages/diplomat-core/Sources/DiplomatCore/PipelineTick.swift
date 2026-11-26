@@ -1299,7 +1299,7 @@ final class PipelineSync {
             return persist()
         }
         guard has(e, ft), let head = e.item.headSha, e.item.cleanAt == head,
-              takenOver(e) || rerates[e.id]?[head]?.isFastTrack == true,
+              takenOver(e) ? closesHold(e) == nil : rerates[e.id]?[head]?.isFastTrack == true,
               !has(e, cl) || state.cleared[e.id] != head else { return }
         if !has(e, cl) {
             guard recheck(i), entries[i].item.headSha == head, has(entries[i], ft), add(i, cl, .fastTrack) else { return }
@@ -1381,7 +1381,6 @@ final class PipelineSync {
                     continue
                 }
                 state.decided.removeAll { $0 == id }
-                state.untracked.removeAll { $0 == id }
                 state.cleared[id] = nil
             }
             state.takenOver[id] = e.item.kind
