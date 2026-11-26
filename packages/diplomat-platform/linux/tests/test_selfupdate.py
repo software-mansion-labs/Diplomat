@@ -128,6 +128,21 @@ def test_check_reports_up_to_date_then_behind(repos):
     assert s["commit"] == _git(clone, "rev-parse", "--short", "HEAD")
 
 
+def test_a_failed_build_is_named_by_its_first_error(repos):
+    """swift prints compiler errors to stdout, between warnings and trailing notes."""
+    _, clone, _ = repos
+    (clone / "packages/diplomat-platform/linux/install/build-core.sh").write_text(
+        "echo 'warning: a deprecation' >&2\n"
+        "echo '[3/6] Compiling DiplomatCore Store.swift'\n"
+        "echo 'Sources/Store.swift:3:5: error: cannot find x in scope'\n"
+        "echo '[#NoUsage]: <https://docs.swift.org>'\n"
+        "exit 1\n"
+    )
+    with pytest.raises(selfupdate.UpdateError) as failed:
+        selfupdate.build_core()
+    assert str(failed.value) == "build-core.sh: Sources/Store.swift:3:5: error: cannot find x in scope"
+
+
 def test_pull_fast_forwards_to_origin(repos):
     origin, clone, _ = repos
     _advance_origin(origin)

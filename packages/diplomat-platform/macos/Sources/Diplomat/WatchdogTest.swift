@@ -96,6 +96,20 @@ enum WatchdogTest {
                   m.launches == 1 && code == 1, "launches \(m.launches), exit \(code)")
         }
         do {
+            let error = "/c/Sources/Diplomat/Store.swift:3:5: error: cannot find 'x' in scope"
+            let named = SelfUpdate.buildFailure("""
+                warning: '--build-system native' has been deprecated
+                [3/6] Compiling Diplomat Store.swift
+                \(error)
+                  |     `- error: cannot find 'x' in scope
+                [#NoUsage]: <https://docs.swift.org/compiler/documentation/diagnostics/no-usage>
+                """)
+            check("a failed build is named by its first error", named == error, named ?? "nil")
+            let last = SelfUpdate.buildFailure("Building release…\nassemble-app.sh: swap failed: Busy")
+            check("a failed build with no error line is named by its last line",
+                  last == "assemble-app.sh: swap failed: Busy", last ?? "nil")
+        }
+        do {
             let m = machine { $0.launchFails = true }
             let code = SelfUpdate.runScheduled(m.host)
             check("a launch that fails is an exit 1 and a log line",

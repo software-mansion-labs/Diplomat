@@ -151,22 +151,30 @@ enum SelfUpdate {
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
         p.arguments = ["-lc", "exec \(shellQuote(script))"]
         p.currentDirectoryURL = root
-        let err = Pipe()
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = err
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = out
         do { try p.run() } catch {
             throw UpdateError(message: "build-app.sh: \(error.localizedDescription)")
         }
         // A cold release build can take a while.
         let watchdog = DispatchWorkItem { if p.isRunning { p.terminate() } }
         DispatchQueue.global().asyncAfter(deadline: .now() + 1800, execute: watchdog)
-        let errData = err.fileHandleForReading.readDataToEndOfFile()
+        let output = out.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
         watchdog.cancel()
         if p.terminationStatus != 0 {
-            let lines = (String(data: errData, encoding: .utf8) ?? "").split(whereSeparator: \.isNewline)
-            throw UpdateError(message: "build-app.sh: \(lines.last.map(String.init) ?? "exit \(p.terminationStatus)")")
+            let detail = buildFailure(String(decoding: output, as: UTF8.self))
+            throw UpdateError(message: "build-app.sh: \(detail ?? "exit \(p.terminationStatus)")")
         }
+    }
+
+    /// The line naming a failed build: swift prints compiler errors to stdout amid
+    /// warnings and ends on neither, so its first error, else its last line.
+    /// Mirrors `selfupdate._build_failure`.
+    static func buildFailure(_ output: String) -> String? {
+        let lines = output.split(whereSeparator: \.isNewline)
+        return (lines.first { $0.contains("error:") } ?? lines.last).map(String.init)
     }
 
     /// Launch the freshly-built bundle detached and see it come up. `open` exits 0 once

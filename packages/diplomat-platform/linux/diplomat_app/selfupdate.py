@@ -235,15 +235,23 @@ def build_core() -> None:
     proc = subprocess.run(  # noqa: S603 — our own build script
         ["bash", str(script)],
         cwd=str(root),
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
         timeout=1800,  # a cold swift release build can take a while
     )
     if proc.returncode != 0:
-        lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
         raise UpdateError(
-            f"build-core.sh: {lines[-1] if lines else f'exit {proc.returncode}'}"
+            f"build-core.sh: {_build_failure(proc.stdout) or f'exit {proc.returncode}'}"
         )
+
+
+def _build_failure(output: str) -> str | None:
+    """The line naming a failed build: swift prints compiler errors to stdout amid
+    warnings and ends on neither, so its first error, else its last line. Mirrors
+    ``SelfUpdate.buildFailure``."""
+    lines = output.strip().splitlines()
+    return next((line for line in lines if "error:" in line), lines[-1] if lines else None)
 
 
 def _state_dir() -> Path:
