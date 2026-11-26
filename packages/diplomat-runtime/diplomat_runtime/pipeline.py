@@ -96,8 +96,8 @@ _GH_CALLS_PER_CLAUDE = 16
 #: create and its sub-issue link.
 _GH_CALLS_PER_PART = 5
 #: Per takeover or revoke asked: a re-read, then the fast-track label's create and add, or
-#: the fast-track labels' removal.
-_GH_CALLS_PER_TAKEOVER = 3
+#: the fast-track labels' removal; and a PR's clear in the same sync, as `cleared`'s.
+_GH_CALLS_PER_TAKEOVER = 6
 #: A root's merges: each PR read twice before ``gh pr merge`` (once without Linear) and
 #: once after.
 _MERGES_PER_ROOT = 3

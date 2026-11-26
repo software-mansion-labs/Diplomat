@@ -707,7 +707,7 @@ extension Store {
         return "Diplomat has this Linear issue's text only while Open fix PRs is on"
     }
 
-    /// Why a sync would rate and split nothing: the ban list cannot be read. Twin of
+    /// Why a sync would rate, split and take over nothing: the ban list cannot be read. Twin of
     /// `Store.pipeline_ban_unread`.
     var pipelineBanUnread: String? {
         banListUnreadable ? "The prompt-injection ban list could not be read" : nil

@@ -776,6 +776,16 @@ def test_start_fix_is_off_once_a_fracture_is_asked(store, monkeypatch):
     assert not view.buttons["fix"].isEnabled()
 
 
+def test_start_fix_is_off_once_a_revoke_is_asked(store, monkeypatch):
+    monkeypatch.setattr(store, "run_pipeline_sync_async", lambda: None)
+    store.pipeline_result = _taken_over(4)
+    view = PipelineView(store)
+    view.select(I5)
+    assert view.buttons["fix"].isEnabled()
+    view.buttons["revoke"].click()
+    assert not view.buttons["fix"].isEnabled()
+
+
 def test_rate_now_and_fracture_are_off_where_the_last_sync_would_refuse_them(store):
     """Each with the reason it gave."""
     split = "it is tracked on GitHub as o/r#24"
@@ -1069,12 +1079,12 @@ def test_authorize_takeover_says_what_a_sync_does_with_it_and_asks_for_one(store
     view.buttons["takeover"].click()
     view.select(P2)
     assert shown() == ("Authorize takeover", True, "Hand it to Diplomat in a sync started now: "
-                       "reviewed until clean and merged, whatever its rating")
+                       "reviewed until clean and merged, whatever its rating or diff floor")
     view.buttons["takeover"].click()
     assert calls == [("takeover", I6), ("takeover", P2)]
 
 
-def test_revoke_takeover_takes_it_back_and_a_pr_off_the_fast_track_for_good(store, monkeypatch):
+def test_revoke_takeover_takes_it_back_and_a_pr_off_the_fast_track(store, monkeypatch):
     calls = _recorder(store, monkeypatch)
     store.pipeline_result = _taken_over(1, 4)
     view = PipelineView(store)
@@ -1083,15 +1093,16 @@ def test_revoke_takeover_takes_it_back_and_a_pr_off_the_fast_track_for_good(stor
     revoke = view.buttons["revoke"]
     assert (revoke.text(), revoke.isEnabled(), _tip(revoke)) == (
         "Revoke takeover", True, "Take it back from Diplomat in a sync started now")
-    assert "Taken over: its rating does not hold it" in _labels(view.detail)
+    assert "Taken over: neither its rating nor its triage holds it" in _labels(view.detail)
     revoke.click()
     view.select(P2)
     assert _tip(view.buttons["revoke"]) == ("Take it back from Diplomat in a sync started now: "
-                                            "its fast-track labels come off")
+                                            "off the fast track")
+    assert "Taken over: neither its rating nor its diff floor holds it" in _labels(view.detail)
     view.buttons["revoke"].click()
     assert calls == [("revoke", I5), ("revoke", P2)]
     view.select(I6)
-    assert "Taken over: its rating does not hold it" not in _labels(view.detail)
+    assert not any(label.startswith("Taken over") for label in _labels(view.detail))
 
 
 def test_a_takeover_or_revoke_waiting_for_its_sync_shows_asked(store, monkeypatch):

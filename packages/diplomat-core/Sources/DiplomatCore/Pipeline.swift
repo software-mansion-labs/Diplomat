@@ -41,7 +41,8 @@ public enum PipelineKind: String, Codable, Sendable { case issue, pr }
 /// Where an item stands. An issue: `unrated`, then `human` or `candidate` (low/low, or taken
 /// over), or `fractured` into children; `fixing` once an open PR fixes it; `closed`. A PR:
 /// `unrated`, then `human` or `fast-track`; `clean` once a Diplomat clean marker names its
-/// head; `cleared` once this Diplomat rated it low/low again at that head (its log says so:
+/// head; `cleared` once this Diplomat rated it low/low again at that head, or put `cleared`
+/// on it there for a takeover (its log or state says so:
 /// the `cleared` label alone, which anyone with triage rights can add, does not); `merged`
 /// or `closed`.
 public enum PipelineStage: String, Codable, CaseIterable, Sendable {
@@ -99,8 +100,8 @@ public struct PipelineItem: Codable, Equatable, Sendable {
     /// a front-end gates those buttons on.
     public var rateRefused: String?
     public var fractureRefused: String?
-    /// The operator took it over: an issue is a candidate and a PR on the fast track,
-    /// whatever either is rated. Nil when not.
+    /// The operator took it over, open: neither its rating nor its triage holds it, nor a
+    /// PR's diff floor. Nil when not.
     public var takenOver: Bool?
     /// Why a sync would refuse to take it over; nil when it would go ahead, or it is taken
     /// over already.

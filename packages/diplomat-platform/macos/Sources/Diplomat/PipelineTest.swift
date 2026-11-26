@@ -77,7 +77,7 @@ enum PipelineTest {
         check("Fast-track my PRs names only a PR closing only candidate issues, rated while it is on",
               SettingsView.pipelineFastTrackSummary
                   == "Labels diplomat:fast-track each low/low PR of yours that closes a candidate issue, "
-                  + "and reviews it until clean"
+                  + "or that you take over, and reviews it until clean"
                   && SettingsView.pipelineFastTrackDetail.hasPrefix(
                       "Only your own PRs from the repo itself into its default branch that close only "
                           + "candidate issues: the fixes the pipeline asks for.")
@@ -727,6 +727,7 @@ enum PipelineTest {
             ("a rate refused", detail(rateRefused), [false, true, true]),
             ("a split refused", detail(splitRefused), [true, false, true]),
             ("its fix unknown", detail(canStartFix: false), [true, true, false]),
+            ("a revoke asked", detail(forcedRevoke: true), [true, true, false]),
         ]
         let wrong = stops.filter { [$0.1.rateEnabled, $0.1.fractureEnabled, $0.1.fixEnabled] != $0.2 }.map(\.0)
         check("the detail's Rate now, Fracture and Start fix: each off only for what stops it"
@@ -773,11 +774,11 @@ enum PipelineTest {
                   && detail(human).takeoverTip
                       == "Hand it to Diplomat in a sync started now: a fix candidate whatever its rating or triage"
                   && detail(at(.human, .pr)).takeoverTip
-                      == "Hand it to Diplomat in a sync started now: reviewed until clean and merged, whatever its rating"
+                      == "Hand it to Diplomat in a sync started now: reviewed until clean and merged, whatever its rating or diff floor"
                   && detail(at(.candidate, takenOver: true)).revokeTip
                       == "Take it back from Diplomat in a sync started now"
                   && detail(at(.fastTrack, .pr, takenOver: true)).revokeTip
-                      == "Take it back from Diplomat in a sync started now: its fast-track labels come off")
+                      == "Take it back from Diplomat in a sync started now: off the fast track")
 
         print("\npipeline: connectors")
         func graph(_ cells: [(String, Int, Int)], _ edges: [(String, String, PipelineGraph.EdgeKind)])

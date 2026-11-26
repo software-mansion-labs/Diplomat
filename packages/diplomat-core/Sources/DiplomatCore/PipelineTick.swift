@@ -235,7 +235,7 @@ final class PipelineSync {
         for i in entries.indices {
             entries[i].item.rateRefused = rateRefusal(entries[i])
             entries[i].item.fractureRefused = fractureRefusal(entries[i])
-            let taken = takenOver(entries[i])
+            let taken = takenOver(entries[i]) && open(entries[i])
             entries[i].item.takenOver = taken ? true : nil
             entries[i].item.takeoverRefused = taken ? nil : takeoverRefusal(entries[i])
         }
@@ -858,15 +858,17 @@ final class PipelineSync {
             + entries.indices.filter { entries[$0].item.source == .linear && PipelineRead.closes(pr, linear: entries[$0]) }
     }
 
-    func isCandidate(_ x: PipelineEntry) -> Bool {
+    /// `lifted`: whatever its rating or triage, as when taken over.
+    func isCandidate(_ x: PipelineEntry, lifted: Bool = false) -> Bool {
         x.item.kind == .issue && x.item.writable
-            && (takenOver(x) || labelRating(x.labels).map { raised($0, x.id).isFastTrack } == true && triaged(x) == nil)
+            && (lifted || takenOver(x) || labelRating(x.labels).map { raised($0, x.id).isFastTrack } == true && triaged(x) == nil)
             && stops(x).isEmpty && onGitHub(x) == nil && twinHold(x) == nil && twinsUnread(x) == nil
             && !has(x, model.labels.fractured) && x.children.isEmpty && banHold(x) == nil && x.root != nil
     }
 
-    func isCandidate(_ x: PipelineEntry, for pr: PipelineEntry) -> Bool {
-        isCandidate(x) && (x.item.source == .github || x.root?.slug.lowercased() == pr.item.repo.lowercased())
+    /// An issue a PR taken over (`taken`, else as recorded) closes counts as taken over too.
+    func isCandidate(_ x: PipelineEntry, for pr: PipelineEntry, taken: Bool? = nil) -> Bool {
+        isCandidate(x, lifted: taken ?? takenOver(pr)) && (x.item.source == .github || x.root?.slug.lowercased() == pr.item.repo.lowercased())
     }
 
     func stops(_ e: PipelineEntry) -> [String] {
@@ -874,10 +876,11 @@ final class PipelineSync {
         return e.labels.filter { !stop.isDisjoint(with: Self.triageForms($0)) }
     }
 
-    /// A PR taken over may close no issue.
-    func fixesCandidate(_ pr: PipelineEntry) -> Bool {
+    /// A PR taken over (`taken`, else as recorded) may close no issue.
+    func fixesCandidate(_ pr: PipelineEntry, taken: Bool? = nil) -> Bool {
+        let taken = taken ?? takenOver(pr)
         let closing = fixed(by: pr).filter { open(entries[$0]) }
-        return (!closing.isEmpty || takenOver(pr)) && closing.allSatisfy { isCandidate(entries[$0], for: pr) }
+        return (!closing.isEmpty || taken) && closing.allSatisfy { isCandidate(entries[$0], for: pr, taken: taken) }
     }
 
     /// The issues `pr` would close that this sync did not read, so `fixesCandidate` did not
@@ -889,8 +892,8 @@ final class PipelineSync {
     }
 
     /// The merge gate's hold on what `pr` would close, as this sync read it.
-    func closesHold(_ pr: PipelineEntry) -> PipelineGate.Hold? {
-        PipelineGate.closes(fixesCandidate(pr), closesUnwritable(pr))
+    func closesHold(_ pr: PipelineEntry, taken: Bool? = nil) -> PipelineGate.Hold? {
+        PipelineGate.closes(fixesCandidate(pr, taken: taken), closesUnwritable(pr))
     }
 
     /// What a cleared PR about to merge would close on Linear, read right before: the open
@@ -1342,7 +1345,13 @@ final class PipelineSync {
         if let why = e.root.flatMap({ partial[$0.slug] }) { return why }
         if let why = banHold(e) { return why }
         if let stop = stops(e).first { return "it carries the label \(stop)" }
-        if e.item.kind == .pr { return settings.fastTrack ? nil : "Fast-track my PRs is off" }
+        if e.item.kind == .pr {
+            if !settings.fastTrack { return "Fast-track my PRs is off" }
+            if let x = fixed(by: e).map({ entries[$0] }).first(where: { open($0) && !isCandidate($0, for: e, taken: true) }) {
+                return "it closes \(x.item.label), which Diplomat may not fix"
+            }
+            return closesHold(e, taken: true).map { "it " + $0.message }
+        }
         if has(e, model.labels.fractured) || !e.children.isEmpty { return "it is split already" }
         if !fixers(e).isEmpty { return "an open PR fixes it" }
         if let issue = onGitHub(e) { return "it is tracked on GitHub as \(issue)" }
@@ -1350,10 +1359,15 @@ final class PipelineSync {
     }
 
     /// The operator's revokes, then takeovers. A revoke needs no read: it forgets the
-    /// takeover, and a PR goes off the fast track for good, which `track` writes to its
-    /// labels. A takeover is recorded once a read right before refuses it nothing; a PR's
+    /// takeover, and a PR goes off the fast track until taken over again, which `track`
+    /// writes to its labels. A takeover is recorded once a read right before refuses it nothing; a PR's
     /// once `fastTrack` is on it, which forgets what came off it before.
     func takeOver() {
+        if let blocked {
+            for id in settings.force?.revoke ?? [] { notice("\(id)'s takeover was not revoked: \(blocked)") }
+            for id in settings.force?.takeover ?? [] { notice("\(id) was not taken over: \(blocked)") }
+            return
+        }
         for id in settings.force?.revoke ?? [] {
             guard let kind = state.takenOver.removeValue(forKey: id) else { continue }
             if kind == .pr && !state.decided.contains(id) { state.decided.append(id) }
@@ -1381,6 +1395,7 @@ final class PipelineSync {
                     continue
                 }
                 state.decided.removeAll { $0 == id }
+                state.untracked.removeAll { $0 == id }
                 state.cleared[id] = nil
             }
             state.takenOver[id] = e.item.kind

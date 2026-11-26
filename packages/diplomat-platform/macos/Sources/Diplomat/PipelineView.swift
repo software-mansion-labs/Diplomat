@@ -638,13 +638,12 @@ struct PipelineDetail: View {
             section("WHO MAY ACT") {
                 Text(PipelineTint.access(item)).font(.system(size: 10.5))
                     .fixedSize(horizontal: false, vertical: true)
-                Text(PipelineTint.people(item)).font(.system(size: 10)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
                 if item.takenOver == true {
-                    Text("taken over: its rating does not hold it").font(.system(size: 10))
-                        .foregroundStyle(.secondary)
+                    Text(PipelineDetail.takenOverLine(item)).font(.system(size: 10)).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                Text(PipelineTint.people(item)).font(.system(size: 10)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let head = item.headSha {
                     Text(headLine(head)).font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(.secondary)
@@ -711,17 +710,22 @@ struct PipelineDetail: View {
     var fractureTip: String {
         banUnread ?? item.fractureRefused ?? "Split it into low-complexity child issues in a sync started now"
     }
-    var fixEnabled: Bool { enabled && canStartFix && badge == nil && !forcedFracture && ban == nil }
+    var fixEnabled: Bool { enabled && canStartFix && badge == nil && !forcedFracture && !forcedRevoke && ban == nil }
     var fixTip: String { ban ?? (canStartFix ? "Queue its fix now, past its retry backoff" : fixUnknown) }
     var takeoverEnabled: Bool { enabled && !forcedTakeover && banUnread == nil && item.takeoverRefused == nil }
     var takeoverTip: String {
         banUnread ?? item.takeoverRefused ?? (item.kind == .pr
-            ? "Hand it to Diplomat in a sync started now: reviewed until clean and merged, whatever its rating"
+            ? "Hand it to Diplomat in a sync started now: reviewed until clean and merged, whatever its rating or diff floor"
             : "Hand it to Diplomat in a sync started now: a fix candidate whatever its rating or triage")
     }
     var revokeEnabled: Bool { enabled && !forcedRevoke }
+
+    /// Twin of the Linux detail's.
+    static func takenOverLine(_ item: PipelineItem) -> String {
+        "Taken over: neither its rating nor its " + (item.kind == .pr ? "diff floor" : "triage") + " holds it"
+    }
     var revokeTip: String {
-        "Take it back from Diplomat in a sync started now" + (item.kind == .pr ? ": its fast-track labels come off" : "")
+        "Take it back from Diplomat in a sync started now" + (item.kind == .pr ? ": off the fast track" : "")
     }
 
     private var actions: some View {

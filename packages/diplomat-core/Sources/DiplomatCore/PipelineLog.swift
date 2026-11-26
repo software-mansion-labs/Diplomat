@@ -152,7 +152,6 @@ struct PipelineState: Codable, Equatable {
         seen = seen.filter { !done.contains($0.key) && $0.value >= cutoff }
         func live(_ id: String) -> Bool { seen[id] != nil }
         decided.removeAll { !live($0) }
-        takenOver = takenOver.filter { live($0.key) }
         untracked.removeAll { !live($0) }
         unsplit = unsplit.filter { live($0.key) }
         splitting = splitting.filter { live($0.key) }
@@ -162,6 +161,8 @@ struct PipelineState: Codable, Equatable {
         retry = retry.filter { live($0.key) }
         lineage = lineage.filter { live($0.key) }
         func keep(_ id: String) -> Bool { live(id) && (!readAll || read.contains(id)) }
+        // Gone from a read of every source: closed, and a takeover never outlives that.
+        takenOver = takenOver.filter { keep($0.key) }
         holds = holds.filter { keep($0.key) }
         clean = clean.filter { keep($0.key) }
         // An effect key is `<kind>:<item id>`.

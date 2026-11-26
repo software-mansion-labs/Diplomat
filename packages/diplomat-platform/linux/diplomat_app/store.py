@@ -5114,8 +5114,8 @@ class Store(QObject):
     def pipeline_force_now(self, kind: str, item_id: str) -> None:
         """The screen's "Rate now" (``rate``), "Fracture" (``fracture``), "Authorize
         takeover" (``takeover``) or "Revoke takeover" (``revoke``): the item goes ahead of
-        every limit in a sync started now. A takeover or revoke drops the other's ask: a
-        sync handed both revokes, then takes over, whichever was asked last."""
+        every limit in a sync started now. A takeover or revoke drops the other's ask, so
+        the last asked stands."""
         undone = {"takeover": "revoke", "revoke": "takeover"}.get(kind)
         with self._pipeline_lock:
             force = {**self._pipeline_force, kind: self._pipeline_force[kind] | {item_id}}

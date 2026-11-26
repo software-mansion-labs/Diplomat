@@ -740,6 +740,12 @@ def can_take_over(item: dict) -> bool:
             and item.get("stage") in ("unrated", "human"))
 
 
+def taken_over_line(item: dict) -> str:
+    """Twin of ``PipelineDetail.takenOverLine``."""
+    return ("Taken over: neither its rating nor its "
+            + ("diff floor" if item.get("kind") == "pr" else "triage") + " holds it")
+
+
 def empty_text(repo: str, gitlab: bool, unread: bool, reads: bool) -> str:
     """The placeholder after a sync that read no item the picked root shows. ``repo``: its
     label; ``unread``: the sync read it in part; ``reads``: a GitHub root or a Linear team
@@ -1040,7 +1046,7 @@ class PipelineView(QWidget):
                    else "Read only: Diplomat shows it and writes nothing to it.",
                    "font-size: 10px;")
         if item.get("takenOver") is True:
-            self._line("Taken over: its rating does not hold it", muted(9))
+            self._line(taken_over_line(item), muted(9))
         assignees = [str(a) for a in item.get("assignees") or []]
         people = ([f"by {_who(str(item['author']), item)}"] if item.get("author") else [])
         people.append(f"assigned to {', '.join(_who(a, item) for a in assignees)}"
@@ -1100,7 +1106,8 @@ class PipelineView(QWidget):
             btn.setToolTip(plain_tooltip(
                 ban or ("Queue its fix now, past its retry backoff" if known
                         else st.pipeline_fix_unknown(item))))
-            btn.setEnabled(on and known and badge is None and not split_asked and ban is None)
+            btn.setEnabled(on and known and badge is None and not split_asked
+                           and item_id not in st.pipeline_forced("revoke") and ban is None)
             self.buttons["fix"] = btn
         pr = item.get("kind") == "pr"
         if can_take_over(item):
@@ -1110,7 +1117,7 @@ class PipelineView(QWidget):
                                 lambda: st.pipeline_force_now("takeover", item_id))
             btn.setToolTip(plain_tooltip(refused or (
                 "Hand it to Diplomat in a sync started now: reviewed until clean and merged, "
-                "whatever its rating" if pr else
+                "whatever its rating or diff floor" if pr else
                 "Hand it to Diplomat in a sync started now: a fix candidate whatever its "
                 "rating or triage")))
             btn.setEnabled(on and not asked and not refused)
@@ -1120,7 +1127,7 @@ class PipelineView(QWidget):
             btn = _small_button("Revoke asked" if asked else "Revoke takeover",
                                 lambda: st.pipeline_force_now("revoke", item_id))
             btn.setToolTip(plain_tooltip("Take it back from Diplomat in a sync started now"
-                                         + (": its fast-track labels come off" if pr else "")))
+                                         + (": off the fast track" if pr else "")))
             btn.setEnabled(on and not asked)
             self.buttons["revoke"] = btn
         self.detail_col.addSpacing(4)

@@ -142,8 +142,8 @@ def test_a_sync_is_handed_the_github_roots_the_teams_and_the_switches(pipe, monk
 
 
 def test_a_takeover_and_a_revoke_of_one_item_drop_each_others_ask(pipe, monkeypatch):
-    """A sync handed both revokes, then takes over: the later ask stands. Each asks for a
-    sync now."""
+    """Of a takeover and a revoke of one item, the later ask stands. Each asks for a sync
+    now."""
     syncs = []
     monkeypatch.setattr(Store, "run_pipeline_sync_async", lambda self: syncs.append(1))
 
@@ -1067,9 +1067,9 @@ def test_a_syncs_deadline_grows_with_what_it_may_do(monkeypatch):
     assert pipeline.tick_timeout({}) == 5 * 1345 + 1950 + 14170 + 40
     # A gh call for each item an ask is held for.
     assert pipeline.tick_timeout({"queued": ["a", "b"]}) == pipeline.tick_timeout({}) + 2 * 65
-    # A re-read and two label writes for each takeover or revoke asked.
+    # Twice a re-read and two label writes for each takeover or revoke asked.
     assert pipeline.tick_timeout({"force": {"takeover": ["a", "b"], "revoke": ["c"]}}) == (
-        pipeline.tick_timeout({}) + 3 * 3 * 65)
+        pipeline.tick_timeout({}) + 3 * 6 * 65)
 
 
 def test_a_syncs_deadline_fits_a_capped_roots_whole_read():
