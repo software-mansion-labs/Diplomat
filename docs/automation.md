@@ -253,7 +253,8 @@ task will come in under, at the confidence you pick. At the default 95%, roughly
 auto-task in twenty may still overrun what it was gated on.
 
 **Two currencies, because there are two ways an agent is paid for.** Which one
-applies follows from the [runner](settings.md#agent-runner) a spawn uses, and the two never
+applies follows from the [runner](settings.md#agent-runner) a spawn uses (a
+[Pipeline rating](pipeline.md#ratings) is always Claude Code's), and the two never
 substitute for each other - a Hermes task held against a Claude window is gated on a
 limit it never touches, and a machine not logged into Claude Code at all would have
 no gate whatsoever.

@@ -6,8 +6,8 @@ the operator's knobs - for the applet's dispatch gate (``Store.dispatch_agent``)
 
 **Which currency.** What an agent spends depends on what runs it, so the runner
 picks the ceilings and the unit both sides of the comparison are in
-(:func:`_decide_uncached`): Claude Code draws on the Anthropic 7-day rate-limit
-window, published only as a percentage; every other runner is billed in money by whichever
+(:func:`decide`): Claude Code, and so a Pipeline rating, draws on the Anthropic 7-day
+rate-limit window, published only as a percentage; every other runner is billed in money by whichever
 provider it is logged into. Neither reading substitutes for the other — a Hermes
 task held against a Claude window is gated on a limit it never touches, and a
 machine not logged into Claude Code at all would have no gate whatsoever.
@@ -30,13 +30,13 @@ from . import autofix
 _TTL_SECS = 20.0
 
 #: (expiry, answer) — see :func:`decide`.
-_cache: tuple[float, autofix.Budget] | None = None
+#: Per currency: ``True`` is the Claude Code window.
+_cache: dict[bool, tuple[float, autofix.Budget]] = {}
 
 
 def _reset_cache() -> None:
-    """Test hook: forget the cached answer."""
-    global _cache
-    _cache = None
+    """Test hook: forget the cached answers."""
+    _cache.clear()
 
 
 def enabled() -> bool:
@@ -46,19 +46,25 @@ def enabled() -> bool:
     return appconfig.auto_budget_gate()
 
 
-def decide(now: float | None = None) -> autofix.Budget:
-    """The budget verdict for one more automatic task, from live evidence.
+def decide(now: float | None = None, claude: bool | None = None) -> autofix.Budget:
+    """The budget verdict for one more automatic task, from live evidence, in the
+    Claude Code window when ``claude`` (a Pipeline rating's, whatever the runner) and
+    by default in the selected runner's currency.
 
     Never raises. A probe that cannot answer, a ledger that will not parse and an
     unreadable config all degrade to the same place: no measurement, and
     :func:`autofix.budget_decide`'s fail-open.
     """
-    global _cache
+    from . import runner
+
     now = time.time() if now is None else now
-    if _cache is not None and now < _cache[0]:
-        return _cache[1]
-    budget = _decide_uncached()
-    _cache = (now + _TTL_SECS, budget)
+    if claude is None:
+        claude = runner.selected() == runner.CLAUDE
+    cached = _cache.get(claude)
+    if cached is not None and now < cached[0]:
+        return cached[1]
+    budget = _decide_claude() if claude else _decide_money()
+    _cache[claude] = (now + _TTL_SECS, budget)
     return budget
 
 
@@ -134,13 +140,6 @@ def _summary(usd_runner: str = ""):
         steps=2, bin_count=1, z=float(model["confidence"]["z"]),
         bucket_hours=24 * days, usd_runner=usd_runner,
     ), int(model["minSample"])
-
-
-def _decide_uncached() -> autofix.Budget:
-    from . import runner
-
-    return (_decide_claude() if runner.selected() == runner.CLAUDE
-            else _decide_money())
 
 
 def _decide_claude() -> autofix.Budget:

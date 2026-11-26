@@ -9,8 +9,9 @@ import DiplomatCore
 /// ledger and the same config file.
 ///
 /// **Which currency.** What an agent spends depends on what runs it, so the runner
-/// picks the ceilings and the unit both sides of the comparison are in: Claude Code
-/// draws on the Anthropic 7-day rate-limit window, published only as a percentage;
+/// picks the ceilings and the unit both sides of the comparison are in: Claude Code, and
+/// so a Pipeline rating, draws on the Anthropic 7-day rate-limit window, published only
+/// as a percentage;
 /// every other runner is billed in money by whichever provider it is logged into. Neither reading
 /// substitutes for the other — a Hermes task held against a Claude window is gated on a
 /// limit it never touches, and a machine not logged into Claude Code at all would have
@@ -22,41 +23,43 @@ enum AutoBudget {
     /// times in a row about a machine whose spend cannot have moved meanwhile.
     static let ttlSecs: TimeInterval = 20
 
-    private static var cache: (until: TimeInterval, budget: AgentDispatchGate.Budget)?
+    /// Per currency: `true` is the Claude Code window.
+    private static var cache: [Bool: (until: TimeInterval, budget: AgentDispatchGate.Budget)] = [:]
     private static let lock = NSLock()
 
     /// Test hook: forget the cached answer.
     static func resetCache() {
         lock.lock(); defer { lock.unlock() }
-        cache = nil
+        cache = [:]
     }
 
     /// Pin the answer until `resetCache`, for headless self-tests only: the real one
-    /// dials the usage endpoint.
-    static func pinForSelfTest(_ budget: AgentDispatchGate.Budget) {
+    /// dials the usage endpoint. `claude` pins one currency; nil, both.
+    static func pinForSelfTest(_ budget: AgentDispatchGate.Budget, claude: Bool? = nil) {
         guard Headless.active else { return }
         lock.lock(); defer { lock.unlock() }
-        cache = (.infinity, budget)
+        for c in claude.map({ [$0] }) ?? [true, false] { cache[c] = (.infinity, budget) }
     }
 
     /// Whether the gate is switched on at all (Settings → PR AUTO-FIX).
     static var enabled: Bool { AppConfig.autoBudgetGate }
 
-    /// The budget verdict for one more automatic task, from live evidence.
+    /// The budget verdict for one more automatic task, from live evidence, in the
+    /// Claude Code window when `claude` (a Pipeline rating's, whatever the runner).
     ///
     /// Never throws. A probe that cannot answer and a ledger that will not parse
     /// degrade to the same place: no measurement, and `budgetDecide`'s fail-open.
-    static func decide(now: TimeInterval = Date().timeIntervalSince1970)
-        -> AgentDispatchGate.Budget {
+    static func decide(claude: Bool = AppConfig.agentRunner == .claude,
+                       now: TimeInterval = Date().timeIntervalSince1970) -> AgentDispatchGate.Budget {
         lock.lock()
-        if let cached = cache, now < cached.until {
+        if let cached = cache[claude], now < cached.until {
             lock.unlock()
             return cached.budget
         }
         lock.unlock()
-        let budget = AppConfig.agentRunner == .claude ? decideClaude() : decideMoney()
+        let budget = claude ? decideClaude() : decideMoney()
         lock.lock()
-        cache = (now + ttlSecs, budget)
+        cache[claude] = (now + ttlSecs, budget)
         lock.unlock()
         return budget
     }

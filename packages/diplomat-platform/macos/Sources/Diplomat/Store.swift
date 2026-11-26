@@ -4690,7 +4690,10 @@ final class Store: ObservableObject {
         if source == .auto, !agentOnPR, !forced, !lowDisk, !atCapacity, !network,
            AutoBudget.enabled {
             // Off the main actor: the probe behind it dials the usage endpoint.
-            budget = await Task.detached(priority: .utility) { AutoBudget.decide() }.value
+            let rating = job.rating != nil
+            budget = await Task.detached(priority: .utility) {
+                rating ? AutoBudget.decide(claude: true) : AutoBudget.decide()
+            }.value
             if budget.affordable { budgetLogged = false }
         }
         switch AgentDispatchGate.decide(source: source, banned: banned,

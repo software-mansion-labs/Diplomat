@@ -718,7 +718,7 @@ enum PipelineTest {
                           "@mallory is on the prompt-injection ban list"]
                   && detail(splitRefused).fractureTip == "it is tracked on GitHub as o/r#7"
                   && [detail().rateTip, detail().fractureTip, detail().fixTip]
-                      == ["Rate it in a sync started now, ahead of every limit",
+                      == ["Queue its rating from a sync started now, past the ones a sync asks for itself",
                           "Split it into low-complexity child issues in a sync started now",
                           "Queue its fix now, past its retry backoff"])
 
@@ -1482,11 +1482,16 @@ enum PipelineTest {
         store.offerRequestedWork()
         store.commitQueue()
         let budgetLines = feed("no-budget").count
+        // Hermes selected: a rating is still priced in the Claude Code window.
+        let runner = AppConfig.agentRunner.rawValue
+        _ = AppConfig.set(AppConfig.agentRunnerKey, AgentRunner.hermes.rawValue)
+        AutoBudget.pinForSelfTest(AgentDispatchGate.Budget(affordable: true), claude: false)
         AutoBudget.pinForSelfTest(AgentDispatchGate.Budget(affordable: false, window: AgentDispatchGate.windowWeek,
-                                                           left: 1, needed: 5, measured: true))
+                                                           left: 1, needed: 5, measured: true), claude: true)
         await store.drainQueuedTasks(snaps: [], closed: [])
         AutoBudget.resetCache()
-        check("…and a spent budget, said in the feed",
+        _ = AppConfig.set(AppConfig.agentRunnerKey, runner)
+        check("…and a spent Claude Code window, said in the feed",
               store.requestedWork.map(\.key) == [rateKey] && store.pipelineRateRuns.isEmpty
                   && feed("no-budget").count == budgetLines + 1)
         store.offerRequestedWork()
@@ -2612,7 +2617,7 @@ enum PipelineTest {
         func linear(_ key: String) -> PipelineItem? {
             store.pipelineResult?.items.first { $0.id == "https://linear.app/acme/issue/\(key)" }
         }
-        let rateOn = "Rate now on: Rate it in a sync started now, ahead of every limit"
+        let rateOn = "Rate now on: Queue its rating from a sync started now, past the ones a sync asks for itself"
         let splitOn = "Fracture on: Split it into low-complexity child issues in a sync started now"
         let twin4 = "it is tracked on Linear as ENG-4: triaged as Triage"
         let twinned = [item(30), item(31), linear("ENG-4"), linear("ENG-5"), item(32)]

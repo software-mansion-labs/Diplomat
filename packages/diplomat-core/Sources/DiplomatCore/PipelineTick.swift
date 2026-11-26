@@ -1058,6 +1058,22 @@ final class PipelineSync {
             }
         }
         answers()
+        // A Rate now ask refused now, or of an item gone from a whole read, is dropped; one
+        // whose PR was pushed to, or whose job is gone, is asked again.
+        for (id, a) in state.rateAsks.sorted(by: { $0.key < $1.key }) where a.forced {
+            guard let i = pos[id], !waits(entries[i]) else {
+                if pos[id] == nil && readAll { state.rateAsks[id] = nil }
+                continue
+            }
+            guard may(.forced) else { break }
+            if let why = rateRefusal(entries[i]) {
+                notice("\(entries[i].item.label) was not rated: \(why)")
+                state.rateAsks[id] = nil
+            } else if a.head != head(entries[i]) || !queued(id, a) {
+                state.rateAsks[id] = nil
+                if !forced.contains(i) { forced.append(i) }
+            }
+        }
         let idx = settings.rate ? entries.indices.filter { eligible(entries[$0]) && !backingOff(entries[$0].id) } : []
         let kept = idx.filter {
             cache[entries[$0].id]?.unwritten == true && entries[$0].item.writable && open(entries[$0])
@@ -1067,21 +1083,37 @@ final class PipelineSync {
         }
         for i in forced { ask(i, forced: true) }
         for i in kept where !forced.contains(i) { rewrite(i) }
-        guard settings.rate else { return }
+        // With Rate off nothing is wanted: each ask of an item read whole is dropped.
         let wanted = Set(bands.joined())
         var waiting = 0
         for (id, a) in state.rateAsks.sorted(by: { $0.key < $1.key }) where !a.forced {
-            guard let i = pos[id] else { continue }
-            if wanted.contains(i) && a.head == head(entries[i]) && a.again == awaitingRerate(entries[i]) {
+            guard let i = pos[id], !waits(entries[i]) else {
+                if pos[id] == nil && readAll { state.rateAsks[id] = nil } else { waiting += 1 }
+                continue
+            }
+            if wanted.contains(i) && a.head == head(entries[i]) && a.again == awaitingRerate(entries[i]) && queued(id, a) {
                 waiting += 1
             } else {
                 state.rateAsks[id] = nil
             }
         }
-        for i in bands.joined() where waiting < model.rater.asks && state.rateAsks[entries[i].id] == nil {
+        guard settings.rate else { return persist() }
+        for i in bands.joined() where waiting < model.rater.asks && !forced.contains(i)
+            && state.rateAsks[entries[i].id] == nil {
             if ask(i, forced: false) { waiting += 1 }
         }
         persist()
+    }
+
+    /// Whether this sync's read of `e` is too partial to judge its ask by: the ban list
+    /// unread, or its root read in part.
+    func waits(_ e: PipelineEntry) -> Bool {
+        banned == nil || e.root.map { partial[$0.slug] != nil } ?? false
+    }
+
+    /// Whether the job of ask `a` is still there to run, or has answered.
+    func queued(_ id: String, _ a: PipelineRateAsk) -> Bool {
+        PipelineRateJob.load(id, a.stamp, in: dir) != nil || PipelineRateJob.answered(id, a.stamp, in: dir)
     }
 
     /// Not held from a rating by its author, a stop label or a root read with errors.
@@ -1105,11 +1137,12 @@ final class PipelineSync {
 
     /// Applies each answer a rating job left for a current ask, in the order they were
     /// asked for, and drops each ask an answer shows is no longer worth applying. An answer
-    /// for an item this sync did not read, or that a switch keeps from applying now, waits.
+    /// for an item this sync did not read in full, or that a switch keeps from applying
+    /// now, waits; one at a head the item has left is `rate`'s to drop.
     func answers() {
         let current = PipelineRateJob.answers(in: dir).filter { state.rateAsks[$0.item]?.stamp == $0.stamp }
         for answer in current.sorted(by: { asked(state.rateAsks[$0.item]!, before: state.rateAsks[$1.item]!) }) {
-            guard let a = state.rateAsks[answer.item], let i = pos[answer.item] else { continue }
+            guard let a = state.rateAsks[answer.item], let i = pos[answer.item], !waits(entries[i]) else { continue }
             let id = answer.item
             if answer.cancelled == true {
                 state.rateAsks[id] = nil
@@ -1117,12 +1150,7 @@ final class PipelineSync {
                 persist()
                 continue
             }
-            guard a.head == head(entries[i]) else {
-                state.rateAsks[id] = nil
-                persist()
-                continue
-            }
-            guard may(a.forced ? .forced : .rate) else { continue }
+            guard a.head == head(entries[i]), may(a.forced ? .forced : .rate) else { continue }
             state.rateAsks[id] = nil
             persist()
             let current = a.forced ? rateRefusal(entries[i]) == nil

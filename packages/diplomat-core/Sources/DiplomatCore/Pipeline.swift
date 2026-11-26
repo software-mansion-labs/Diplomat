@@ -359,7 +359,7 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
         }
     }
 
-    /// What the operator asked for from the view, ahead of every limit.
+    /// What the operator asked for from the view, past a sync's own limits on asks and splits.
     public struct Force: Codable, Equatable, Sendable {
         public var rate: [String]
         public var fracture: [String]

@@ -593,7 +593,7 @@ class Store(QObject):
         self._pipeline_stopped = False
         # The running Linear sign-in's core (:meth:`linear_login`).
         self._linear_login_proc: subprocess.Popen | None = None
-        # Item ids the screen asked to rate or fracture ahead of every limit, until a
+        # Item ids the screen asked to rate or fracture past a sync's own limits, until a
         # sync that was handed them answers.
         self._pipeline_force: dict[str, frozenset[str]] = {"rate": frozenset(),
                                                            "fracture": frozenset()}
@@ -2181,7 +2181,8 @@ class Store(QObject):
             if (source == autofix.SOURCE_AUTO and not agent_on_pr
                     and not forced and not at_capacity and not low_disk
                     and not networked and autobudget.enabled()):
-                budget = autobudget.decide()
+                budget = (autobudget.decide(claude=True) if rating
+                          else autobudget.decide())
                 if budget.affordable:
                     self._budget_logged = False
             verdict = autofix.dispatch_decide(
@@ -3318,23 +3319,25 @@ class Store(QObject):
                 activity.log("panel", "queue-drop",
                              f"{entry.job.label} — PR no longer open, not run")
             self._drop_queued_task(entry.id)
+        # Whether the tasks run here (True) or offered to the network (False) have met a
+        # refusal every later one of them would meet too.
+        stopped: set[bool] = set()
         for entry in self.drainable_tasks:
+            # A rating is never offered.
+            here = (not diplomacynetwork.enabled()
+                    or entry.job.kind == autofix.QUEUE_RATE_ACTION)
             # The list moves under this loop: it waits on a spawn per task, and an
             # "execute now" during one of those takes its row off the queue and starts
             # it there and then. Re-reading the queue is what keeps the drain from
             # dispatching that same task a second time when it reaches it.
             if not any(e.id == entry.id for e in self.queued_tasks):
                 continue
-            if outside(entry):
+            if outside(entry) or here in stopped:
                 continue
-            # A task offered to the Diplomacy Network takes no bay of this machine's; a
-            # rating, never offered, does, and holds none of the offers behind it.
-            networked = diplomacynetwork.enabled()
-            if ((not networked or entry.job.kind == autofix.QUEUE_RATE_ACTION)
-                    and self._auto_tasks_running() >= self.auto_task_limit):
-                if networked:
-                    continue
-                return
+            # A task offered to the network takes no bay of this machine's cap.
+            if here and self._auto_tasks_running() >= self.auto_task_limit:
+                stopped.add(here)
+                continue
             # Finding room here is what re-arms the saturation notice. The gate's own
             # reset sits behind the capacity measurement this path skips, so without
             # this the feed would carry one `at-capacity` line for an unbounded run of
@@ -3343,19 +3346,15 @@ class Store(QObject):
             verdict = self._run_queued_task(entry, forced=False)
             if verdict == "failed":
                 return
-            # Every remaining entry would be priced against the same windows and get
-            # the same answer, and the dispatch has already re-staged this one for the
-            # commit at the end of the cycle. Draining on would cost a round of
-            # refusals to no end. The same holds for a disk below its floor. Networked,
-            # only a rating is priced here, and the offers behind it are not.
-            if verdict in (autofix.VERDICT_UNAFFORDABLE, autofix.VERDICT_LOW_DISK):
-                if networked:
-                    continue
-                return
-            # A silent or stopping daemon takes none of the rest; a refusal of this
-            # job's own leaves the next to be asked.
-            if verdict == diplomacynetwork.VERDICT_REFUSED and not verdict.own:
-                return
+            # Every remaining entry run in the same place would be priced against the
+            # same windows, or the same disk, or offered to the same silent or stopping
+            # daemon, and get the same answer, and the dispatch has already re-staged
+            # this one for the commit at the end of the cycle. Draining on would cost a
+            # round of refusals to no end. A refusal for the job's own reason moves on
+            # to the next.
+            if verdict in (autofix.VERDICT_UNAFFORDABLE, autofix.VERDICT_LOW_DISK) or (
+                    verdict == diplomacynetwork.VERDICT_REFUSED and not verdict.own):
+                stopped.add(here)
 
     def _drop_queued_task(self, task_id: str) -> None:
         """Take one task off the queue without starting it — the work it stands for
@@ -5187,7 +5186,7 @@ class Store(QObject):
 
     def pipeline_force_now(self, kind: str, item_id: str) -> None:
         """The screen's "Rate now" (``rate``) or "Fracture" (``fracture``): the item goes
-        ahead of every limit in a sync started now."""
+        past a sync's own limits in a sync started now."""
         with self._pipeline_lock:
             self._pipeline_force = {**self._pipeline_force,
                                     kind: self._pipeline_force[kind] | {item_id}}

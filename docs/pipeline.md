@@ -22,7 +22,7 @@ Every five minutes while it is on, a **sync**:
 Labels, child issues and the merge are done by the sync itself, in code. The fix and review runs are
 agents and each rating a headless `claude -p` job, all queued like a sweep's asks: behind the [task cap](automation.md#autonomous-monitors), the
 [spending budget](automation.md#the-spending-budget) and the disk floor, and held while the ban list cannot be
-read and, after a launch or the pipeline going on, until a sync since has judged their item; each asked for once (a review
+read and, after a launch or the pipeline going on, until a sync since has judged their item. A run is asked for once (a review
 once per head, a new head's no sooner than an hour after the last one was queued or, if it ran, began),
 retried on the monitors' backoff when a run dies, and taken off the queue when a later
 sync no longer owes it - one you started with Start fix only once a sync that read its repo in full
@@ -366,7 +366,7 @@ running, which reads the switches again (`control.json`) before every step it ta
   and the work it queued waits.
 - **Rate issues and PRs** - the ratings and their labels. **Each rating is one `claude -p` call**,
   allowed five minutes, run from the queue like the fix and review runs, at most four waiting past
-  the ones you force.
+  the ones you force. Off, a sync drops the ones waiting that you did not force.
 - **Open fix PRs** - a Fix-issues run for each `candidate` issue no open PR fixes.
 - **Fast-track my PRs** - `diplomat:fast-track` on each PR of yours rated low/low at its first rating
   that closes only `candidate` issues, a review run per head until clean, and `diplomat:cleared` taken

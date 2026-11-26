@@ -5129,15 +5129,144 @@ private func pipelineRateJobs(base: URL, root: PipelineSettings.Root, t0: Date) 
           && numbers(m3) == ["42@2", "43@3", "44@4", "45@5"] && m3.writes == ["label risk:high exists", "+risk:high #41", "label complexity:high exists", "+complexity:high #41"],
           "the cap on asks: \(numbers(m1)) \(numbers(m2)) \(numbers(m3)) \(m3.writes)")
 
-    // Rate switched off: nothing is asked or applied, and the answer waits for it.
+    // Rate switched off drops the asks it did not force, so none holds a fix; on again, asked anew.
     let off = only([1])
     let od = dir("switched-off")
     _ = sync(off, rateFix, od, t0, drain: false)
     _ = PipelineRateJob.run(item: issueURL(1), stamp: "1", dir: od, io: off.io())
     let o2 = sync(off, PipelineSettings(roots: [root], fix: true), od, later(5), drain: false)
+    let dropped = files(od), offAsks = (state(od)["rateAsks"] as? [String: Any])?.count ?? 0
     let o3 = sync(off, rateFix, od, later(10), drain: false)
-    check(o2.writes.isEmpty && asks(o2).isEmpty && o3.writes == lowOn1,
-          "Rate off, then on: \(o2.writes) \(o2.result.effects) \(o3.writes)")
+    check(o2.writes.isEmpty && asks(o2).isEmpty && dropped.isEmpty && offAsks == 0
+          && o3.writes.isEmpty && asks(o3) == [rateFX(issueURL(1), 1, "2")],
+          "Rate off, then on: \(o2.writes) \(o2.result.effects) \(dropped) \(o3.writes) \(o3.result.effects)")
+    let live = only([1])
+    let ld0 = dir("answer-switched-off")
+    _ = sync(live, rateFix, ld0, t0, drain: false)
+    _ = PipelineRateJob.run(item: issueURL(1), stamp: "1", dir: ld0, io: live.io())
+    PipelineControl(enabled: true, rate: false, fix: true, fastTrack: true, merge: true, fracture: true).save(in: ld0)
+    let lv2 = sync(live, rateFix, ld0, later(5), drain: false)
+    PipelineControl(enabled: true, rate: true, fix: true, fastTrack: true, merge: true, fracture: true).save(in: ld0)
+    let lv3 = sync(live, rateFix, ld0, later(10), drain: false)
+    check(lv2.writes.isEmpty && lv3.writes == lowOn1 && live.claudeCalls.count == 1,
+          "an answer the live Rate switch holds waits: \(lv2.writes) \(lv3.writes) \(live.claudeCalls)")
+    let byHand = only([1])
+    let bd = dir("switched-off-labelled")
+    _ = sync(byHand, rateFix, bd, t0, drain: false)
+    byHand.issues[0].labels = ["risk:low", "complexity:low"]
+    let b2 = sync(byHand, PipelineSettings(roots: [root], fix: true), bd, later(5), drain: false)
+    check(b2.result.effects == [fixFX(1)] && stageOf(b2.result, issueURL(1)) == "candidate/fast",
+          "labelled by hand with Rate off: \(b2.result.effects) \(stageOf(b2.result, issueURL(1)))")
+
+    // Rate now's ask is checked again each sync: at a PR's new head asked anew, its job lost
+    // asked anew, refused dropped.
+    var rateNowPR = PipelineSettings(roots: [root])
+    rateNowPR.force = .init(rate: [prURL(11)])
+    let fp = only([11])
+    let fpd = dir("forced-pushed")
+    let fp1 = sync(fp, rateNowPR, fpd, t0, drain: false)
+    fp.prs[0].head = sha("a2")
+    let fp2 = sync(fp, PipelineSettings(roots: [root]), fpd, later(5), drain: false)
+    let fpFiles = files(fpd)
+    for f in (try? FileManager.default.contentsOfDirectory(at: fpd.appendingPathComponent("rate"), includingPropertiesForKeys: nil)) ?? [] {
+        try? FileManager.default.removeItem(at: f)
+    }
+    let fp3 = sync(fp, PipelineSettings(roots: [root]), fpd, later(10), drain: false)
+    fp.prs[0].labels = ["WIP"]
+    let fp4 = sync(fp, PipelineSettings(roots: [root]), fpd, later(15), drain: false)
+    check(asks(fp1) == [rateFX(prURL(11), 11, "1", forced: true, author: "op")]
+          && asks(fp2) == [rateFX(prURL(11), 11, "2", forced: true, author: "op")] && fpFiles == ["2.job.json"]
+          && asks(fp3) == [rateFX(prURL(11), 11, "3", forced: true, author: "op")]
+          && asks(fp4).isEmpty && fp4.result.notices.contains("#11 was not rated: it carries the label WIP") && files(fpd).isEmpty,
+          "Rate now queued, pushed, lost, then stopped: \(fp2.result.effects) \(fpFiles) \(fp3.result.effects) "
+          + "\(fp4.result.effects) \(fp4.result.notices)")
+
+    let paused = only([11])
+    let hd = dir("forced-switched-off")
+    _ = sync(paused, rateNowPR, hd, t0, drain: false)
+    paused.prs[0].head = sha("a2")
+    PipelineControl(enabled: false, rate: true, fix: true, fastTrack: true, merge: true, fracture: true).save(in: hd)
+    _ = sync(paused, PipelineSettings(roots: [root]), hd, later(5), drain: false)
+    PipelineControl(enabled: true, rate: true, fix: true, fastTrack: true, merge: true, fracture: true).save(in: hd)
+    let hd3 = sync(paused, PipelineSettings(roots: [root]), hd, later(10), drain: false)
+    check(asks(hd3) == [rateFX(prURL(11), 11, "2", forced: true, author: "op")],
+          "Rate now kept through a switched-off sync: \(hd3.result.effects)")
+    var rateNowOn = PipelineSettings(roots: [root], rate: true)
+    rateNowOn.force = rateNowPR.force
+    let diffless = only([11])
+    diffless.diffFails = true
+    _ = sync(diffless, rateNowOn, dir("forced-diffless"), t0, drain: false)
+    let retry = (state(dir("forced-diffless"))["retry"] as? [String: Any])?[prURL(11)] as? [String: Any]
+    check(retry?["failures"] as? Int == 1, "a Rate now whose diff could not be read, tried once: \(retry ?? [:])")
+    let lostJob = only([1])
+    let ld = dir("job-lost")
+    _ = sync(lostJob, rateFix, ld, t0, drain: false)
+    for f in (try? FileManager.default.contentsOfDirectory(at: ld.appendingPathComponent("rate"), includingPropertiesForKeys: nil)) ?? [] {
+        try? FileManager.default.removeItem(at: f)
+    }
+    let lj2 = sync(lostJob, rateFix, ld, later(5), drain: false)
+    check(asks(lj2) == [rateFX(issueURL(1), 1, "2")], "an ask whose job was lost: \(lj2.result.effects)")
+
+    // A root read in part, or a ban list unread, keeps the asks and their answers for a sync
+    // that reads them whole.
+    let banDir = dir("bans")
+    try FileManager.default.createDirectory(at: banDir, withIntermediateDirectories: true)
+    let banEnv = ProcessInfo.processInfo.environment["DA_BAN_DIR"]
+    setenv("DA_BAN_DIR", banDir.path, 1)
+    defer { if let banEnv { setenv("DA_BAN_DIR", banEnv, 1) } else { unsetenv("DA_BAN_DIR") } }
+    for spoil in ["partial", "ban"] {
+        try Data(#"{"banned": []}"#.utf8).write(to: banDir.appendingPathComponent("banned.json"))
+        let t = only([1])
+        let kd = dir("kept-" + spoil)
+        _ = sync(t, rateFix, kd, t0, drain: false)
+        _ = PipelineRateJob.run(item: issueURL(1), stamp: "1", dir: kd, io: t.io())
+        if spoil == "partial" { t.ghPartial = true } else {
+            try Data("{".utf8).write(to: banDir.appendingPathComponent("banned.json"))
+        }
+        let k2 = sync(t, rateFix, kd, later(5), drain: false)
+        let kept = files(kd)
+        t.ghPartial = false
+        try Data(#"{"banned": []}"#.utf8).write(to: banDir.appendingPathComponent("banned.json"))
+        let k3 = sync(t, rateFix, kd, later(10), drain: false)
+        check(k2.writes.isEmpty && kept == ["1.answer.json", "1.job.json"] && k3.writes == lowOn1
+              && t.claudeCalls.count == 1,
+              "\(spoil), then read whole: \(k2.writes) \(kept) \(k3.writes) \(t.claudeCalls)")
+    }
+
+    // Its author banned later in the sync that asked: no job is handed out.
+    let banLater = only([1, 13, 27])
+    let bld = dir("ban-after-rate")
+    try seedRerate(bld, 13, sha("c3"), at: later(-60))
+    banLater.onReread = { _ in try? Data(#"{"banned": [{"login": "reporter"}]}"#.utf8).write(to: banDir.appendingPathComponent("banned.json")) }
+    let bl = sync(banLater, PipelineSettings(roots: [root], rate: true, merge: true), bld, t0, drain: false)
+    try Data(#"{"banned": []}"#.utf8).write(to: banDir.appendingPathComponent("banned.json"))
+    check((state(bld)["rateAsks"] as? [String: Any])?[issueURL(1)] != nil
+          && !bl.result.effects.contains { $0.key == "pipeline-rate:" + issueURL(1) },
+          "banned after its rating was asked for: \(bl.result.effects)")
+
+    // Rate now's ask of an item gone from a whole read is dropped.
+    let goneF = only([1])
+    let gfd = dir("forced-gone")
+    _ = sync(goneF, rateNow, gfd, t0, drain: false)
+    goneF.issues = []
+    _ = sync(goneF, PipelineSettings(roots: [root]), gfd, later(5), drain: false)
+    check(((state(gfd)["rateAsks"] as? [String: Any]) ?? [:]).isEmpty && files(gfd).isEmpty,
+          "Rate now of an item gone: \(state(gfd)["rateAsks"] ?? [:]) \(files(gfd))")
+
+    // An ask whose item a sync did not read still takes one of the four.
+    let lib = PipelineSettings.Root(owner: "acme", repo: "lib", path: libCheckout, me: opLogin)
+    let ops = PipelineSettings(roots: [root, lib], linearTeams: [.init(key: "OPS", repo: "acme/lib")], rate: true)
+    let split = only([])
+    split.tickets = (1...4).map { .init(id: "lin-ops-\($0)", identifier: "OPS-\($0)", title: "Ops \($0)",
+                                        updated: at("10:0\($0)"), team: "OPS") }
+    let sd = dir("cap-unread")
+    let s1 = sync(split, ops, sd, t0, drain: false)
+    split.linearDown = true
+    split.issues = [.init(number: 41, title: "Item 1", updated: at("10:10"))]
+    let s2 = sync(split, ops, sd, later(5), drain: false)
+    check(asks(s1).count == 4 && (state(sd)["rateAsks"] as? [String: Any])?.count == 4
+          && !asks(s2).contains { $0.key == "pipeline-rate:" + issueURL(41) },
+          "four asks of unread items wait: \(asks(s1)) \(asks(s2))")
 
     // An item the sync could not read keeps its ask and answer for the sync that can.
     let unread = only([1])

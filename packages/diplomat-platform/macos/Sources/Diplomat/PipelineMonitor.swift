@@ -728,7 +728,7 @@ extension Store {
         Task { await runPipelineSyncOnce() }
     }
 
-    /// Rate now / Fracture: rated or split on the next sync, ahead of every limit.
+    /// Rate now / Fracture: asked for or split by the next sync, past its own limits.
     func forcePipeline(rate id: String? = nil, fracture split: String? = nil) {
         if let id, !pipelineForce.rate.contains(id) { pipelineForce.rate.append(id) }
         if let split, !pipelineForce.fracture.contains(split) { pipelineForce.fracture.append(split) }

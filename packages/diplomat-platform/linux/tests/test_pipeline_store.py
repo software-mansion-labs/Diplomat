@@ -21,7 +21,7 @@ from test_autofix import _spawn_recorder, fake_probes, store  # noqa: F401 — f
 
 from diplomat_app import bans, issues
 from diplomat_app.store import PIPELINE_ATTEMPTS, Store, app_settings
-from diplomat_runtime import activity, autofix, pipeline, promptcore, review
+from diplomat_runtime import activity, appconfig, autofix, pipeline, promptcore, review
 from diplomat_runtime.prref import LocalRepo, item_key_from_url
 
 pytest.importorskip("PySide6")
@@ -2173,6 +2173,23 @@ def test_the_drain_starts_no_rating_past_the_cap(pipe, rater, monkeypatch, netwo
     assert pipe._drain_has_room(0) is False
 
 
+def test_a_silent_daemon_holds_no_rating_behind_its_offer(pipe, rater, monkeypatch):
+    from diplomat_app import diplomacynetwork
+
+    offered = []
+    monkeypatch.setattr(diplomacynetwork, "enabled", lambda: True)
+    monkeypatch.setattr(Store, "_offer_tracked", lambda self, job, *a: (
+        offered.append(job.label), diplomacynetwork.Refused(diplomacynetwork.NOT_ANSWERING))[1])
+    _spawn_recorder(monkeypatch)
+    pipe.auto_task_limit = 2
+    _sync(pipe, _result(_fix(), _rate(_pr(8), 8)))
+    pipe.queued_tasks = pipe.queued_tasks[::-1]
+    assert [t.id for t in pipe.queued_tasks] == ["issues:o/r#12", "rate:o/r#8"]
+    pipe._drain_queued_tasks([], closed=set())
+    assert len(offered) == 1
+    assert [r.url for r in pipe.running_ratings] == [_pr(8)]
+
+
 def test_a_rating_counts_the_runs_executed_here_for_the_network(pipe, rater, monkeypatch):
     from diplomat_app import diplomacynetwork
     from diplomat_runtime import network
@@ -2196,11 +2213,14 @@ def test_a_rating_is_held_by_the_budget_the_disk_and_auto_execute(pipe, rater, m
     from diplomat_runtime import diskfloor
 
     monkeypatch.setattr(diplomacynetwork, "enabled", lambda: True)
+    asked = []
     if hold == "budget":
+        # Hermes selected: a rating is still priced in the Claude Code window.
+        appconfig.set_value(appconfig.AGENT_RUNNER, "hermes")
         monkeypatch.setattr("diplomat_app.store.autobudget.enabled", lambda: True)
         monkeypatch.setattr("diplomat_app.store.autobudget.decide",
-                            lambda: autofix.Budget(affordable=False, window="week",
-                                                   left=0.5, needed=5.0))
+                            lambda claude=None: (asked.append(claude), autofix.Budget(
+                                affordable=False, window="week", left=0.5, needed=5.0))[1])
     elif hold == "disk":
         monkeypatch.setattr(Store, "_lowest_disk",
                             staticmethod(lambda: diskfloor.Reading("/v", 1, 2)))
@@ -2211,6 +2231,7 @@ def test_a_rating_is_held_by_the_budget_the_disk_and_auto_execute(pipe, rater, m
     assert (rater.calls, pipe.running_ratings, _keys(pipe)) == ([], [], ["rate:o/r#7"])
     feed = {"budget": "no-budget", "disk": "low-disk", "queue": "queue-run"}[hold]
     assert len(_feed(feed)) == (hold != "queue")
+    assert asked == ([True] if hold == "budget" else [])
 
 
 def test_execute_now_starts_a_held_rating(pipe, rater):
