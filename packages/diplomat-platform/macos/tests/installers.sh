@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # What install-autostart.sh, install-autoupdate.sh and install-watchdog.sh write. Runs
 # a copy of install/ laid out as a scratch checkout, with HOME in it too: `swift` is a stub, so
-# build-app.sh lays the bundle out without a build; launchctl and pkill are stubs
+# build-app.sh lays the bundle out without a build, and it commits, as a checkout moving
+# during a compile would; launchctl and pkill are stubs
 # that log their arguments; and `rm` refuses anything outside the scratch dir, which
 # keeps the run off this box's /Applications and is the failure the installer's
 # "delete it by hand" arm is for. The Linux twin is linux/tests/test_install_autoupdate.py.
@@ -16,6 +17,9 @@ BIN="$PKG/Diplomat.app/Contents/MacOS/Diplomat"
 AGENTS="$SCRATCH/home/Library/LaunchAgents"
 mkdir -p "$PKG" "$SCRATCH/packages/diplomat-core/assets" "$SCRATCH/home" "$SCRATCH/bin" "$SCRATCH/build"
 cp -R "$HERE/../install" "$PKG/install"
+GIT=(git -C "$SCRATCH" -c user.name=installers -c user.email=installers@localhost)
+"${GIT[@]}" init -q && "${GIT[@]}" commit -q --allow-empty -m checkout
+COMPILED="$("${GIT[@]}" rev-parse HEAD)"
 printf '#!/bin/sh\n' > "$SCRATCH/build/Diplomat"
 
 cat > "$SCRATCH/bin/launchctl" <<'EOF'
@@ -37,7 +41,11 @@ EOF
 cat > "$SCRATCH/bin/swift" <<'EOF'
 #!/bin/sh
 echo "swift $*" >> "$SCRATCH/calls"
-case "$*" in *--show-bin-path*) echo "$SCRATCH/build" ;; esac
+case "$*" in
+  *--show-bin-path*) echo "$SCRATCH/build" ;;
+  build*) git -C "$SCRATCH" -c user.name=installers -c user.email=installers@localhost \
+            commit -q --allow-empty -m "during the compile" ;;
+esac
 EOF
 cat > "$SCRATCH/bin/rm" <<'EOF'
 #!/bin/sh
@@ -62,6 +70,8 @@ echo "installers: what a login install writes"
 check "install-autostart.sh runs to the end past a copy it cannot remove" run install-autostart.sh
 check "…and says so" grep -q "delete it by hand" "$SCRATCH/out"
 check "build-app.sh writes the bundle the agents name" test -x "$BIN"
+check "…stamped with the commit it was compiled from" \
+  test "$(plutil -extract DiplomatCommit raw "$PKG/Diplomat.app/Contents/Info.plist")" = "$COMPILED"
 check "…with the native build system, which stamps the binary with its real SDK" \
   bash -c 'n=$(grep -c "^swift build " "$1"); [ "$n" -gt 0 ] && [ "$n" = "$(grep -c "^swift build .*--build-system native" "$1")" ]' \
   _ "$SCRATCH/calls"
