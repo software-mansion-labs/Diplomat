@@ -45,15 +45,19 @@ CONTROL_KEYS = ("enabled", "rate", "fix", "fastTrack", "merge", "fracture")
 
 
 def write_control(switches: dict) -> None:
-    """Never raises: a sync that cannot read ``control.json`` goes by the settings it was
-    started with. Twin of ``Store.writePipelineControl``."""
+    """The switches, and the ``revoke`` asks (when any), which hold a merge a running sync
+    is about to make. Never raises: a sync that cannot read ``control.json`` goes by the
+    settings it was started with. Twin of ``Store.writePipelineControl``."""
     folder = pipeline_dir()
     tmp = folder / f"control.json.tmp-{os.getpid()}-{uuid.uuid4().hex}"
     try:
         folder.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({k: bool(switches.get(k)) for k in CONTROL_KEYS}, fh, sort_keys=True)
+            control: dict = {k: bool(switches.get(k)) for k in CONTROL_KEYS}
+            if switches.get("revoke"):
+                control["revoke"] = sorted(switches["revoke"])
+            json.dump(control, fh, sort_keys=True)
         os.replace(tmp, folder / "control.json")
     except OSError:
         with contextlib.suppress(OSError):

@@ -57,14 +57,17 @@ extension Store {
     }
 
     /// The switches as they stand, which a running sync re-reads before each of its writes,
-    /// merges and ratings (one that cannot read them keeps those it started with). Headless
+    /// merges and ratings (one that cannot read them keeps those it started with), and the
+    /// revokes asked, which hold a merge it is about to make. Headless
     /// only into a `DIPLOMAT_PIPELINE_DIR`, so a render or self-test never steers the live
     /// app's sync. Twin of `pipeline.write_control`.
     func writePipelineControl() {
         let env = ProcessInfo.processInfo.environment["DIPLOMAT_PIPELINE_DIR"] ?? ""
         guard !Headless.active || !env.isEmpty else { return }
+        let revoke = pipelineForce.revoke.sorted()
         PipelineControl(enabled: pipelineEnabled, rate: pipelineRate, fix: pipelineFix,
-                        fastTrack: pipelineFastTrack, merge: pipelineMerge, fracture: pipelineFracture).save()
+                        fastTrack: pipelineFastTrack, merge: pipelineMerge, fracture: pipelineFracture,
+                        revoke: revoke.isEmpty ? nil : revoke).save()
     }
 
     nonisolated static func pipelineTeams(_ raw: String) -> [PipelineSettings.LinearTeam] {
@@ -682,6 +685,7 @@ extension Store {
             pipelineForce.takeover.removeAll { $0 == revoke }
             if !pipelineForce.revoke.contains(revoke) { pipelineForce.revoke.append(revoke) }
         }
+        if taken != nil || revoke != nil { writePipelineControl() }
         syncPipelineNow()
     }
 

@@ -112,7 +112,7 @@ a Linear team was not read whole, no issue in the repo it maps to is fixed, spli
 4. At the clean head the PR is rated again, once per head: the answer is recorded as it arrives,
    so a sync stopped before its labels never asks again for that head. Still low/low, it is labelled
    `diplomat:cleared`; anything else, its labels written or not, takes both labels off and leaves it
-   to a person for good.
+   to a person until you [take it over](#takeover).
 5. A cleared PR is [merged](#the-merge) (**Merge cleared PRs**) once nothing holds it.
 
 A head no clean marker names, as after a push, takes `diplomat:cleared` off, and the PR goes back
@@ -144,8 +144,9 @@ counts. A takeover is refused for an item Diplomat may not write to, one carryin
 a banned author, one in a root read in part or whose Linear team has no root, while the ban list
 cannot be read, an issue split already, fixed by an open PR, tracked on GitHub or held by a Linear
 issue tracking it, and a PR closing an issue Diplomat may not fix. **Revoke takeover** takes it back,
-a PR off the fast track until taken over again; a takeover also ends when its item closes, and a
-PR's when a person takes a fast-track label off it.
+a PR off the fast track until taken over again, and none is merged once you press it, even by a sync
+already running. A takeover also ends once a sync that reads every source whole finds its item
+closed, and a PR's when a person takes a fast-track label off it.
 
 ## Ratings
 
@@ -303,7 +304,7 @@ its commits, its base branch and the checks it requires read only for a PR nothi
 - changes requested; an unresolved review thread;
 - a stop label: `do not merge`, `do-not-merge`, `don't merge`, `blocked`, `on hold`, `wip` or
   `work in progress`, matched as triage labels are (`pipeline.json` `stopLabels`);
-- it lacks either fast-track label, or is off the fast track for good;
+- it lacks either fast-track label, or is off the fast track until you take it over;
 - it closes no open issue (unless taken over), or one that is not a `candidate`, carries a stop
   label, or is held by a Linear issue tracking it, as read right before the merge, or one a merge
   this sync asked for may have closed;

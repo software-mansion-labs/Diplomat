@@ -1267,8 +1267,8 @@ final class PipelineSync {
 
     // MARK: - Fast track
 
-    /// Why my fast-track PR is off the fast track for good. A takeover stands whatever it is
-    /// rated, and forgot what came off it before.
+    /// Why my fast-track PR is off the fast track until taken over. A takeover stands whatever
+    /// it is rated, and forgot what came off it before.
     func offTrack(_ e: PipelineEntry) -> String? {
         let head = e.item.headSha ?? ""
         let taken = takenOver(e)
@@ -1337,6 +1337,14 @@ final class PipelineSync {
 
     func takenOver(_ e: PipelineEntry) -> Bool { state.takenOver[e.id] != nil }
 
+    /// Forgets `id`'s takeover, if any; a PR's labels come off at `track`.
+    func revoke(_ id: String) {
+        guard let kind = state.takenOver.removeValue(forKey: id) else { return }
+        if kind == .pr && !state.decided.contains(id) { state.decided.append(id) }
+        log(id, .takeover, "takeover revoked from the Pipeline screen")
+        persist()
+    }
+
     /// Why `e` may not be taken over now. Never its rating, its triage, its diff floor or its
     /// being off the fast track, which a takeover stands past.
     func takeoverRefusal(_ e: PipelineEntry) -> String? {
@@ -1348,7 +1356,10 @@ final class PipelineSync {
         if e.item.kind == .pr {
             if !settings.fastTrack { return "Fast-track my PRs is off" }
             if let x = fixed(by: e).map({ entries[$0] }).first(where: { open($0) && !isCandidate($0, for: e, taken: true) }) {
-                return "it closes \(x.item.label), which Diplomat may not fix"
+                let why = x.unwritable ?? stops(x).first.map { "it carries the label \($0)" } ?? banHold(x)
+                    ?? onGitHub(x).map { "it is tracked on GitHub as \($0)" } ?? twinHold(x) ?? twinsUnread(x)
+                    ?? (has(x, model.labels.fractured) || !x.children.isEmpty ? "it is split already" : nil)
+                return "it closes \(x.item.label), which Diplomat may not fix: " + (why ?? "it is fixed in another root")
             }
             return closesHold(e, taken: true).map { "it " + $0.message }
         }
@@ -1368,12 +1379,7 @@ final class PipelineSync {
             for id in settings.force?.takeover ?? [] { notice("\(id) was not taken over: \(blocked)") }
             return
         }
-        for id in settings.force?.revoke ?? [] {
-            guard let kind = state.takenOver.removeValue(forKey: id) else { continue }
-            if kind == .pr && !state.decided.contains(id) { state.decided.append(id) }
-            log(id, .takeover, "takeover revoked from the Pipeline screen")
-            persist()
-        }
+        for id in settings.force?.revoke ?? [] { revoke(id) }
         for id in settings.force?.takeover ?? [] where state.takenOver[id] == nil {
             guard let i = pos[id] else {
                 notice("\(id) was not read, so it was not taken over")
@@ -1723,7 +1729,7 @@ final class PipelineSync {
                 if stage == .cleared { noteHold(i, "partial", why) }
             } else if let why = offTrack(e) {
                 stage = .human
-                hold = "off the fast track for good: \(why)"
+                hold = "off the fast track until taken over: \(why)"
             } else if !takenOver(e), labelled == nil {
                 stage = e.item.rating == nil ? .unrated : .human
                 if e.item.rating != nil { hold = "off the fast track: its rating labels could not be written" }
@@ -1916,6 +1922,11 @@ final class PipelineSync {
             let judged = linearJudged(read)
             // Right before the hold is judged: the ban list goes into it.
             guard let fresh = linear == nil ? read : reread(e), may(.merge) else { continue }
+            if takenOver(fresh), PipelineControl.read(in: dir)?.revoke?.contains(e.id) == true {
+                revoke(e.id)
+                entries[i].item.hold = "its takeover was revoked"
+                continue
+            }
             let flag = mergeFlag(fresh)
             var hold: (code: String, message: String)?
             if fresh.item.headSha != head {

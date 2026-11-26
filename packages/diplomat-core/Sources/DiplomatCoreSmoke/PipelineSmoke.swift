@@ -1861,11 +1861,11 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
         try seed(dir("proof-\(k)"), proof)
         let s = sync(t, mergeOnly, dir("proof-\(k)"), t0)
         let want = k == 0 ? "clean/fast"
-            : "human/human (off the fast track for good: re-rated medium risk, low complexity at this head)"
+            : "human/human (off the fast track until taken over: re-rated medium risk, low complexity at this head)"
         check(!merged(s) && stageOf(s.result, prURL(13)) == want, "\(what) at the head: \(stageOf(s.result, prURL(13)))")
     }
 
-    // A person taking `cleared` off takes the PR off the fast track for good: Diplomat
+    // A person taking `cleared` off takes the PR off the fast track: Diplomat
     // takes `fast-track` off too, so the labels say so though state.json is lost.
     let optDir = dir("opt-out")
     let optOut = only([13, 27])
@@ -1925,7 +1925,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     let r1 = sync(rr, rrSettings, dir("rerate-refused"), t0)
     check(r1.claude == ["opus Clear the cache on logout"] && r1.writes == ["label risk:medium exists"] && !merged(r1)
           && stageOf(r1.result, prURL(13))
-          == "human/human (off the fast track for good: re-rated medium risk, low complexity at this head)",
+          == "human/human (off the fast track until taken over: re-rated medium risk, low complexity at this head)",
           "a re-rate not written: \(r1.claude) \(r1.writes) \(stageOf(r1.result, prURL(13)))")
     rr.refuseLabels = []
     rr.ratings["Clear the cache on logout"] = ["risk": "low", "complexity": "low", "why": "one line"]
@@ -3691,8 +3691,8 @@ private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: Pipeli
     let decided = try cleared("decided") { _ in _ = try? state("decided", #"{"decided":["\#(prURL(13))"]}"#) }
     check(!merged(re) && !merged(decided)
           && stageOf(re.result, prURL(13))
-            == "human/human (off the fast track for good: re-rated medium risk, low complexity at b2b2b2b)"
-          && stageOf(decided.result, prURL(13)) == "human/human (off the fast track for good: Diplomat took it off the fast track)",
+            == "human/human (off the fast track until taken over: re-rated medium risk, low complexity at b2b2b2b)"
+          && stageOf(decided.result, prURL(13)) == "human/human (off the fast track until taken over: Diplomat took it off the fast track)",
           "off the fast track before: \(stageOf(re.result, prURL(13))) \(stageOf(decided.result, prURL(13)))")
 
     // A PR of mine on the fast track that fixes no candidate, or whose diff allows more, is a person's.
@@ -4676,7 +4676,7 @@ private func pipelineCoverage8(base: URL, root: PipelineSettings.Root, team: Pip
         try seed(dir(name), rerate(first), rerate(second))
         let s = sync(only([13, 27]), mergeOnly, dir(name), t0)
         check(s.writes.isEmpty && stageOf(s.result, prURL(13))
-              == "human/human (off the fast track for good: re-rated medium risk, low complexity at this head)",
+              == "human/human (off the fast track until taken over: re-rated medium risk, low complexity at this head)",
               "re-rated \(first.risk) then \(second.risk) risk at one head, read from the log: \(s.writes) "
               + stageOf(s.result, prURL(13)))
     }
@@ -4868,7 +4868,7 @@ private func pipelinePins9(base: URL, root: PipelineSettings.Root, team: Pipelin
     putBack.prs[0].labels.append("diplomat:cleared")
     let pb = sync(putBack, mergeOnly, dir("cleared-put-back"), later(5))
     check(!merged(pb) && stageOf(pb.result, prURL(13))
-          == "human/human (off the fast track for good: Diplomat took it off the fast track)",
+          == "human/human (off the fast track until taken over: Diplomat took it off the fast track)",
           "cleared put back on after Diplomat took it off: \(pb.writes) \(stageOf(pb.result, prURL(13)))")
 }
 
@@ -5158,6 +5158,22 @@ private func pipelineTakeover(base: URL, root: PipelineSettings.Root, team: Pipe
           && p2Kept.isEmpty && item(p2.result, prURL(11))?.takenOver == nil,
           "#11 clean: \(p2.claude) \(p2.writes) \(p2Kept)")
 
+    // A revoke asked while a sync runs reaches it only through control.json: no merge.
+    let late = risky()
+    _ = sync(late, with(track, takeover: [prURL(11)]), dir("revoked-late"), t0)
+    marker(late, 11)
+    PipelineControl(enabled: true, rate: true, fix: false, fastTrack: true, merge: true, fracture: false,
+                    revoke: [prURL(11)]).save(in: dir("revoked-late"))
+    let lr = sync(late, track, dir("revoked-late"), later(10))
+    let lrKept = try kept(dir("revoked-late"))
+    check(!merged(lr) && said(lr) == [revoked] && lrKept.isEmpty
+          && item(lr.result, prURL(11))?.hold == "its takeover was revoked",
+          "#11 revoked mid-sync: \(lr.writes) \(said(lr)) \(lrKept) \(stageOf(lr.result, prURL(11)))")
+    let revokeJSON = String(decoding: try JSONEncoder().encode(
+        PipelineControl(enabled: true, rate: false, fix: false, fastTrack: false, merge: false, fracture: false,
+                        revoke: ["a"])), as: UTF8.self)
+    check(revokeJSON.contains(#""revoke":["a"]"#), "control.json's revokes: \(revokeJSON)")
+
     // Rated low/low but off the fast track: taken over, it is not rated again at its clean head.
     let plain = only([4, 11])
     plain.prs[0].labels = ["risk:low", "complexity:low"]
@@ -5229,8 +5245,9 @@ private func pipelineTakeover(base: URL, root: PipelineSettings.Root, team: Pipe
     let theirs = closing(2)
     let th = sync(theirs, with(fastMerge, takeover: [prURL(11)]), dir("closes-theirs"), t0)
     let thKept = try kept(dir("closes-theirs"))
-    check(th.result.notices.contains("#11 was not taken over: it closes #2, which Diplomat may not fix")
-          && item(th.result, prURL(11))?.takeoverRefused == "it closes #2, which Diplomat may not fix"
+    let theirsWhy = "it closes #2, which Diplomat may not fix: assigned to @alice"
+    check(th.result.notices.contains("#11 was not taken over: \(theirsWhy)")
+          && item(th.result, prURL(11))?.takeoverRefused == theirsWhy
           && th.writes.isEmpty && thKept.isEmpty,
           "#11 closing #2, someone else's: \(th.result.notices) \(th.writes) \(thKept)")
 

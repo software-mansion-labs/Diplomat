@@ -156,10 +156,14 @@ def test_a_takeover_and_a_revoke_of_one_item_drop_each_others_ask(pipe, monkeypa
     assert forced() == ({ISSUE}, {PR})
     pipe.pipeline_force_now("revoke", ISSUE)
     assert forced() == (frozenset(), {ISSUE, PR})
+    assert _control()["revoke"] == [ISSUE, PR]
     pipe.pipeline_force_now("rate", ISSUE)
     pipe.pipeline_force_now("takeover", ISSUE)
     assert (pipe.pipeline_forced("rate"), *forced()) == ({ISSUE}, {ISSUE}, {PR})
-    assert len(syncs) == 6
+    assert _control()["revoke"] == [PR]
+    pipe.pipeline_force_now("takeover", PR)
+    assert "revoke" not in _control()
+    assert len(syncs) == 7
 
 
 # MARK: - Effects to asks

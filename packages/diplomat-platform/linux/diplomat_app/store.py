@@ -1403,10 +1403,11 @@ class Store(QObject):
                 self._pipeline_stale = {w.key for w in self.requested_work if w.pipeline}
 
     def pipeline_control(self) -> dict:
-        """``control.json``'s switches as they stand (:func:`pipeline.write_control`)."""
+        """``control.json``'s switches and revokes as they stand (:func:`pipeline.write_control`)."""
         return {"enabled": self.pipeline_enabled, "rate": self.pipeline_rate,
                 "fix": self.pipeline_fix, "fastTrack": self.pipeline_fast_track,
-                "merge": self.pipeline_merge, "fracture": self.pipeline_fracture}
+                "merge": self.pipeline_merge, "fracture": self.pipeline_fracture,
+                "revoke": sorted(self.pipeline_forced("revoke"))}
 
     def _write_pipeline_control(self) -> None:
         """Headless only into a ``DIPLOMAT_PIPELINE_DIR``, so a render never steers the
@@ -5122,6 +5123,8 @@ class Store(QObject):
             if undone is not None:
                 force[undone] = force[undone] - {item_id}
             self._pipeline_force = force
+        if undone is not None:
+            self._write_pipeline_control()
         self.pipeline_changed.emit()
         self.run_pipeline_sync_async()
 

@@ -56,14 +56,14 @@ public enum PipelineLog {
 /// logged once is not taken or logged again.
 ///
 /// An item missing from a read keeps its entries, which guard outward steps: they go once it
-/// is read merged or closed, or after `forgetDays` unseen. The log-only `holds`, `clean` and
-/// `asked` also go with an item missing from a read of every source.
+/// is read merged or closed, or after `forgetDays` unseen. `takenOver` and the log-only `holds`,
+/// `clean` and `asked` also go with an item missing from a read of every source.
 struct PipelineState: Codable, Equatable {
     static let forgetDays: Double = 90
 
     /// Per `owner/repo`, the labels known to exist there.
     var labelsMade: [String: [String]] = [:]
-    /// PRs Diplomat took off the fast track for good. Only a cache: the labels say it.
+    /// PRs Diplomat took off the fast track until taken over. Only a cache: the labels say it.
     var decided: [String] = []
     /// The items the operator took over, and what each is.
     var takenOver: [String: PipelineKind] = [:]
@@ -161,7 +161,6 @@ struct PipelineState: Codable, Equatable {
         retry = retry.filter { live($0.key) }
         lineage = lineage.filter { live($0.key) }
         func keep(_ id: String) -> Bool { live(id) && (!readAll || read.contains(id)) }
-        // Gone from a read of every source: closed, and a takeover never outlives that.
         takenOver = takenOver.filter { keep($0.key) }
         holds = holds.filter { keep($0.key) }
         clean = clean.filter { keep($0.key) }

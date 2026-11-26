@@ -552,6 +552,8 @@ enum PipelineTest {
         let forced = PipelineSettings.Force(rate: [pr], fracture: [issue], takeover: [issue, pr], revoke: [linear])
         check("Authorize and Revoke takeover too, each dropping the other asked of the same item",
               store.pipelineForce == forced)
+        check("…the revokes written where a running sync's merge reads them",
+              PipelineControl.read()?.revoke == [linear])
         store.pipelineForce.rate.insert(linear, at: 0)
         store.pipelineForce.takeover.insert(linear, at: 0)
         store.pipelineForce.revoke.append(issue)

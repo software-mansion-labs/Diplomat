@@ -440,14 +440,19 @@ public struct PipelineControl: Codable, Equatable, Sendable {
     public var fastTrack: Bool
     public var merge: Bool
     public var fracture: Bool
+    /// The items whose takeover the operator revoked and no sync has been handed yet: none
+    /// is merged meanwhile.
+    public var revoke: [String]?
 
-    public init(enabled: Bool, rate: Bool, fix: Bool, fastTrack: Bool, merge: Bool, fracture: Bool) {
+    public init(enabled: Bool, rate: Bool, fix: Bool, fastTrack: Bool, merge: Bool, fracture: Bool,
+                revoke: [String]? = nil) {
         self.enabled = enabled
         self.rate = rate
         self.fix = fix
         self.fastTrack = fastTrack
         self.merge = merge
         self.fracture = fracture
+        self.revoke = revoke
     }
 
     public init(settings: PipelineSettings) {
