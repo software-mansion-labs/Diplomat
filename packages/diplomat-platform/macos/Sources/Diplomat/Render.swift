@@ -255,8 +255,8 @@ enum Render {
         case let s where s.hasPrefix("pipeline"):
             // "pipeline" selects a cleared PR held for its CI; "-issue" filters the fast
             // lane, which keeps the split issue's whole group, and selects its candidate
-            // child; "-panel" draws the screen inside the whole panel; "-empty" the screen
-            // before a first sync, switched off.
+            // child, taken over; "-panel" draws the screen inside the whole panel; "-empty"
+            // the screen before a first sync, switched off.
             let _ = seedPipeline(store, empty: s.contains("empty"))
             if s.contains("panel") {
                 ContentView(showPipeline: true)
@@ -585,7 +585,7 @@ enum Render {
                   writable: Bool = true, rating: (PipelineLevel, PipelineLevel)? = nil,
                   ratedBy: String? = "label", why: String? = nil,
                   floor: (PipelineLevel, PipelineLevel)? = nil, hold: String? = nil,
-                  head: String? = nil, clean: String? = nil) -> PipelineItem {
+                  head: String? = nil, clean: String? = nil, takenOver: Bool? = nil) -> PipelineItem {
             PipelineItem(id: id, source: source, kind: kind, label: label, title: title,
                          repo: source == .linear ? "ENG" : root.slug, state: state, author: author,
                          assignees: assignees, writable: writable,
@@ -593,7 +593,7 @@ enum Render {
                          ratedBy: rating == nil ? nil : ratedBy, why: why,
                          floor: floor.map { PipelineRating(risk: $0.0, complexity: $0.1) },
                          stage: stage, lane: lane, hold: hold, headSha: head, cleanAt: clean,
-                         updatedAt: now)
+                         updatedAt: now, takenOver: takenOver)
         }
         let i1820 = gh(.issue, 1820), p1831 = gh(.pr, 1831), p1834 = gh(.pr, 1834)
         let i1824 = gh(.issue, 1824), p1825 = gh(.pr, 1825)
@@ -621,7 +621,7 @@ enum Render {
                  .fractured, rating: (medium, high),
                  why: "Touches the allocator, its protocol and both front-ends."),
             item(i1801, .issue, "#1801", "Report a remote lease's attach time in the device list",
-                 .candidate, .fast, rating: (low, low), ratedBy: "label"),
+                 .candidate, .fast, rating: (low, low), ratedBy: "label", takenOver: true),
             item(i1802, .issue, "#1802", "Retry a remote lease that never attaches", .unrated,
                  .unrated),
             item(eng37, .issue, "ENG-37", "Metro cache survives a branch switch", .human, .human,
@@ -676,6 +676,7 @@ enum Render {
             event(1290, i1790, .child, "\(i1801): Report a remote lease's attach time in the device list"),
             event(1290, i1790, .child, "\(i1802): Retry a remote lease that never attaches"),
             event(1290, i1790, .fractured, "split into 2 parts"),
+            event(1250, i1801, .takeover, "taken over from the Pipeline screen, whatever its rating"),
             event(1200, i1801, .rated, "low risk, low complexity"),
             event(1200, i1801, .asked, "asked for a fix PR"),
             event(180, p1825, .clean, "clean marker at 4a7d1c0"),
