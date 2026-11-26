@@ -5268,6 +5268,18 @@ private func pipelineRateJobs(base: URL, root: PipelineSettings.Root, t0: Date) 
           && !asks(s2).contains { $0.key == "pipeline-rate:" + issueURL(41) },
           "four asks of unread items wait: \(asks(s1)) \(asks(s2))")
 
+    // An ask whose item the reads missed is judged by a read of that item: closed, dropped.
+    let closed = only([1])
+    let cld = dir("closed-unlisted")
+    _ = sync(closed, ops, cld, t0, drain: false)
+    _ = PipelineRateJob.run(item: issueURL(1), stamp: "1", dir: cld, io: closed.io())
+    closed.linearDown = true
+    closed.others[1] = ("Typo on the login button", "CLOSED", "acme/app")
+    closed.issues = []
+    let cl2 = sync(closed, ops, cld, later(5), drain: false)
+    check(((state(cld)["rateAsks"] as? [String: Any]) ?? [:]).isEmpty && files(cld).isEmpty && cl2.writes.isEmpty,
+          "an answered ask of an item closed while a source is unread: \(state(cld)["rateAsks"] ?? [:]) \(files(cld))")
+
     // An item the sync could not read keeps its ask and answer for the sync that can.
     let unread = only([1])
     let ud = dir("unread")

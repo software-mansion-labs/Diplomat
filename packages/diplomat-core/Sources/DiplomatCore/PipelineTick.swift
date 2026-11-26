@@ -470,11 +470,14 @@ final class PipelineSync {
         }
     }
 
-    /// The ids of `settings.queued` no read so far listed: a front-end takes an ask or record
-    /// back only once a read of its item judged it.
+    /// The ids of `settings.queued`, and of the ratings asked for, no read so far listed: a
+    /// front-end takes an ask or record back, and a sync drops a rating ask, only once a read
+    /// of its item judged it.
     func unlisted() -> [String] {
         let listed = Set(entries.map { PipelineRead.norm($0.id) })
-        return settings.queued.filter { !listed.contains(PipelineRead.norm($0)) }
+        let queued = Set(settings.queued.map(PipelineRead.norm))
+        let asked = state.rateAsks.keys.sorted().filter { !queued.contains(PipelineRead.norm($0)) }
+        return (settings.queued + asked).filter { !listed.contains(PipelineRead.norm($0)) }
     }
 
     func readQueued(_ n: Int) {

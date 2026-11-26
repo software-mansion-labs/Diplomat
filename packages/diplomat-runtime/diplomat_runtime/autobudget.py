@@ -46,6 +46,13 @@ def enabled() -> bool:
     return appconfig.auto_budget_gate()
 
 
+def in_claude(job: autofix.AgentJob) -> bool:
+    """Whether ``job`` is priced in the Claude Code window: a Pipeline rating always is."""
+    from . import runner
+
+    return job.kind == autofix.QUEUE_RATE_ACTION or runner.selected() == runner.CLAUDE
+
+
 def decide(now: float | None = None, claude: bool | None = None) -> autofix.Budget:
     """The budget verdict for one more automatic task, from live evidence, in the
     Claude Code window when ``claude`` (a Pipeline rating's, whatever the runner) and

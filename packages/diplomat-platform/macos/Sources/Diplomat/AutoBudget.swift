@@ -33,16 +33,21 @@ enum AutoBudget {
         cache = [:]
     }
 
-    /// Pin the answer until `resetCache`, for headless self-tests only: the real one
-    /// dials the usage endpoint. `claude` pins one currency; nil, both.
-    static func pinForSelfTest(_ budget: AgentDispatchGate.Budget, claude: Bool? = nil) {
+    /// Pin the answer in one currency until `resetCache`, for headless self-tests only:
+    /// the real one dials the usage endpoint.
+    static func pinForSelfTest(_ budget: AgentDispatchGate.Budget, claude: Bool) {
         guard Headless.active else { return }
         lock.lock(); defer { lock.unlock() }
-        for c in claude.map({ [$0] }) ?? [true, false] { cache[c] = (.infinity, budget) }
+        cache[claude] = (.infinity, budget)
     }
 
     /// Whether the gate is switched on at all (Settings → PR AUTO-FIX).
     static var enabled: Bool { AppConfig.autoBudgetGate }
+
+    /// Whether `job` is priced in the Claude Code window: a Pipeline rating always is.
+    static func inClaude(_ job: Store.AgentJob) -> Bool {
+        job.rating != nil || AppConfig.agentRunner == .claude
+    }
 
     /// The budget verdict for one more automatic task, from live evidence, in the
     /// Claude Code window when `claude` (a Pipeline rating's, whatever the runner).

@@ -463,7 +463,7 @@ class Store(QObject):
         # nothing left to spend, and each episode is worth one line of its own.
         # The low-disk one (see _log_low_disk) is a third for the same reason.
         self._capacity_logged = False
-        self._budget_logged = False
+        self._budget_logged: set[bool] = set()  # per currency (autobudget.in_claude)
         self._disk_logged = False
         # Automatic work nothing has started yet — held by the task cap, by the
         # free-disk floor, by the spending budget, or by its own monitor being
@@ -2178,13 +2178,13 @@ class Store(QObject):
             # with `bypass_capacity` set and this one clear — that is the whole
             # difference between deferring work and forcing it.
             budget = autofix.Budget(affordable=True)
+            claude = autobudget.in_claude(job)
             if (source == autofix.SOURCE_AUTO and not agent_on_pr
                     and not forced and not at_capacity and not low_disk
                     and not networked and autobudget.enabled()):
-                budget = (autobudget.decide(claude=True) if rating
-                          else autobudget.decide())
+                budget = autobudget.decide(claude=claude)
                 if budget.affordable:
-                    self._budget_logged = False
+                    self._budget_logged.discard(claude)
             verdict = autofix.dispatch_decide(
                 source, banned, agent_on_pr, full,
                 not budget.affordable, outside_allowlist, low_disk,
@@ -2203,7 +2203,7 @@ class Store(QObject):
                 self._stage_queued(job, attempt)
                 return verdict
             if verdict == autofix.VERDICT_UNAFFORDABLE:
-                self._log_unaffordable(budget)
+                self._log_unaffordable(budget, claude)
                 self._stage_queued(job, attempt)
                 return verdict
             if verdict == autofix.VERDICT_BANNED:
@@ -2791,14 +2791,14 @@ class Store(QObject):
         )
         self.refresh_activity()
 
-    def _log_unaffordable(self, budget: autofix.Budget) -> None:
+    def _log_unaffordable(self, budget: autofix.Budget, claude: bool) -> None:
         """Note that automatic work is being held for want of budget — once per
         episode, like :meth:`_log_at_capacity`, and cleared the moment a dispatch
         finds room again. Without that, a machine sitting under its floor would write
         one of these per owed PR per poll, for hours."""
-        if self._budget_logged:
+        if claude in self._budget_logged:
             return
-        self._budget_logged = True
+        self._budget_logged.add(claude)
         activity.log("auto", "no-budget",
                      f"Deferring auto work — {autobudget.shortfall(budget)}")
         self.refresh_activity()
@@ -3320,19 +3320,22 @@ class Store(QObject):
                              f"{entry.job.label} — PR no longer open, not run")
             self._drop_queued_task(entry.id)
         # Whether the tasks run here (True) or offered to the network (False) have met a
-        # refusal every later one of them would meet too.
+        # refusal every later one of them would meet too, and in which currencies
+        # (:func:`autobudget.in_claude`) a task run here was refused as unaffordable.
         stopped: set[bool] = set()
+        broke: set[bool] = set()
         for entry in self.drainable_tasks:
             # A rating is never offered.
             here = (not diplomacynetwork.enabled()
                     or entry.job.kind == autofix.QUEUE_RATE_ACTION)
+            claude = autobudget.in_claude(entry.job)
             # The list moves under this loop: it waits on a spawn per task, and an
             # "execute now" during one of those takes its row off the queue and starts
             # it there and then. Re-reading the queue is what keeps the drain from
             # dispatching that same task a second time when it reaches it.
             if not any(e.id == entry.id for e in self.queued_tasks):
                 continue
-            if outside(entry) or here in stopped:
+            if outside(entry) or here in stopped or (here and claude in broke):
                 continue
             # A task offered to the network takes no bay of this machine's cap.
             if here and self._auto_tasks_running() >= self.auto_task_limit:
@@ -3347,12 +3350,14 @@ class Store(QObject):
             if verdict == "failed":
                 return
             # Every remaining entry run in the same place would be priced against the
-            # same windows, or the same disk, or offered to the same silent or stopping
-            # daemon, and get the same answer, and the dispatch has already re-staged
-            # this one for the commit at the end of the cycle. Draining on would cost a
-            # round of refusals to no end. A refusal for the job's own reason moves on
-            # to the next.
-            if verdict in (autofix.VERDICT_UNAFFORDABLE, autofix.VERDICT_LOW_DISK) or (
+            # same windows (one in the same currency), or the same disk, or offered to
+            # the same silent or stopping daemon, and get the same answer, and the
+            # dispatch has already re-staged this one for the commit at the end of the
+            # cycle. Draining on would cost a round of refusals to no end. A refusal for
+            # the job's own reason moves on to the next.
+            if verdict == autofix.VERDICT_UNAFFORDABLE:
+                broke.add(claude)
+            elif verdict == autofix.VERDICT_LOW_DISK or (
                     verdict == diplomacynetwork.VERDICT_REFUSED and not verdict.own):
                 stopped.add(here)
 

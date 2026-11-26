@@ -315,8 +315,9 @@ Two failure directions, both deliberate:
   priced like the rest of the queue, because what starting it costs is the same
   whoever wanted it.
 
-The feed carries one `no-budget` line per episode, quoting which window is short and
-against what, and another when the next episode begins - not one per PR per poll.
+The feed carries one `no-budget` line per episode in each currency, quoting which
+window is short and against what, and another when the next episode begins - not
+one per PR per poll.
 
 The queue is a view of what the monitors would re-offer, not a second copy of
 their state: it is rebuilt from live GitHub evidence on every 3-minute poll, so a

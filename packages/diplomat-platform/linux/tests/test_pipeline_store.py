@@ -2190,6 +2190,25 @@ def test_a_silent_daemon_holds_no_rating_behind_its_offer(pipe, rater, monkeypat
     assert [r.url for r in pipe.running_ratings] == [_pr(8)]
 
 
+def test_a_rating_the_claude_window_refuses_holds_no_work_priced_in_money(pipe, rater,
+                                                                         monkeypatch):
+    calls = _spawn_recorder(monkeypatch)
+    appconfig.set_value(appconfig.AGENT_RUNNER, "hermes")
+    monkeypatch.setattr("diplomat_app.store.autobudget.enabled", lambda: True)
+    monkeypatch.setattr("diplomat_app.store.autobudget.decide", lambda claude=None: autofix.Budget(
+        affordable=not claude, window="week", left=0.5, needed=5.0))
+    pipe.auto_task_limit = 2
+    _sync(pipe, _result(_rate(_pr(8), 8), _fix()))
+    assert [t.id for t in pipe.queued_tasks] == ["rate:o/r#8", "issues:o/r#12"]
+    pipe._drain_queued_tasks([], closed=set())
+    assert pipe.running_ratings == [] and len(calls) == 1
+    pipe._offer_requested_work()
+    pipe.commit_queue()
+    assert [t.id for t in pipe.queued_tasks] == ["rate:o/r#8"]
+    pipe._drain_queued_tasks([], closed=set())
+    assert len(_feed("no-budget")) == 1, "the work that started ends no episode of the window's"
+
+
 def test_a_rating_counts_the_runs_executed_here_for_the_network(pipe, rater, monkeypatch):
     from diplomat_app import diplomacynetwork
     from diplomat_runtime import network

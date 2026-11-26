@@ -3470,7 +3470,8 @@ final class Store: ObservableObject {
     /// single spell of having nothing left to spend, and each episode is worth one line
     /// of its own.
     private var capacityLogged = false
-    private var budgetLogged = false
+    /// Per currency (`AutoBudget.inClaude`).
+    private var budgetLogged = Set<Bool>()
     private var diskLogged = false
 
     /// The free space of whichever volume an agent here runs out of first: a repo root
@@ -3518,9 +3519,8 @@ final class Store: ObservableObject {
     /// like `logAtCapacity`, and cleared the moment a dispatch finds room again.
     /// Without that, a machine sitting under its floor would write one of these per
     /// owed PR per poll, for hours.
-    private func logUnaffordable(_ budget: AgentDispatchGate.Budget) {
-        guard !budgetLogged else { return }
-        budgetLogged = true
+    private func logUnaffordable(_ budget: AgentDispatchGate.Budget, claude: Bool) {
+        guard budgetLogged.insert(claude).inserted else { return }
         AuditLog.log("auto", "no-budget",
                      "Deferring auto work — " + AutoBudget.shortfall(budget))
         refreshAudit()
@@ -3716,16 +3716,17 @@ final class Store: ObservableObject {
             dropQueuedTask(entry.id)
         }
         // Whether the tasks run here (true) or offered to the network (false) have met a
-        // refusal every later one of them would meet too.
-        var stopped = Set<Bool>()
+        // refusal every later one of them would meet too, and in which currencies
+        // (`AutoBudget.inClaude`) a task run here was refused as unaffordable.
+        var stopped = Set<Bool>(), broke = Set<Bool>()
         for entry in drainableTasks {
-            let here = !offersToNetwork(entry.job)
+            let here = !offersToNetwork(entry.job), claude = AutoBudget.inClaude(entry.job)
             // The list moves under this loop: it awaits a spawn per task, and an
             // "execute now" during one of those takes its row off the queue and
             // starts it there and then. Re-reading the queue is what keeps the drain
             // from dispatching that same task a second time when it reaches it.
             guard queuedTasks.contains(where: { $0.id == entry.id }), !outside(entry),
-                  !stopped.contains(here) else { continue }
+                  !stopped.contains(here), !(here && broke.contains(claude)) else { continue }
             // A job offered to the network takes no bay of this device's cap.
             if here, await agentTick().tick.capLoad.count + ratingsAndPoolRuns >= autoTaskLimit {
                 stopped.insert(here)
@@ -3739,11 +3740,13 @@ final class Store: ObservableObject {
             switch await runQueuedTask(entry, forced: false) {
             case .failed: return
             // Every remaining entry run in the same place would be priced against the
-            // same windows, or the same disk, or offered to the same silent daemon, and
-            // get the same answer, and the dispatch has already re-staged this one for
-            // the commit at the end of the cycle. Draining on would cost a round of
-            // refusals to no end. A refusal for the job's own reason moves on to the next.
-            case .unaffordable, .lowDisk, .networkDown: stopped.insert(here)
+            // same windows (one in the same currency), or the same disk, or offered to
+            // the same silent daemon, and get the same answer, and the dispatch has
+            // already re-staged this one for the commit at the end of the cycle. Draining
+            // on would cost a round of refusals to no end. A refusal for the job's own
+            // reason moves on to the next.
+            case .unaffordable: broke.insert(claude)
+            case .lowDisk, .networkDown: stopped.insert(here)
             default: break
             }
         }
@@ -4687,14 +4690,12 @@ final class Store: ObservableObject {
         // set and this one clear — that is the whole difference between deferring work
         // and forcing it.
         var budget = AgentDispatchGate.Budget(affordable: true)
+        let claude = AutoBudget.inClaude(job)
         if source == .auto, !agentOnPR, !forced, !lowDisk, !atCapacity, !network,
            AutoBudget.enabled {
             // Off the main actor: the probe behind it dials the usage endpoint.
-            let rating = job.rating != nil
-            budget = await Task.detached(priority: .utility) {
-                rating ? AutoBudget.decide(claude: true) : AutoBudget.decide()
-            }.value
-            if budget.affordable { budgetLogged = false }
+            budget = await Task.detached(priority: .utility) { AutoBudget.decide(claude: claude) }.value
+            if budget.affordable { budgetLogged.remove(claude) }
         }
         switch AgentDispatchGate.decide(source: source, banned: banned,
                                         agentOnPR: agentOnPR, atCapacity: full,
@@ -4713,7 +4714,7 @@ final class Store: ObservableObject {
             stageQueued(job, attemptNumber: attemptNumber)
             return .atCapacity
         case .unaffordable:
-            logUnaffordable(budget)
+            logUnaffordable(budget, claude: claude)
             stageQueued(job, attemptNumber: attemptNumber)
             return .unaffordable
         case .banned:

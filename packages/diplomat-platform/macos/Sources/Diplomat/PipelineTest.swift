@@ -1481,19 +1481,36 @@ enum PipelineTest {
         setenv(DiskFloor.envOverride, "0", 1)
         store.offerRequestedWork()
         store.commitQueue()
-        let budgetLines = feed("no-budget").count
-        // Hermes selected: a rating is still priced in the Claude Code window.
+        let budgetLines = feed("no-budget").count, banLines = feed("ban-skip").count
+        // Hermes selected: a rating is still priced in the Claude Code window, and the work
+        // right behind it, priced in money, is still tried (a banned author's, so none spawns).
+        let bans = scratch.appendingPathComponent("bans/banned.json")
+        try? Data(#"{"banned":[{"login":"mallory","reason":"prompt injection"}]}"#.utf8).write(to: bans)
+        let behind = Store.QueuedAgentTask(
+            id: AgentTaskQueue.key(auditAction: AgentTaskQueue.reviewAction, item: "o/r#90022"),
+            job: Store.AgentJob(kind: AgentTaskQueue.reviewAction, auditAction: AgentTaskQueue.reviewAction,
+                                label: "Review · #90022", prompt: "", prURL: "https://github.com/o/r/pull/90022",
+                                prNumber: 90022, authorLogin: "mallory", counter: nil),
+            attemptNumber: 1)
+        store.queuedTasks.insert(behind, at: 1)
         let runner = AppConfig.agentRunner.rawValue
         _ = AppConfig.set(AppConfig.agentRunnerKey, AgentRunner.hermes.rawValue)
         AutoBudget.pinForSelfTest(AgentDispatchGate.Budget(affordable: true), claude: false)
         AutoBudget.pinForSelfTest(AgentDispatchGate.Budget(affordable: false, window: AgentDispatchGate.windowWeek,
                                                            left: 1, needed: 5, measured: true), claude: true)
         await store.drainQueuedTasks(snaps: [], closed: [])
-        AutoBudget.resetCache()
-        _ = AppConfig.set(AppConfig.agentRunnerKey, runner)
+        try? FileManager.default.removeItem(at: bans)
+        store.queuedTasks.removeAll { $0.id == behind.id }
         check("…and a spent Claude Code window, said in the feed",
               store.requestedWork.map(\.key) == [rateKey] && store.pipelineRateRuns.isEmpty
                   && feed("no-budget").count == budgetLines + 1)
+        check("…holding none of the work priced in money behind it", feed("ban-skip").count == banLines + 1)
+        store.offerRequestedWork()
+        store.commitQueue()
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        AutoBudget.resetCache()
+        _ = AppConfig.set(AppConfig.agentRunnerKey, runner)
+        check("…one line for the episode, whatever the money budget says", feed("no-budget").count == budgetLines + 1)
         store.offerRequestedWork()
         store.commitQueue()
         check("…each leaving it queued", ids() == [rateKey])
