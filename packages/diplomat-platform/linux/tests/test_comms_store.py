@@ -1695,12 +1695,14 @@ def test_the_docs_name_exactly_the_comms_json_keys_linux_reads(monkeypatch):
             return super().get(key, default)
 
     monkeypatch.setattr(comms, "tunables", lambda: Recording(core.comms()))
-    comms.poll_secs(), comms.tick_timeout(), comms.batch_defaults()
+    monkeypatch.setattr("diplomat_runtime.promptcore.core_bin", lambda: "/bin/core")
+    monkeypatch.setattr("subprocess.Popen", _answering_core([]))
+    comms.poll_secs(), comms.tick({}), comms.auth(), comms.batch_defaults()
     readme = (core.assets_dir() / "README.md").read_text(encoding="utf-8")
     row = next(r for r in readme.splitlines() if r.startswith("| `comms.json` |"))
     assert set(re.findall(r"`(\w+)`", row.split("reads only", 1)[1])) == read
-    comment = core.comms()["_comment"].split("Settings stops:", 1)[1]
-    assert set(re.findall(r"\b[a-z]+[A-Z]\w*", comment)) == read
+    comment = core.comms()["_comment"].split("Settings stops: ", 1)[1].split(" (", 1)[0]
+    assert set(re.split(r", | and ", comment)) == read
 
 
 @pytest.mark.parametrize("raw", ["inf", "1e12", "-inf", "nan"])
