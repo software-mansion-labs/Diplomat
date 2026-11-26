@@ -173,6 +173,9 @@ enum WindowTest {
         let frames = Dictionary(uniqueKeysWithValues: PipelineLayout.make(wide.pipelineResult!, lane: nil)
             .cards.map { ($0.item.id, $0.frame) })
         let graphScroll = scrollViews(in: keyed.contentView).dropFirst().first
+        // As with a mouse attached: scrollers that take room from the view.
+        graphScroll?.scrollerStyle = .legacy
+        settle(keyed)
         func shown(_ i: Int) -> Bool { graphScroll.map { $0.contentView.bounds.contains(frames[ids[i]]!) } == true }
         // The detail pane's id line is the only tooltip that is a bare item URL.
         func picked() -> [String] { ids.filter(toolTips(in: keyed.contentView).contains) }

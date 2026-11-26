@@ -748,7 +748,7 @@ def test_the_arrow_keys_select_wherever_the_screen_has_focus_and_nowhere_else(st
         panel.deleteLater()
 
 
-def test_an_arrow_scrolls_the_card_it_selects_into_view(store):
+def test_an_arrow_scrolls_the_card_it_selects_into_view_with_room_around_it(store):
     from PySide6.QtTest import QTest
 
     view = PipelineView(store)
@@ -762,8 +762,10 @@ def test_an_arrow_scrolls_the_card_it_selects_into_view(store):
 
         def shown(item_id: str) -> bool:
             port = scroll.viewport()
+            m = pipelineview.SCROLL_MARGIN
+            room = view.canvas.cards[item_id].adjusted(-m, -m, m, m) & QRectF(view.canvas.rect())
             return QRectF(scroll.horizontalScrollBar().value(), scroll.verticalScrollBar().value(),
-                          port.width(), port.height()).contains(view.canvas.cards[item_id])
+                          port.width(), port.height()).contains(room)
 
         assert not shown(P3) and not shown(I8)
         for key, want in _WALK:

@@ -81,6 +81,8 @@ EVENT_TINT = {"rated": _GREY, "labelled": _GREY, "fast-track": TINT, "clean": TI
 CARD_W, CARD_H, RADIUS = 170, 88, 5
 COL_GAP, ROW_GAP = 48, 16
 MARGIN_X, MARGIN_Y = 28, 12
+#: Kept in view around the card an arrow selects. Twin of ``PipelineView.scrollMargin``.
+SCROLL_MARGIN = 20
 ARROW = 7
 DETAIL_W = 290
 
@@ -919,7 +921,8 @@ class PipelineView(QWidget):
             self.select(item_id)
         rect = self.canvas.cards[item_id]
         self.graph_scroll.ensureVisible(round(rect.center().x()), round(rect.center().y()),
-                                        round(rect.width() / 2), round(rect.height() / 2))
+                                        round(rect.width() / 2) + SCROLL_MARGIN,
+                                        round(rect.height() / 2) + SCROLL_MARGIN)
 
     def _start_fix(self, item: dict) -> None:
         item_id = str(item.get("id") or "")

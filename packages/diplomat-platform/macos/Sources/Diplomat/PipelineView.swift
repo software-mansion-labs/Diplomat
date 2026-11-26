@@ -74,7 +74,7 @@ struct PipelineView: View {
             guard let next = PipelineLayout.make(result, lane: lane).step(from: selected, dx: dx, dy: dy)
             else { return .ignored }
             selected = next
-            proxy.scrollTo(next)
+            proxy.scrollTo(ScrollTarget(id: next))
             return .handled
         }
         .onAppear { focused = true }
@@ -85,6 +85,13 @@ struct PipelineView: View {
 
     static let arrows: [KeyEquivalent: (Int, Int)] = [.leftArrow: (-1, 0), .rightArrow: (1, 0),
                                                        .upArrow: (0, -1), .downArrow: (0, 1)]
+
+    /// What an arrow scrolls into view: its card and `scrollMargin` around it. `scrollTo` takes a
+    /// legacy scroller's room for part of the view, so would leave the card's edge under one, and
+    /// stops that far short of the content's end, which the graph pads by as much.
+    struct ScrollTarget: Hashable { let id: String }
+
+    static let scrollMargin: CGFloat = 20
 
     /// `repo`: the picked root's label; `unread`: the last sync read it in part; `reads`: a
     /// GitHub root or a Linear team is set. Twin of `pipelineview.empty_text`.
@@ -276,7 +283,8 @@ struct PipelineView: View {
             // Both ways only once too wide: a scroll view centres narrower content.
             ViewThatFits(in: .horizontal) {
                 ScrollView(.vertical) { canvas.frame(maxWidth: .infinity, alignment: .topLeading) }
-                ScrollView([.horizontal, .vertical]) { canvas }
+                // Room for an end card's scroll target: see `ScrollTarget`.
+                ScrollView([.horizontal, .vertical]) { canvas.padding([.trailing, .bottom], PipelineView.scrollMargin) }
             }
         }
     }
@@ -524,6 +532,10 @@ private struct PipelineCanvas: View {
             ForEach(layout.cards, id: \.item.id) { card in
                 PipelineCard(item: card.item, badge: badges[Store.pipelineIdentity(card.item.id)],
                              selected: selected == card.item.id) { select(card.item.id) }
+                    .background {
+                        Color.clear.id(PipelineView.ScrollTarget(id: card.item.id))
+                            .padding(-PipelineView.scrollMargin)
+                    }
                     // Not .offset: scrollTo goes to the frame layout gave the card, before any offset.
                     .alignmentGuide(.leading) { _ in -card.frame.minX }
                     .alignmentGuide(.top) { _ in -card.frame.minY }
