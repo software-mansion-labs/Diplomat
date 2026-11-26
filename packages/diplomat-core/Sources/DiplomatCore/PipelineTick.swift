@@ -1369,10 +1369,7 @@ final class PipelineSync {
         if e.item.kind == .pr {
             if !settings.fastTrack { return "Fast-track my PRs is off" }
             if let x = fixed(by: e).map({ entries[$0] }).first(where: { open($0) && !isCandidate($0, for: e, taken: true) }) {
-                let why = x.unwritable ?? stops(x).first.map { "it carries the label \($0)" } ?? banHold(x)
-                    ?? onGitHub(x).map { "it is tracked on GitHub as \($0)" } ?? twinHold(x) ?? twinsUnread(x)
-                    ?? (has(x, model.labels.fractured) || !x.children.isEmpty ? "it is split already" : nil)
-                return "it closes \(x.item.label), which Diplomat may not fix: " + (why ?? "it is fixed in another root")
+                return "it closes \(x.item.label), which Diplomat may not fix: " + (fixRefusal(x) ?? "it is fixed in another root")
             }
             return closesHold(e, taken: true).map { "it " + $0.message }
         }
@@ -1380,6 +1377,16 @@ final class PipelineSync {
         if !fixers(e).isEmpty { return "an open PR fixes it" }
         if let issue = onGitHub(e) { return "it is tracked on GitHub as \(issue)" }
         return twinHold(e)
+    }
+
+    /// Why Diplomat may not fix `x`, whatever its rating or triage; nil when it may, in its root.
+    func fixRefusal(_ x: PipelineEntry) -> String? {
+        if let why = x.unwritable { return why }
+        if let stop = stops(x).first { return "it carries the label \(stop)" }
+        if let why = banHold(x) { return why }
+        if let issue = onGitHub(x) { return "it is tracked on GitHub as \(issue)" }
+        if let why = twinHold(x) ?? twinsUnread(x) { return why }
+        return has(x, model.labels.fractured) || !x.children.isEmpty ? "it is split already" : nil
     }
 
     /// The operator's revokes, then takeovers. A revoke needs no read: it forgets the
