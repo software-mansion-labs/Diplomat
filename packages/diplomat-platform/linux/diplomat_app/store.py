@@ -2793,8 +2793,8 @@ class Store(QObject):
 
     def _log_unaffordable(self, budget: autofix.Budget, claude: bool) -> None:
         """Note that automatic work is being held for want of budget — once per
-        episode, like :meth:`_log_at_capacity`, and cleared the moment a dispatch
-        finds room again. Without that, a machine sitting under its floor would write
+        episode, like :meth:`_log_at_capacity`, and cleared the moment a dispatch in
+        its currency finds room again. Without that, a machine sitting under its floor would write
         one of these per owed PR per poll, for hours."""
         if claude in self._budget_logged:
             return

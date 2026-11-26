@@ -2209,6 +2209,40 @@ def test_a_rating_the_claude_window_refuses_holds_no_work_priced_in_money(pipe, 
     assert len(_feed("no-budget")) == 1, "the work that started ends no episode of the window's"
 
 
+@pytest.mark.parametrize("spent", [{False}, {False, True}])
+def test_a_refusal_priced_in_money_holds_no_rating_behind_it(pipe, rater, monkeypatch, spent):
+    """Hermes selected, the fix dragged ahead: each currency refused is a line of its own."""
+    calls = _spawn_recorder(monkeypatch)
+    appconfig.set_value(appconfig.AGENT_RUNNER, "hermes")
+    monkeypatch.setattr("diplomat_app.store.autobudget.enabled", lambda: True)
+    monkeypatch.setattr("diplomat_app.store.autobudget.decide", lambda claude=None: autofix.Budget(
+        affordable=claude not in spent, window="week", left=0.5, needed=5.0))
+    pipe.auto_task_limit = 2
+    _sync(pipe, _result(_rate(_pr(8), 8), _fix()))
+    pipe.queued_tasks = list(reversed(pipe.queued_tasks))
+    pipe._drain_queued_tasks([], closed=set())
+    assert calls == []
+    assert [r.url for r in pipe.running_ratings] == ([] if True in spent else [_pr(8)])
+    assert len(_feed("no-budget")) == len(spent)
+
+
+def test_a_rating_the_claude_window_refuses_holds_no_offer_behind_it(pipe, rater, monkeypatch):
+    from diplomat_app import diplomacynetwork
+
+    offered = []
+    monkeypatch.setattr(diplomacynetwork, "enabled", lambda: True)
+    monkeypatch.setattr(Store, "_offer_tracked", lambda self, job, *a: (
+        offered.append(job.label), diplomacynetwork.Offered("t1"))[1])
+    _spawn_recorder(monkeypatch)
+    monkeypatch.setattr("diplomat_app.store.autobudget.enabled", lambda: True)
+    monkeypatch.setattr("diplomat_app.store.autobudget.decide", lambda claude=None: autofix.Budget(
+        affordable=False, window="week", left=0.5, needed=5.0))
+    _sync(pipe, _result(_rate(_pr(8), 8), _fix()))
+    pipe._drain_queued_tasks([], closed=set())
+    assert pipe.running_ratings == [] and len(_feed("no-budget")) == 1
+    assert offered == [pipe.pipeline_work(_fix()).label_among(1)]
+
+
 def test_a_rating_counts_the_runs_executed_here_for_the_network(pipe, rater, monkeypatch):
     from diplomat_app import diplomacynetwork
     from diplomat_runtime import network

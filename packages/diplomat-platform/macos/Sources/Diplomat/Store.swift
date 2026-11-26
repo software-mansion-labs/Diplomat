@@ -3516,8 +3516,8 @@ final class Store: ObservableObject {
     }
 
     /// Note that automatic work is being held for want of budget — once per episode,
-    /// like `logAtCapacity`, and cleared the moment a dispatch finds room again.
-    /// Without that, a machine sitting under its floor would write one of these per
+    /// like `logAtCapacity`, and cleared the moment a dispatch in its currency finds room
+    /// again. Without that, a machine sitting under its floor would write one of these per
     /// owed PR per poll, for hours.
     private func logUnaffordable(_ budget: AgentDispatchGate.Budget, claude: Bool) {
         guard budgetLogged.insert(claude).inserted else { return }

@@ -670,8 +670,8 @@ def test_the_drain_stops_at_the_budget_and_keeps_its_queue(store, monkeypatch, b
     # The one it tried is re-staged rather than dropped — a refusal writes no attempt
     # record, so it is offered again at the end of this very cycle…
     assert [e.id for e in store._staged_queue] == ["review:o/r#3"]
-    # …and the first refusal ends the drain, because every entry behind it would be
-    # priced against the same windows and get the same answer. The untried one is
+    # …and the first refusal ends the drain for the entries behind it in its currency,
+    # because each would be priced against the same windows and get the same answer. The untried one is
     # still on the list its own monitor will re-offer.
     assert [e.id for e in store.queued_tasks] == ["review:o/r#4"]
 

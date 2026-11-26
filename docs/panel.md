@@ -132,7 +132,7 @@ bays.
 
 Five things hold work. The cap holds what there is no slot for, and releases it as
 slots free. The [free-disk floor](automation.md#the-free-disk-floor) holds everything
-while the disk agents write to is nearly full. The [spending budget](automation.md#the-spending-budget) holds everything when the account is
+while the disk agents write to is nearly full. The [spending budget](automation.md#the-spending-budget) holds everything priced in an account
 too low to afford another agent, and releases it when a window refills or the
 balance is topped up. A
 **monitor you switched off** holds its own work indefinitely: it keeps polling and

@@ -1486,18 +1486,22 @@ enum PipelineTest {
         // right behind it, priced in money, is still tried (a banned author's, so none spawns).
         let bans = scratch.appendingPathComponent("bans/banned.json")
         try? Data(#"{"banned":[{"login":"mallory","reason":"prompt injection"}]}"#.utf8).write(to: bans)
-        let behind = Store.QueuedAgentTask(
-            id: AgentTaskQueue.key(auditAction: AgentTaskQueue.reviewAction, item: "o/r#90022"),
-            job: Store.AgentJob(kind: AgentTaskQueue.reviewAction, auditAction: AgentTaskQueue.reviewAction,
-                                label: "Review · #90022", prompt: "", prURL: "https://github.com/o/r/pull/90022",
-                                prNumber: 90022, authorLogin: "mallory", counter: nil),
-            attemptNumber: 1)
+        func queuedReview(_ n: Int, by author: String) -> Store.QueuedAgentTask {
+            Store.QueuedAgentTask(
+                id: AgentTaskQueue.key(auditAction: AgentTaskQueue.reviewAction, item: "o/r#\(n)"),
+                job: Store.AgentJob(kind: AgentTaskQueue.reviewAction, auditAction: AgentTaskQueue.reviewAction,
+                                    label: "Review · #\(n)", prompt: "", prURL: "https://github.com/o/r/pull/\(n)",
+                                    prNumber: n, authorLogin: author, counter: nil),
+                attemptNumber: 1)
+        }
+        let behind = queuedReview(90022, by: "mallory")
         store.queuedTasks.insert(behind, at: 1)
         let runner = AppConfig.agentRunner.rawValue
         _ = AppConfig.set(AppConfig.agentRunnerKey, AgentRunner.hermes.rawValue)
         AutoBudget.pinForSelfTest(AgentDispatchGate.Budget(affordable: true), claude: false)
-        AutoBudget.pinForSelfTest(AgentDispatchGate.Budget(affordable: false, window: AgentDispatchGate.windowWeek,
-                                                           left: 1, needed: 5, measured: true), claude: true)
+        let spent = AgentDispatchGate.Budget(affordable: false, window: AgentDispatchGate.windowWeek,
+                                             left: 1, needed: 5, measured: true)
+        AutoBudget.pinForSelfTest(spent, claude: true)
         await store.drainQueuedTasks(snaps: [], closed: [])
         try? FileManager.default.removeItem(at: bans)
         store.queuedTasks.removeAll { $0.id == behind.id }
@@ -1508,9 +1512,29 @@ enum PipelineTest {
         store.offerRequestedWork()
         store.commitQueue()
         await store.drainQueuedTasks(snaps: [], closed: [])
+        check("…one line for the episode, whatever the money budget says", feed("no-budget").count == budgetLines + 1)
+        // A task leaves the queue when the drain tries it.
+        store.offerRequestedWork()
+        store.commitQueue()
+        store.queuedTasks.insert(queuedReview(90023, by: "alice"), at: 0)
+        AutoBudget.pinForSelfTest(spent, claude: false)
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        check("…and a spent balance one of its own, holding no rating dragged behind its work",
+              feed("no-budget").count == budgetLines + 2 && !ids().contains(rateKey))
+        _ = AppConfig.set(AppConfig.agentRunnerKey, AgentRunner.claude.rawValue)
+        store.offerRequestedWork()
+        store.commitQueue()
+        let offered = queuedReview(90024, by: "alice"), answerWas = store.networkAnswered
+        store.queuedTasks.append(offered)
+        store.networkEnabled = true
+        store.networkAnswered = false
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        store.networkEnabled = false
+        store.networkAnswered = answerWas
         AutoBudget.resetCache()
         _ = AppConfig.set(AppConfig.agentRunnerKey, runner)
-        check("…one line for the episode, whatever the money budget says", feed("no-budget").count == budgetLines + 1)
+        check("…nor, Claude Code selected and the network on, an offer behind a rating",
+              !ids().contains(rateKey) && !ids().contains(offered.id))
         store.offerRequestedWork()
         store.commitQueue()
         check("…each leaving it queued", ids() == [rateKey])
