@@ -173,9 +173,12 @@ async function launch(runId, peer, { script = null, env = {}, prompt = 'Do nothi
   if (script !== null) {
     const bin = path.join(container.runsDir, 'bin');
     fs.mkdirSync(bin, { recursive: true });
-    fs.writeFileSync(path.join(bin, 'claude'), STAND_IN, { mode: 0o755 });
-    fs.writeFileSync(path.join(bin, 'reach.py'), REACH);
-    fs.writeFileSync(path.join(bin, 'fwd.js'), FWD);
+    // Renamed into place: a job beside this one may be starting the stand-in, and an exec
+    // of a file open for writing fails, sending its runner down PATH to the image's claude.
+    for (const [name, text, mode] of [['claude', STAND_IN, 0o755], ['reach.py', REACH, 0o644], ['fwd.js', FWD, 0o644]]) {
+      fs.writeFileSync(path.join(bin, `.${name}.${runId}`), text, { mode });
+      fs.renameSync(path.join(bin, `.${name}.${runId}`), path.join(bin, name));
+    }
     fs.writeFileSync(path.join(bin, `${runId}.sh`), STEPS + script);
     env = { ...env, PATH: '/dn/runs/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' };
   }
@@ -186,8 +189,15 @@ async function launch(runId, peer, { script = null, env = {}, prompt = 'Do nothi
   const outcome = watch(job).finally(() => { release(); broker.removeJob(runId); return containers.release({ name: container.name, runId }); });
   const out = (name) => fs.readFileSync(path.join(started.dir, `out-${name}.txt`), 'utf8').trim();
   const steps = () => Object.fromEntries(fs.readFileSync(path.join(started.dir, 'out-steps.txt'), 'utf8').trim().split('\n').map((l) => [l.split(' ')[0], Number(l.split(' ')[1])]));
-  return { run: job, container, proxy, dir: started.dir, group: started.pid, outcome, out, steps };
+  const launched = { run: job, container, proxy, dir: started.dir, group: started.pid, outcome, out, steps, ended: null };
+  outcome.then((o) => { launched.ended = o; }, () => {});
+  return launched;
 }
+// Whether a job's step has begun; a job that ended before it fails the check at once.
+const begun = (job, step) => {
+  assert.equal(job.ended, null, `${job.run.runId} ended before its step ${step}: ${JSON.stringify(job.ended)}`);
+  return fs.existsSync(path.join(job.dir, `out-${step}.txt`));
+};
 const unreached = (out) => out.split('\n').filter((l) => !/: no \(/.test(l));
 // A place in a pair's container, as a job that is still running has: the container stays
 // to be looked at when the jobs beside it are over. Resolves to what gives the place up.
@@ -432,7 +442,7 @@ step where "echo \\$DN_FORWARD_ECHO; hostname -i"
 step wait "while [ ! -f /dn/runs/$DN_RUN_ID/go ]; do sleep 0.2; done"
 exit 0
 ` });
-    await until('the owner waits', () => fs.existsSync(path.join(owner.dir, 'out-wait.txt')));
+    await until('the owner waits', () => begun(owner, 'wait'));
     assert.equal(owner.out('forward'), 'echo:ping', 'the job it was opened for uses it');
     const [helper, ownerIp] = owner.out('where').split('\n');
     assert.match(helper, /^127\.0\.0\.1:\d+$/);
@@ -488,7 +498,7 @@ exit 0
     const goes = await launch('goes', PEER_A, { script: `sleep 601 &\n${waiting}` });
     assert.equal(stays.container.name, tools.container.name, 'the first job\'s container again');
     assert.equal(goes.container.name, stays.container.name);
-    await until('both scripts run', () => fs.existsSync(path.join(stays.dir, 'out-wait.txt')) && fs.existsSync(path.join(goes.dir, 'out-wait.txt')));
+    await until('both scripts run', () => begun(stays, 'wait') && begun(goes, 'wait'));
     assert.ok(await groupAlive(stays) && await groupAlive(goes));
     const sleeping = async (n) => Number(await sh('exec', stays.container.name, 'sh', '-c', `pgrep -c -f "sleep 60[${n}]" || true`));
     assert.deepEqual([await sleeping(1), await sleeping(2)], [1, 1]);
@@ -572,7 +582,7 @@ echo planted > "$out/out-planted.txt"
 while [ ! -f "$out/go" ]; do /usr/bin/sleep 0.2; done
 exit 0
 ` });
-    await until('the first job has planted', () => fs.existsSync(path.join(plants.dir, 'out-planted.txt')));
+    await until('the first job has planted', () => begun(plants, 'planted'));
     const beside = await launch('beside', PEER_C, { script: 'exit 0\n' });
     assert.equal(beside.container.name, plants.container.name);
     assert.equal((await beside.outcome).ok, true);
