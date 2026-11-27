@@ -1193,7 +1193,7 @@ enum NetworkTest {
               [NetworkAudit.offer, NetworkAudit.claimed, NetworkAudit.done,
                NetworkAudit.withdraw, NetworkAudit.join, NetworkAudit.invite,
                NetworkAudit.leave, NetworkAudit.start, NetworkAudit.stop]
-                .allSatisfy { AuditRow.icon(for: $0) == "point.3.connected.trianglepath.dotted" }
+                .allSatisfy { AuditRow.icon(for: $0) == "globe" }
                 && [NetworkAudit.failed, NetworkAudit.unavailable]
                     .allSatisfy { AuditRow.icon(for: $0) == "exclamationmark.triangle.fill" }
                 && AuditRow.icon(for: "network-unheard-of") == "circle.fill")

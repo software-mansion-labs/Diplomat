@@ -961,7 +961,7 @@ func networkSmoke() throws {
     check(AuditCategory.displayOrder.firstIndex(of: .network)
           == AuditCategory.displayOrder.firstIndex(of: .comms)! + 1
           && AuditCategory.network.title == "Network"
-          && AuditCategory.network.symbol == "point.3.connected.trianglepath.dotted",
+          && AuditCategory.network.symbol == "globe",
           "the Network chip sits after Comms")
     print("network assertions passed")
 }

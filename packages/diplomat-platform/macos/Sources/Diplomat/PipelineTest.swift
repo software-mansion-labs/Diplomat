@@ -77,7 +77,7 @@ enum PipelineTest {
         check("Fast-track my PRs names only a PR closing only candidate issues, rated while it is on",
               SettingsView.pipelineFastTrackSummary
                   == "Labels diplomat:fast-track each low/low PR of yours that closes a candidate issue, "
-                  + "and reviews it until clean"
+                  + "or that you take over, and reviews it until clean"
                   && SettingsView.pipelineFastTrackDetail.hasPrefix(
                       "Only your own PRs from the repo itself into its default branch that close only "
                           + "candidate issues: the fixes the pipeline asks for.")
@@ -542,20 +542,44 @@ enum PipelineTest {
         await Task.yield()
         check("Rate now and Fracture are kept once each",
               store.pipelineForce == PipelineSettings.Force(rate: [pr], fracture: [issue]))
+        store.forcePipeline(takeover: linear)
+        store.forcePipeline(revoke: pr)
+        store.forcePipeline(takeover: issue)
+        store.forcePipeline(takeover: issue)
+        store.forcePipeline(revoke: linear)
+        store.forcePipeline(takeover: pr)
+        await Task.yield()
+        let forced = PipelineSettings.Force(rate: [pr], fracture: [issue], takeover: [issue, pr], revoke: [linear])
+        check("Authorize and Revoke takeover too, each dropping the other asked of the same item",
+              store.pipelineForce == forced)
+        check("…the revokes written where a running sync's merge reads them",
+              PipelineControl.read()?.revoke == [linear])
+        let pressed = store.pipelineForce
+        store.pipelineForce = PipelineSettings.Force(revoke: [issue])
+        store.restorePipelineRevokes()
+        check("…and asked again at launch, as a quit left them", store.pipelineForce.revoke == [issue, linear])
+        store.pipelineForce = pressed
         store.pipelineForce.rate.insert(linear, at: 0)
+        store.pipelineForce.takeover.insert(linear, at: 0)
+        store.pipelineForce.revoke.append(issue)
         check("…and handed on sorted, as the Linux store does",
-              store.pipelineSettings.force == PipelineSettings.Force(rate: [pr, linear], fracture: [issue]))
-        store.pipelineForce.rate.removeFirst()
+              store.pipelineSettings.force == PipelineSettings.Force(rate: [pr, linear], fracture: [issue],
+                                                                     takeover: [issue, pr, linear],
+                                                                     revoke: [issue, linear]))
+        store.pipelineForce = PipelineSettings.Force(revoke: [pr])
+        check("…a revoke alone too", store.pipelineSettings.force == PipelineSettings.Force(revoke: [pr]))
+        store.pipelineForce = forced
         store.pipelineEnabled = true
         Store.pipelineTickOverride = { settings in
             ticks.append(settings)
             store.pipelineForce.rate.append(linear)
+            store.pipelineForce.revoke.append(issue)
             return result([])
         }
         await store.runPipelineSyncOnce()
-        check("the sync is run with them", ticks.map(\.force) == [PipelineSettings.Force(rate: [pr], fracture: [issue])])
+        check("the sync is run with them", ticks.map(\.force) == [forced])
         check("…which it takes, leaving what was forced during it",
-              store.pipelineForce == PipelineSettings.Force(rate: [linear], fracture: []))
+              store.pipelineForce == PipelineSettings.Force(rate: [linear], revoke: [issue]))
         check("…and the master switch's settings", ticks.first.map { $0.rate && $0.fix && $0.roots.count == 1 } == true)
 
         print("\npipeline: syncs held")
@@ -652,10 +676,13 @@ enum PipelineTest {
         store.pipelineResult = result([])
 
         print("\npipeline: the screen's actions")
-        func at(_ stage: PipelineStage, _ kind: PipelineKind = .issue, writable: Bool = true) -> PipelineItem {
+        func at(_ stage: PipelineStage, _ kind: PipelineKind = .issue, writable: Bool = true,
+                state: String = "open", takenOver: Bool? = nil) -> PipelineItem {
             var i = item(issue, kind, author: "bob")
             i.stage = stage
             i.writable = writable
+            i.state = state
+            i.takenOver = takenOver
             return i
         }
         check("Fracture: a writable open issue not split yet, whose code can be read",
@@ -674,13 +701,15 @@ enum PipelineTest {
                   && !PipelineView.canStartFix(at(.candidate, writable: false))
                   && !PipelineView.canStartFix(at(.candidate, .pr)))
         func detail(_ it: PipelineItem? = nil, badge: Store.PipelineBadge? = nil, enabled: Bool = true,
-                    forcedRate: Bool = false, forcedFracture: Bool = false, ban: String? = nil,
+                    forcedRate: Bool = false, forcedFracture: Bool = false, forcedTakeover: Bool = false,
+                    forcedRevoke: Bool = false, ban: String? = nil,
                     banUnread: String? = nil, canStartFix: Bool = true) -> PipelineDetail {
             PipelineDetail(item: it ?? at(.candidate), events: [], badge: badge, enabled: enabled,
-                           forcedRate: forcedRate, forcedFracture: forcedFracture, ban: ban,
+                           forcedRate: forcedRate, forcedFracture: forcedFracture, forcedTakeover: forcedTakeover,
+                           forcedRevoke: forcedRevoke, ban: ban,
                            banUnread: banUnread, canRate: true, canFracture: true, canStartFix: canStartFix,
                            fixUnknown: "its fix is unknown", error: nil,
-                           rate: {}, fracture: {}, startFix: {}, close: {})
+                           rate: {}, fracture: {}, startFix: {}, takeover: {}, revoke: {}, close: {})
         }
         // A hold's text turns nothing off; the core's refusals do.
         var held = at(.candidate)
@@ -705,6 +734,7 @@ enum PipelineTest {
             ("a rate refused", detail(rateRefused), [false, true, true]),
             ("a split refused", detail(splitRefused), [true, false, true]),
             ("its fix unknown", detail(canStartFix: false), [true, true, false]),
+            ("a revoke asked", detail(forcedRevoke: true), [true, true, false]),
         ]
         let wrong = stops.filter { [$0.1.rateEnabled, $0.1.fractureEnabled, $0.1.fixEnabled] != $0.2 }.map(\.0)
         check("the detail's Rate now, Fracture and Start fix: each off only for what stops it"
@@ -721,6 +751,41 @@ enum PipelineTest {
                       == ["Rate it in a sync started now, ahead of every limit",
                           "Split it into low-complexity child issues in a sync started now",
                           "Queue its fix now, past its retry backoff"])
+        check("Authorize takeover: a writable open item, not taken over, unrated or a person's",
+              PipelineStage.allCases.filter { PipelineView.canTakeOver(at($0)) } == [.unrated, .human]
+                  && PipelineStage.allCases.filter { PipelineView.canTakeOver(at($0, .pr, state: "draft")) }
+                      == [.unrated, .human]
+                  && !PipelineView.canTakeOver(at(.human, writable: false))
+                  && !PipelineView.canTakeOver(at(.human, state: "closed"))
+                  && !PipelineView.canTakeOver(at(.unrated, .pr, state: "merged"))
+                  && !PipelineView.canTakeOver(at(.human, takenOver: true)))
+        var takeoverRefused = at(.human)
+        takeoverRefused.takeoverRefused = "an open PR fixes it"
+        let human = at(.human)
+        let takeoverStops: [(String, PipelineDetail, [Bool])] = [
+            ("nothing", detail(human), [true, true]),
+            ("the pipeline off", detail(human, enabled: false), [false, false]),
+            ("a takeover asked", detail(human, forcedTakeover: true), [false, true]),
+            ("a revoke asked", detail(human, forcedRevoke: true), [true, false]),
+            ("a ban", detail(human, ban: "@mallory is on the prompt-injection ban list"), [true, true]),
+            ("the ban list unread", detail(human, ban: unreadBans, banUnread: unreadBans), [false, true]),
+            ("a hold alone", detail(held), [true, true]),
+            ("a takeover refused", detail(takeoverRefused), [false, true]),
+        ]
+        let wrongTakeover = takeoverStops.filter { [$0.1.takeoverEnabled, $0.1.revokeEnabled] != $0.2 }.map(\.0)
+        check("the detail's Authorize and Revoke takeover: each off only for what stops it"
+                  + (wrongTakeover.isEmpty ? "" : " - wrong for \(wrongTakeover)"), wrongTakeover.isEmpty)
+        check("…each tooltip saying why: an unread ban list first, then the core's refusal, else what it does",
+              detail(takeoverRefused, ban: unreadBans, banUnread: unreadBans).takeoverTip == unreadBans
+                  && detail(takeoverRefused).takeoverTip == "an open PR fixes it"
+                  && detail(human).takeoverTip
+                      == "Hand it to Diplomat in a sync started now: a fix candidate whatever its rating or triage"
+                  && detail(at(.human, .pr)).takeoverTip
+                      == "Hand it to Diplomat in a sync started now: reviewed until clean and merged, whatever its rating or diff floor"
+                  && detail(at(.candidate, takenOver: true)).revokeTip
+                      == "Take it back from Diplomat in a sync started now"
+                  && detail(at(.fastTrack, .pr, takenOver: true)).revokeTip
+                      == "Take it back from Diplomat in a sync started now: off the fast track")
 
         print("\npipeline: connectors")
         func graph(_ cells: [(String, Int, Int)], _ edges: [(String, String, PipelineGraph.EdgeKind)])
@@ -845,14 +910,15 @@ enum PipelineTest {
         print("\npipeline: a sync's own result, and another's")
         clearQueue()
         store.savePipelineAttempts([:])
-        store.pipelineForce = PipelineSettings.Force(rate: [pr])
+        let waiting = PipelineSettings.Force(rate: [pr], takeover: [issue], revoke: [linear])
+        store.pipelineForce = waiting
         if let asked = store.pipelineAsk(review) { store.requestOne(asked) }
         let reviewLine = line(reviewKey)
         // Another sync held the lock: the core answers the last result, dated before this one began.
         Store.pipelineTickOverride = { _ in PipelineTickResult(at: Date().addingTimeInterval(-60), items: items) }
         await store.runPipelineSyncOnce()
         check("a stale result retires no force and withdraws no ask",
-              store.pipelineForce.rate == [pr] && ids() == [reviewKey])
+              store.pipelineForce == waiting && ids() == [reviewKey])
         // Held before any sync had a result: the core answers one dated at the epoch.
         store.pipelineResult = nil
         Store.pipelineTickOverride = { _ in
@@ -860,11 +926,11 @@ enum PipelineTest {
         }
         await store.runPipelineSyncOnce()
         check("…nor one dated at the epoch, which is not shown either",
-              store.pipelineForce.rate == [pr] && ids() == [reviewKey] && store.pipelineResult == nil)
+              store.pipelineForce == waiting && ids() == [reviewKey] && store.pipelineResult == nil)
         Store.pipelineTickOverride = { _ in result([]) }
         await store.runPipelineSyncOnce()
         check("…its own retires the forces it was handed and the asks it no longer owes",
-              store.pipelineForce.rate.isEmpty && ids().isEmpty && store.requestedWork.isEmpty)
+              store.pipelineForce.isEmpty && ids().isEmpty && store.requestedWork.isEmpty)
         check("…which the feed says",
               feed("queue-drop").last == "panel \(reviewLine) - the pipeline no longer owes it, not run")
         if let asked = store.pipelineAsk(review) { store.requestOne(asked) }
@@ -2314,13 +2380,15 @@ enum PipelineTest {
             guard let it, let result = store.pipelineResult else { return ["(not read)"] }
             let d = PipelineDetail(item: it, events: [], badge: store.pipelineBadges[Store.pipelineIdentity(it.id)],
                                    enabled: store.pipelineEnabled, forcedRate: store.pipelineForce.rate.contains(it.id),
-                                   forcedFracture: store.pipelineForce.fracture.contains(it.id), ban: store.pipelineBan(it),
+                                   forcedFracture: store.pipelineForce.fracture.contains(it.id),
+                                   forcedTakeover: store.pipelineForce.takeover.contains(it.id),
+                                   forcedRevoke: store.pipelineForce.revoke.contains(it.id), ban: store.pipelineBan(it),
                                    banUnread: store.pipelineBanUnread, canRate: store.pipelineCanRate(it),
                                    canFracture: PipelineView.canFracture(it, edges: result.graph.edges,
                                                                          rooted: store.pipelineRooted(it)),
                                    canStartFix: store.pipelineFixEffect(for: it) != nil,
                                    fixUnknown: store.pipelineFixUnknown(it), error: nil,
-                                   rate: {}, fracture: {}, startFix: {}, close: {})
+                                   rate: {}, fracture: {}, startFix: {}, takeover: {}, revoke: {}, close: {})
             return [d.canRate ? "Rate now \(d.rateEnabled ? "on" : "off"): \(d.rateTip)" : "no Rate now",
                     d.canFracture ? "Fracture \(d.fractureEnabled ? "on" : "off"): \(d.fractureTip)" : "no Fracture"]
         }

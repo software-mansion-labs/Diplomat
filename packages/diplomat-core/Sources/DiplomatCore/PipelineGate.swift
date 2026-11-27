@@ -158,8 +158,8 @@ public enum PipelineGate {
         public var foreignCommits: [String]
         /// Both of Diplomat's fast-track labels are on it.
         public var trackLabels: Bool
-        /// It closes an issue, and every one it closes is a candidate: within its root's limit
-        /// and one Diplomat may act on.
+        /// Every issue it closes is a candidate: within its root's limit or taken over, and one
+        /// Diplomat may act on; and it closes one, unless it is taken over itself.
         public var fixesCandidate: Bool
         /// The issues it would close that Diplomat did not read.
         public var closesUnwritable: [String]
@@ -185,6 +185,8 @@ public enum PipelineGate {
         public var unsignedCommits: Bool
         /// The `gh pr merge` flag it would merge with.
         public var mergeFlag: String
+        /// The operator took it over: neither its rating nor its diff floor holds it.
+        public var takenOver: Bool
 
         /// The fields after `ciState` default to what lets a PR merge.
         public init(state: String, author: String, isCrossRepository: Bool, baseRef: String,
@@ -196,7 +198,8 @@ public enum PipelineGate {
                     closesUnwritable: [String] = [], ciRan: Bool = true, wasReady: Bool = false,
                     mergeState: String = "CLEAN", behindBy: Int? = 0, mergeQueue: Bool = false, stopLabels: [String] = [],
                     requiredChecks: [String]? = [], passedChecks: Set<String> = [], baseRules: [String]? = [],
-                    unsignedCommits: Bool = false, mergeFlag: String = "--squash", limit: PipelineRating = .low) {
+                    unsignedCommits: Bool = false, mergeFlag: String = "--squash", takenOver: Bool = false,
+                    limit: PipelineRating = .low) {
             self.state = state
             self.author = author
             self.isCrossRepository = isCrossRepository
@@ -230,6 +233,7 @@ public enum PipelineGate {
             self.baseRules = baseRules
             self.unsignedCommits = unsignedCommits
             self.mergeFlag = mergeFlag
+            self.takenOver = takenOver
         }
     }
 
@@ -335,7 +339,7 @@ public enum PipelineGate {
             case .threads(let n): return "has \(n) unresolved review thread\(n == 1 ? "" : "s")"
             case .stopLabel(let label): return "carries the label \(label)"
             case .offTrack: return "lacks a fast-track label"
-            case .notAFix: return "closes no issue, or one that is not a candidate issue Diplomat may act on"
+            case .notAFix: return "closes no issue, or one that is not a candidate Diplomat may act on"
             case .closesUnwritable(let what): return "would close \(what), which Diplomat did not read or may not write to"
             case .rated(let r): return "rated \(pair(r)) on the tracker"
             case .floor(let r): return "its diff allows no less than \(pair(r))"
@@ -384,8 +388,8 @@ public enum PipelineGate {
         if let label = c.stopLabels.first { return .stopLabel(label) }
         if !c.trackLabels { return .offTrack }
         if let held = closes(c.fixesCandidate, c.closesUnwritable) { return held }
-        if c.rating?.fits(c.limit) != true { return .rated(c.rating) }
-        if !c.floor.fits(c.limit) { return .floor(c.floor) }
+        if !c.takenOver && c.rating?.fits(c.limit) != true { return .rated(c.rating) }
+        if !c.takenOver && !c.floor.fits(c.limit) { return .floor(c.floor) }
         if c.mergeable == "CONFLICTING" { return .conflicting }
         if c.mergeable != "MERGEABLE" || ["", "UNKNOWN"].contains(c.mergeState) { return .mergeabilityUnknown }
         // `--admin` merges a PR behind its base without testing it against the base; GitHub
