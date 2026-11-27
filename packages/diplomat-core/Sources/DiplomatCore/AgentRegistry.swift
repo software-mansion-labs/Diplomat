@@ -437,6 +437,7 @@ public enum AgentRegistry {
             "reapRefusedAt": r.reapRefusedAt.map { $0 as Any } ?? NSNull(),
             "untracked": r.untracked,
             "released": r.released,
+            "pipeline": r.pipeline,
         ]
         if let task = r.network { out["network"] = task }
         return out
@@ -460,7 +461,8 @@ public enum AgentRegistry {
             reapRefusedAt: number(d["reapRefusedAt"]),
             untracked: JSONInput.flag(d["untracked"]),
             released: JSONInput.flag(d["released"]),
-            network: (d["network"] as? String).flatMap { $0.isEmpty ? nil : $0 })
+            network: (d["network"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            pipeline: JSONInput.flag(d["pipeline"]))
     }
 
     // Python twin: `agentstate._number` / `_integer`. One rule, because the parsers

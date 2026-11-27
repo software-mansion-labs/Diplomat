@@ -425,6 +425,9 @@ class RunRecord:
     #: spawned here. Such a run has no pid, tty or window here: the daemon says what
     #: became of it (:attr:`Evidence.network`).
     network: str | None = None
+    #: Dispatched for one of the pipeline's own asks: only such a run answers the
+    #: pipeline's attempt records.
+    pipeline: bool = False
 
     @property
     def item(self) -> str | None:
@@ -449,7 +452,7 @@ class RunRecord:
             "ledgerKey": self.ledger_key, "pid": self.pid, "tty": self.tty,
             "quietDigest": self.quiet_digest, "quietSince": self.quiet_since,
             "reapRefusedAt": self.reap_refused_at, "untracked": self.untracked,
-            "released": self.released,
+            "released": self.released, "pipeline": self.pipeline,
         }
 
     @staticmethod
@@ -474,6 +477,7 @@ class RunRecord:
             untracked=_flag(obj.get("untracked")),
             released=_flag(obj.get("released")),
             network=_text(obj.get("network")) or None,
+            pipeline=_flag(obj.get("pipeline")),
         )
 
 

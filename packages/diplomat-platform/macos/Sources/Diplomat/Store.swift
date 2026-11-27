@@ -1954,7 +1954,7 @@ final class Store: ObservableObject {
     @discardableResult
     func spawnTracked(kind: String, label: String, prURL: String?, prNumber: Int?,
                       prompt: String, source: String, auditAction: String? = nil,
-                      ledgerKey: String = "", directory: String? = nil,
+                      ledgerKey: String = "", pipeline: Bool = false, directory: String? = nil,
                       terminal preferred: SpawnTerminal,
                       restoreFocusTo restoreBID: String? = nil) async throws -> SpawnTerminal {
         // Backstop for a caller that bypasses `dispatchAgent`'s network offer.
@@ -1963,7 +1963,8 @@ final class Store: ObservableObject {
         guard let record = AgentRegistry.createRun(
             AgentState.RunRecord(runID: AgentRegistry.newRunID(now: now), dispatchedAt: now,
                                  prNumber: prNumber, prURL: prURL ?? "", kind: kind,
-                                 label: label, source: source, ledgerKey: ledgerKey),
+                                 label: label, source: source, ledgerKey: ledgerKey,
+                                 pipeline: pipeline),
             prompt: prompt) else {
             throw AgentSpawner.SpawnError.write("could not register the run")
         }
@@ -4101,13 +4102,15 @@ final class Store: ObservableObject {
     /// the second dispatch would find the first agent still on it). That makes
     /// pressing SPAWN twice, or sweeping a scope that overlaps an earlier one,
     /// idempotent rather than a way to double up. Any other ask takes the place of a
-    /// Pipeline ask nothing has started, which the Pipeline's switches would withdraw or
-    /// pause, and its run answers none of the Pipeline's records (`pipelinePreempted`).
+    /// Pipeline ask nothing has started, here or on the network, which the Pipeline's
+    /// switches would withdraw or pause; the Pipeline's next ask for that item is a first
+    /// attempt (`pipelinePreempted`).
     private func request(_ asks: [RequestedWork]) -> (queued: Int, already: Int) {
         let starting = Set(startingTasks.map(\.id))
         let fresh = asks.filter { ask in
             guard let held = requestedWork.first(where: { $0.key == ask.key }) else { return true }
-            return held.config.isPipeline && !ask.config.isPipeline && !starting.contains(ask.key)
+            return held.config.isPipeline && held.offered.isEmpty && !ask.config.isPipeline
+                && !starting.contains(ask.key)
         }
         guard !fresh.isEmpty else { return (0, asks.count) }
         if !pipelineJudged { pipelineStale.formUnion(fresh.filter(\.config.isPipeline).map(\.key)) }
@@ -4847,9 +4850,9 @@ final class Store: ObservableObject {
             let opened = try await spawnTracked(
                 kind: job.kind, label: rowLabel, prURL: job.prURL, prNumber: job.prNumber,
                 prompt: job.prompt, source: source.rawValue, auditAction: job.auditAction,
-                ledgerKey: source == .auto ? job.ledgerKey : "", directory: job.directory,
-                terminal: terminal, restoreFocusTo: AgentDispatchGate.stealsFocus(source) ? nil
-                    : frontmostAppBundleID)
+                ledgerKey: source == .auto ? job.ledgerKey : "", pipeline: job.counter == .pipeline,
+                directory: job.directory, terminal: terminal,
+                restoreFocusTo: AgentDispatchGate.stealsFocus(source) ? nil : frontmostAppBundleID)
             bumpAutoCounter(job, source: source, attemptNumber: attemptNumber)
             recordTelemetryStart(job, source: source, attemptNumber: attemptNumber)
             await settleAgents()
@@ -5025,7 +5028,7 @@ final class Store: ObservableObject {
             runID: AgentRegistry.newRunID(now: now), dispatchedAt: now,
             prNumber: job.prNumber, prURL: job.prURL ?? "", kind: job.kind, label: rowLabel,
             source: source.rawValue, ledgerKey: source == .auto ? job.ledgerKey : "",
-            network: task)
+            network: task, pipeline: job.counter == .pipeline)
         guard AgentRegistry.createRun(record, prompt: job.prompt) != nil else {
             // An offer nothing here tracks is work nobody waits for.
             let body = NetworkRoute.withdrawBody(task: task,

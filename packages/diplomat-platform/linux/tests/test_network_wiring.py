@@ -38,6 +38,7 @@ from diplomat_runtime.prtarget import PRTarget
 from diplomat_app import audit, deviceallocator as da, issues
 from diplomat_app import diplomacynetwork as dn
 from diplomat_app import probes, procscan
+from diplomat_app.store import PIPELINE_COUNTER
 from test_autofix import (  # noqa: F401 - fixtures
     ROOT,
     _fixture_root,
@@ -904,10 +905,20 @@ def test_a_dispatch_is_one_offer_and_no_spawn(store, on, daemon, monkeypatch):
         "prompt": "PROMPT", "now": False, "options": {"verdict": False}}]
     (run,) = agentregistry.load()
     assert (run.network, run.pid, run.tty) == ("t1", None, "")
-    assert (run.label, run.source, run.ledger_key) == (
-        "Auto · Review · #9", autofix.SOURCE_AUTO, "review:o/r#9")
+    assert (run.label, run.source, run.ledger_key, run.pipeline) == (
+        "Auto · Review · #9", autofix.SOURCE_AUTO, "review:o/r#9", False)
     assert lines("network-offer") == ["Auto · Review · #9 - offered to github.com/o/r"]
     assert [(e["ev"], e["key"]) for e in ledger()] == [("started", "review:o/r#9")]
+
+
+def test_an_offered_pipeline_job_books_the_pipelines_run(store, on, daemon, monkeypatch):
+    """Whose report alone concludes the Pipeline's record (:func:`pipeline.concluded`)."""
+    daemon(takes_offers())
+    _spawn_recorder(monkeypatch)
+    pipelines = job(counter=PIPELINE_COUNTER, ledger_key="")
+    assert store.dispatch_agent(pipelines, autofix.SOURCE_AUTO, bypass_capacity=True) == "spawned"
+    (run,) = agentregistry.load()
+    assert (run.network, run.pipeline) == ("t1", True)
 
 
 def test_the_run_reads_where_it_is_as_the_snapshot_moves_and_is_priced_once(

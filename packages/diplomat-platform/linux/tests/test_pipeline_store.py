@@ -1998,7 +1998,7 @@ def test_a_new_head_after_an_ask_that_took_the_pipelines_place_waits_the_hour_fr
     assert [t.job.counter for t in pipe.queued_tasks] == [PIPELINE_COUNTER]
 
 
-def test_a_preempt_sets_only_its_items_open_record_to_no_attempts_which_no_run_concludes(pipe):
+def test_a_preempt_sets_only_its_items_open_record_to_no_attempts(pipe):
     same = "https://github.com/O/R/pull/7"
     attempts = {
         f"pipeline-review:{PR}": autofix.ReviewAttempt("abc123", 100.0, 2),
@@ -2008,13 +2008,74 @@ def test_a_preempt_sets_only_its_items_open_record_to_no_attempts_which_no_run_c
     }
     marked = pipeline.preempted(attempts, [pipe.pipeline_work(_review())])
     assert marked == {**attempts, f"pipeline-review:{PR}": autofix.ReviewAttempt("abc123", 100.0, 0)}
-    run = SimpleNamespace(kind="review", pr_url=PR, ledger_key="")
-    assert pipeline.concluded(marked, [run], 200.0) == marked
+
+
+@pytest.mark.parametrize("effect", [_review(), _fix()])
+def test_an_ask_the_network_carries_is_not_taken_over(pipe, effect):
+    """It has started: its run is the Pipeline's, and concludes its record."""
+    _sync(pipe, _result(effect))
+    [held] = pipe.requested_work
+    pipe._mark_offered(held.key, "task-1")
+    assert not pipe.request_one(_asked(effect))
+    assert pipe.requested_work == [dataclasses.replace(held, offered="task-1")]
+    assert pipe._load_attempts(PIPELINE_ATTEMPTS)[effect["key"]].attempts == 1
+
+
+def _died(pipe, monkeypatch, calls) -> None:
+    """The Pipeline's queued ask dispatched, and its run gone without reporting."""
+    pipe._execute_queued_task(pipe.queued_tasks[0])
+    with open(calls[-1]["done"], "w") as fh:
+        fh.write("0")
+    fake_probes(monkeypatch)
+    pipe._settle_agents()
+
+
+@pytest.mark.parametrize("effect, switch", [(_review(), "pipeline_fast_track"),
+                                            (_fix(), "pipeline_fix")])
+@pytest.mark.parametrize("gone", ["died", "switched off"])
+def test_another_askers_run_answers_none_of_an_open_record_the_pipeline_asks_nothing_for(
+        pipe, monkeypatch, effect, switch, gone):
+    """So the Pipeline asks for its own again on its ladder."""
+    calls = _spawn_recorder(monkeypatch)
+    _sync(pipe, _result(effect))
+    if gone == "died":
+        _died(pipe, monkeypatch, calls)
+    else:
+        setattr(pipe, switch, False)
+        setattr(pipe, switch, True)
+    assert (pipe.requested_work, pipe.queued_tasks) == ([], [])
+    other = _asked(effect)
+    assert pipe.request_one(other)
+    _report(pipe, monkeypatch, pipe.queued_tasks[0])
+    pipe._apply_pipeline_effects(_result(effect), time.time() + autofix.RETRY_MAX_BACKOFF)
+    assert [(t.id, t.job.counter) for t in pipe.queued_tasks] == [(other.key, PIPELINE_COUNTER)]
+
+
+@pytest.mark.parametrize("effect, job", [
+    (_review(), autofix.AgentJob(kind="review", audit_action="review", label="Review · #7 · deep",
+                                 prompt="p", pr_url=PR, pr_number=7)),
+    (_fix(), autofix.AgentJob(kind="issues", audit_action="issues", label="Issues · #12 · deep",
+                              prompt="p", pr_url=ISSUE))])
+def test_a_run_started_by_hand_answers_none_of_the_pipelines_records(
+        pipe, monkeypatch, effect, job):
+    """A wizard's, after the Pipeline's own run died: the Pipeline still asks for its own."""
+    from diplomat_runtime import agentregistry
+
+    calls = _spawn_recorder(monkeypatch)
+    _sync(pipe, _result(effect))
+    _died(pipe, monkeypatch, calls)
+    assert pipe.dispatch_agent(job, autofix.SOURCE_PANEL) == "spawned"
+    (run,) = agentregistry.load()
+    fake_probes(monkeypatch, activity={run.run_id: ("idle", time.time() - 5)})
+    pipe._settle_agents()
+    assert agentregistry.load() == [], "the run must retire, or this pins nothing"
+    pipe._apply_pipeline_effects(_result(effect), time.time() + autofix.RETRY_MAX_BACKOFF)
+    assert [t.job.counter for t in pipe.queued_tasks] == [PIPELINE_COUNTER]
 
 
 def test_another_askers_fix_beside_the_pipelines_running_one_asks_for_no_third(pipe, monkeypatch):
-    """A fix is no PR's, so the gate lets the other start while the Pipeline's runs. That
-    takes no ask's place, so a run concludes the Pipeline's record."""
+    """A fix is no PR's, so the gate lets the other start while the Pipeline's runs, whose
+    report concludes the Pipeline's record."""
     from diplomat_runtime import agentregistry
 
     _spawn_recorder(monkeypatch)
@@ -2167,8 +2228,8 @@ def test_with_no_last_result_only_this_syncs_events_are_new(pipe):
 # MARK: - Which runs answer which records
 
 
-def _run(kind: str, url: str, ledger_key: str = "") -> SimpleNamespace:
-    return SimpleNamespace(kind=kind, pr_url=url, ledger_key=ledger_key)
+def _run(kind: str, url: str, pipeline: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(kind=kind, pr_url=url, pipeline=pipeline)
 
 
 def _attempt(concluded=None) -> autofix.ReviewAttempt:
@@ -2203,10 +2264,11 @@ def test_a_run_concludes_its_items_record_keyed_by_another_link_to_it():
     assert out[key].concluded_at == 500.0
 
 
-def test_a_monitors_run_on_the_pr_concludes_no_record():
+def test_a_run_the_pipeline_did_not_dispatch_concludes_no_record():
+    """A monitor's, another asker's or one started by hand."""
     attempts = {f"pipeline-review:{PR}": _attempt()}
-    reply = _run(autofix.QUEUE_REVIEW_ACTION, PR, ledger_key=f"review-reply:{PR}@aaa111")
-    assert pipeline.concluded(attempts, [reply], 500.0) == attempts
+    run = _run(autofix.QUEUE_REVIEW_ACTION, PR, pipeline=False)
+    assert pipeline.concluded(attempts, [run], 500.0) == attempts
 
 
 def test_a_concluded_record_is_not_dated_again_by_a_spawn():

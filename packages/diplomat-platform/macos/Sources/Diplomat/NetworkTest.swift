@@ -595,7 +595,7 @@ enum NetworkTest {
         check("the run is booked with the task id and no pid, tty or window",
               first != nil && first?.pid == nil && first?.tty == ""
                 && first?.label == "Auto · Review-req · #90210"
-                && first?.ledgerKey == ledgerKey(90210)
+                && first?.ledgerKey == ledgerKey(90210) && first?.pipeline == false
                 && AgentRegistry.load().count == 1)
         check("…logged as network-offer", feedDetails(NetworkAudit.offer).count == 1)
         check("…and its telemetry entry is opened once",
@@ -1560,6 +1560,8 @@ enum NetworkTest {
         check("the pipeline's asks are offered and stand, marked",
               requests(NetworkRoute.offer).count == offersPiped + 3
                 && store.requestedWork.map(\.number) == [0, 90301, 90302] && !piped.contains(""))
+        let pipedRuns = AgentRegistry.load().filter { piped.contains($0.network ?? "") }
+        check("…each run booked as the pipeline's", pipedRuns.count == 3 && pipedRuns.allSatisfy(\.pipeline))
         script.set(snapshot(offers: [offerRow(piped[0], "claimed", executor: away),
                                      offerRow(piped[1], "claimed", executor: away),
                                      offerRow(piped[2], "done", executor: away,
