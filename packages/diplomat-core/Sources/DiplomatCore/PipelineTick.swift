@@ -644,9 +644,11 @@ final class PipelineSync {
         return PipelineRating(risk: risk, complexity: complexity)
     }
 
-    /// The rating kept for `e`, raised by its labels; else theirs, when they rate both.
+    /// The rating kept for `e`, raised by its labels; else theirs, when they rate both. A PR's
+    /// left pending at a head it has since left is none: it is rated again there.
     func rating(_ e: PipelineEntry) -> PipelineRating? {
-        cache[e.id].map { atLeastLabels($0.rating, e.labels) } ?? labelRating(e.labels)
+        cache[e.id].flatMap { $0.pending == true && $0.head != head(e) ? nil : atLeastLabels($0.rating, e.labels) }
+            ?? labelRating(e.labels)
     }
 
     /// Each dimension wears `r`'s label and no other.
@@ -1196,11 +1198,11 @@ final class PipelineSync {
     }
 
     /// Finishes the rating kept pending for `entries[i]`, never lower than the labels on it
-    /// now, with no new rating asked for. A PR's is dropped once it was pushed to, or its diff at
-    /// the head this sync read allows less.
+    /// now, with no new rating asked for. A PR's is dropped once its diff at the head this sync
+    /// read allows less, and left as it is at a head the PR has left.
     func finish(_ i: Int) {
         let id = entries[i].id
-        guard let kept = cache[id]?.rating, may(.rate) else { return }
+        guard let kept = cache[id]?.rating, cache[id]?.head == head(entries[i]), may(.rate) else { return }
         let head = entries[i].item.headSha
         guard recheck(i), entries[i].item.headSha == head else { return failed(id) }
         guard stops(entries[i]).isEmpty else { return }
@@ -1213,10 +1215,6 @@ final class PipelineSync {
             guard rating.atLeast(floor) == rating else {
                 cache[id] = nil
                 notice("\(entries[i].item.label): the rating kept for it is below what its diff allows now, so it was dropped")
-                return persist()
-            }
-            guard cache[id]?.head == head else {
-                cache[id] = nil
                 return persist()
             }
         }
@@ -1328,7 +1326,8 @@ final class PipelineSync {
             (said, why) = answer
         }
         state.retry[e.id] = nil
-        let fresh = cache[e.id] == nil
+        // None kept, or a first one still pending.
+        let fresh = cache[e.id].map { $0.pending == true && $0.first == true } ?? true
         // Never below its labels, nor the rating kept for it before.
         var rating = atLeastLabels(said.atLeast(cache[e.id]?.rating ?? said), e.labels)
         var detail = describe(rating) + (why.isEmpty ? "" : ": " + why)
@@ -1344,7 +1343,7 @@ final class PipelineSync {
                 + (why.isEmpty ? "" : ": " + why)
         }
         let allowed = e.item.writable && may(step) && banHold(e) == nil
-        let first = allowed && fresh && e.item.kind == .pr && settings.fastTrack
+        let first = allowed && fresh && e.item.kind == .pr && may(.fastTrack)
         // Saved before what it leads to: a sync stopped there does not ask again.
         record(i, rating, why, detail, head: head, again: again, pending: allowed, first: first)
         guard allowed else { return }
@@ -1398,7 +1397,7 @@ final class PipelineSync {
         guard e.item.kind == .pr, settings.fastTrack, rating.isFastTrack, cache[e.id]?.first == true,
               fixesCandidate(e) else { return }
         if let h = closesHold(e) {
-            let why = "off the fast track: it " + h.message
+            let why = "off the fast track until taken over: at its first rating it " + h.message
             log(e.id, .held, why)
             state.keptOff[e.id] = why
             persist()

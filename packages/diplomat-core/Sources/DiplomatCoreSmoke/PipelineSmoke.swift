@@ -2783,16 +2783,17 @@ private func pipelineJudged(base: URL, root: PipelineSettings.Root, team: Pipeli
           && stageOf(unreadMethods.result, prURL(13)) == "cleared/fast (the rules on its base branch could not be read)",
           "merge methods a rule allows: \(ruled.writes) \(stageOf(noMethod.result, prURL(13))) \(stageOf(unreadMethods.result, prURL(13)))")
 
-    // A rating left pending, as its PR was pushed to before the rating was applied, is
-    // finished only where the diff at the head allows it.
+    // A rating left pending, as its PR was not read again when the rating was applied, is
+    // finished only where the diff at its head allows it, as a moved base branch may change.
     let keptRating = only([11, 4])
     keptRating.onItem = { _ in
         keptRating.onItem = nil
-        keptRating.prs[0].head = sha("a2")
-        keptRating.prs[0].files = [("src/a.swift", 40, 0, "MODIFIED"), ("tests/aTests.swift", 5, 0, "MODIFIED")]
+        keptRating.ghFails = true
     }
     let rateTrack = PipelineSettings(roots: [root], rate: true, fastTrack: true)
     let k0 = sync(keptRating, rateTrack, dir("kept-floor"), t0)
+    keptRating.ghFails = false
+    keptRating.prs[0].files = [("src/a.swift", 40, 0, "MODIFIED"), ("tests/aTests.swift", 5, 0, "MODIFIED")]
     let kf = sync(keptRating, rateTrack, dir("kept-floor"), later(5))
     check(k0.writes.isEmpty && kf.writes.isEmpty
           && kf.result.notices.contains("#11: the rating kept for it is below what its diff allows now, so it was dropped"),
@@ -4879,14 +4880,15 @@ private func pipelinePins9(base: URL, root: PipelineSettings.Root, team: Pipelin
     try ban([])
 
     let rateTrack = PipelineSettings(roots: [root], rate: true, fastTrack: true)
-    /// Pushed to before its rating was applied: the rating waits for a sync that reads it again.
+    /// Not read again as its rating was applied: the rating waits for a sync that reads it again.
     func kept(_ name: String) -> Trackers {
         let t = only([4, 11])
         t.onItem = { _ in
             t.onItem = nil
-            t.prs[0].head = sha("b1")
+            t.ghFails = true
         }
         _ = sync(t, rateTrack, dir(name), t0)
+        t.ghFails = false
         return t
     }
     let moved = kept("kept-head-moved")
@@ -5791,9 +5793,9 @@ private func pipelineRatingPass1(base: URL, root: PipelineSettings.Root, team: P
     }
     let p1 = sync(pushed, rateTrack, dir("pushed"), t0)
     let p2 = sync(pushed, rateTrack, dir("pushed"), later(5))
-    check(p1.writes.isEmpty && p1.result.effects.isEmpty && pushed.prs[0].labels.isEmpty && p2.writes.isEmpty
-          && p2.result.notices.contains("#11: the rating kept for it is below what its diff allows now, so it was dropped"),
-          "pushed to as it was rated: \(p1.writes) \(p1.result.effects) then \(p2.writes) \(p2.result.notices)")
+    check(p1.writes.isEmpty && p1.result.effects.isEmpty && p2.claude == ["opus Fix the docs link"]
+          && p2.writes == ["label risk:high exists", "+risk:high #11", "+complexity:low #11"] && p2.result.effects.isEmpty,
+          "pushed to as it was rated: \(p1.writes) \(p1.result.effects) then \(p2.claude) \(p2.writes)")
 
     // A first rating whose labels went on in part puts the PR on the fast track at once; one
     // refused goes on at the next sync.
@@ -6134,6 +6136,33 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
               "rated with Fast track off, \(what) as it was applied: \(s1.writes) then \(s2.writes) "
                 + stageOf(s2.result, prURL(11)))
     }
+    // Fast track switched off as it was rated, held by a stop label: a person's once it is on.
+    let live = fix()
+    var mirrored = rateTrack
+    (mirrored.mirrorGitHub, mirrored.mirrorLinear, mirrored.mirrorScope) = (true, true, .all)
+    var off = PipelineControl(settings: mirrored)
+    off.fastTrack = false
+    live.onClaude = { _ in
+        live.onClaude = nil
+        off.save(in: dir("live-off"))
+    }
+    applying(live) { $0.prs[0].labels = ["wip"] }
+    _ = sync(live, rateTrack, dir("live-off"), t0)
+    PipelineControl(settings: mirrored).save(in: dir("live-off"))
+    live.prs[0].labels = []
+    let lv = sync(live, rateTrack, dir("live-off"), later(5))
+    check(lv.claude.isEmpty && lv.writes == ["+risk:low #11", "+complexity:low #11"] && lv.result.effects.isEmpty
+          && stageOf(lv.result, prURL(11)) == "human/human",
+          "Fast track switched off as it was rated: \(lv.writes) \(stageOf(lv.result, prURL(11)))")
+    // Rated with it on, held by a stop label, finished with it off: a person's, with no hold.
+    let late = fix()
+    applying(late) { $0.prs[0].labels = ["wip"] }
+    _ = sync(late, rateTrack, dir("on-held-off"), t0)
+    late.prs[0].labels = []
+    let lo = sync(late, rateOnly, dir("on-held-off"), later(5))
+    check(lo.claude.isEmpty && lo.writes == ["+risk:low #11", "+complexity:low #11"] && lo.result.effects.isEmpty
+          && stageOf(lo.result, prURL(11)) == "human/human",
+          "rated with Fast track on, finished with it off: \(lo.writes) \(stageOf(lo.result, prURL(11)))")
     // Rated with it on, held by a stop label as it was applied: still its first rating.
     let stopped = fix()
     applying(stopped) { $0.prs[0].labels = ["wip"] }
@@ -6143,19 +6172,78 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
     check(st1.writes.isEmpty && st2.claude.isEmpty && st2.writes == tracked && st2.result.effects == [reviewFX(11, sha("a1"))],
           "rated with Fast track on, held by a stop label: \(st1.writes) then \(st2.writes)")
 
-    // Pushed to as its rating is applied, inside its floor: no label at the new head before a
-    // rating there, which decides the fast track.
+    // Pushed to as its rating is applied, inside its floor: rated again at the new head, at its
+    // first rating only if the one it replaces was.
     for (what, first) in [("on", rateTrack), ("off", rateOnly)] {
         let t = fix()
         applying(t) { $0.prs[0].head = sha("a2") }
         let p1 = sync(t, first, dir("pushed-" + what), t0)
         let p2 = sync(t, rateTrack, dir("pushed-" + what), later(5))
         let p3 = sync(t, rateTrack, dir("pushed-" + what), later(10))
-        check(p1.claude == ["opus Fix the docs link"] && (p1.writes + p2.writes).isEmpty && p2.result.effects.isEmpty
-              && p3.claude == ["opus Fix the docs link"] && p3.writes == tracked && p3.result.effects == [reviewFX(11, sha("a2"))],
-              "pushed to as it was applied, Fast track \(what): \(p1.writes) then \(p2.writes) \(p2.claude) "
-                + "then \(p3.claude) \(p3.writes)")
+        let track = first.fastTrack
+        check(p1.claude == ["opus Fix the docs link"] && p1.writes.isEmpty && p2.claude == p1.claude
+              && p2.writes == (track ? tracked : ["+risk:low #11", "+complexity:low #11"])
+              && p2.result.effects == (track ? [reviewFX(11, sha("a2"))] : []) && p3.claude.isEmpty && p3.writes.isEmpty
+              && stageOf(p3.result, prURL(11)) == (track ? "fast-track/fast" : "human/human"),
+              "pushed to as it was applied, Fast track \(what): \(p1.writes) then \(p2.claude) \(p2.writes) "
+                + "then \(p3.writes) \(stageOf(p3.result, prURL(11)))")
     }
+    // Rated medium/low, pushed to as that was applied: rated again at the new head, never lower,
+    // whether asked for or not.
+    for forced in [false, true] {
+        let t = fix()
+        t.ratings["Fix the docs link"] = ["risk": "medium", "complexity": "low", "why": "w"]
+        applying(t) { $0.prs[0].head = sha("a2") }
+        _ = sync(t, rateTrack, dir("medium-pushed-\(forced)"), t0)
+        t.ratings["Fix the docs link"] = ["risk": "low", "complexity": "low", "why": "a link and its test"]
+        var s = rateTrack
+        if forced { s.force = .init(rate: [prURL(11)]) }
+        let mp = sync(t, s, dir("medium-pushed-\(forced)"), later(5))
+        check(mp.claude == ["opus Fix the docs link"]
+              && mp.writes == ["label risk:medium exists", "+risk:medium #11", "+complexity:low #11"]
+              && mp.result.effects.isEmpty && stageOf(mp.result, prURL(11)) == "human/human",
+              "rated medium/low, pushed to, Rate now \(forced): \(mp.claude) \(mp.writes) \(stageOf(mp.result, prURL(11)))")
+    }
+    // A pending rating saved with no head, as before heads were kept: rated again before
+    // anything it leads to.
+    try FileManager.default.createDirectory(at: dir("headless"), withIntermediateDirectories: true)
+    try json([prURL(11): ["rating": ["risk": "low", "complexity": "low"], "why": "", "pending": true, "first": true]])
+        .write(to: dir("headless").appendingPathComponent("ratings.json"))
+    let headless = fix()
+    headless.ratings["Fix the docs link"] = ["risk": "medium", "complexity": "low", "why": "w"]
+    let hl = sync(headless, rateTrack, dir("headless"), t0)
+    check(hl.claude == ["opus Fix the docs link"]
+          && hl.writes == ["label risk:medium exists", "+risk:medium #11", "+complexity:low #11"]
+          && hl.result.effects.isEmpty && stageOf(hl.result, prURL(11)) == "human/human",
+          "a pending rating with no head: \(hl.claude) \(hl.writes) \(stageOf(hl.result, prURL(11)))")
+    // Rated with Fast track off, held by a stop label as it was applied, pushed to meanwhile:
+    // rated again at the new head once the label is off, still a person's.
+    let held = fix()
+    applying(held) { $0.prs[0].labels = ["wip"] }
+    _ = sync(held, rateOnly, dir("off-held-pushed"), t0)
+    held.prs[0].head = sha("a2")
+    _ = sync(held, rateTrack, dir("off-held-pushed"), later(5))
+    held.prs[0].labels = []
+    let hp = (1...2).map { sync(held, rateTrack, dir("off-held-pushed"), later(Double(5 + 5 * $0))) }
+    check(hp.flatMap(\.claude) == ["opus Fix the docs link"] && hp.flatMap(\.writes) == ["+risk:low #11", "+complexity:low #11"]
+          && hp.allSatisfy { $0.result.effects.isEmpty && stageOf($0.result, prURL(11)) == "human/human" },
+          "rated with Fast track off, held, pushed to: \(hp.map(\.claude)) \(hp.map(\.writes)) "
+            + "\(hp.map { stageOf($0.result, prURL(11)) })")
+    // Rated medium/low with it on, Rate now's low/low left pending as the PR is not read again,
+    // pushed to before the next sync: rated again at the new head, never lower, still a person's.
+    let rerated = fix()
+    rerated.ratings["Fix the docs link"] = ["risk": "medium", "complexity": "low", "why": "w"]
+    _ = sync(rerated, rateTrack, dir("rate-now-pushed"), t0, mirror: nil)
+    rerated.ratings["Fix the docs link"] = ["risk": "low", "complexity": "low", "why": "a link and its test"]
+    var rateNow = rateTrack
+    rateNow.force = .init(rate: [prURL(11)])
+    applying(rerated) { $0.ghFails = true }
+    _ = sync(rerated, rateNow, dir("rate-now-pushed"), later(5), mirror: nil)
+    (rerated.ghFails, rerated.prs[0].head) = (false, sha("a2"))
+    let rp = (1...3).map { sync(rerated, rateTrack, dir("rate-now-pushed"), later(Double(5 + 5 * $0)), mirror: nil) }
+    check(rp.flatMap(\.claude) == ["opus Fix the docs link"] && rp.allSatisfy { $0.writes.isEmpty && $0.result.effects.isEmpty }
+          && item(rp[2].result, prURL(11))?.rating == rating(.medium, .low) && stageOf(rp[2].result, prURL(11)) == "human/human",
+          "Rate now left pending, pushed to: \(rp.map(\.claude)) \(rp.map(\.writes)) \(stageOf(rp[2].result, prURL(11)))")
 
     // Kept off the fast track at its first rating for closing what no read judged, for good,
     // with a hold saying so, logged once; closing nothing is no hold.
@@ -6163,7 +6251,8 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
     lib.others[40] = ("Lib bug", "OPEN", "acme/lib")
     lib.prs[0].closes = [4, 40]
     for (what, t, unread) in [("lib", lib, "https://github.com/acme/lib/issues/40"), ("linear", only([4, 11]), "ENG-3")] {
-        let why = "off the fast track: it would close \(unread), which Diplomat did not read or may not write to"
+        let why = "off the fast track until taken over: at its first rating it would close \(unread), "
+            + "which Diplomat did not read or may not write to"
         let k1 = sync(t, rateTrack, dir("closes-" + what), t0)
         (t.prs[0].body, t.prs[0].closes) = ("Fixes #4.", [4])
         let k2 = sync(t, rateTrack, dir("closes-" + what), later(5))
