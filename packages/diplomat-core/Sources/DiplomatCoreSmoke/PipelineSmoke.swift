@@ -2858,9 +2858,10 @@ private func pipelineGatePass1(base: URL, root: PipelineSettings.Root, team: Pip
         Thread.sleep(forTimeInterval: 4)
         return (200, [:], Data())
     }) else { return check(false, "a loopback socket opens") }
-    for (name, url, notice) in [("linear-timed-out", stalled.url, "Linear could not be reached: timed out after 1s"),
+    // curl before 8.21 writes "127.0.0.1 port 1", 8.21 on "127.0.0.1:1".
+    for (name, url, notice) in [("linear-timed-out", stalled.url, "^Linear could not be reached: timed out after 1s"),
                                 ("linear-refused", URL(string: "http://127.0.0.1:1/graphql")!,
-                                 "Linear could not be reached: curl: (7) Failed to connect to 127.0.0.1 port 1: ")] {
+                                 #"^Linear could not be reached: curl: \(7\) Failed to connect to 127\.0\.0\.1( port |:)1: "#)] {
         var io = only([]).io()
         io.linear = { request in
             var r = request
@@ -2870,8 +2871,8 @@ private func pipelineGatePass1(base: URL, root: PipelineSettings.Root, team: Pip
         }
         let settings = PipelineSettings(roots: [root], linearTeams: [team])
         let runs = [0.0, 300].map { PipelineTick.run(settings: settings, now: t0.addingTimeInterval($0), dir: dir(name), io: io) }
-        check(runs.map(\.notices.count) == [1, 1] && runs[0].notices[0].hasPrefix(notice) && runs[1].notices == runs[0].notices
-              && runs[1].events.filter { $0.kind == .error }.count == 1,
+        check(runs.map(\.notices.count) == [1, 1] && runs[0].notices[0].range(of: notice, options: .regularExpression) != nil
+              && runs[1].notices == runs[0].notices && runs[1].events.filter { $0.kind == .error }.count == 1,
               "Linear failing twice (\(name)): \(runs.map(\.notices))")
     }
 }
