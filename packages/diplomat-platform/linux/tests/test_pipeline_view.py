@@ -492,7 +492,7 @@ def test_someone_elses_item_says_who_holds_it(store):
     texts = _labels(view.detail)
     assert "Read only: Diplomat shows it and writes nothing to it." in texts
     assert "By @carol · assigned to @bob, @dave" in texts
-    assert "Rated here, not labelled." in texts
+    assert "Rated here." in texts
     assert "Nothing logged about it yet." in texts
 
 

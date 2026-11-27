@@ -41,13 +41,18 @@ def pipeline_dir() -> Path:
 
 
 #: The switches a running sync re-reads from ``control.json`` before each outward action.
-CONTROL_KEYS = ("enabled", "rate", "fix", "fastTrack", "merge", "fracture")
+CONTROL_KEYS = ("enabled", "rate", "mirrorGitHub", "mirrorLinear", "fix", "fastTrack", "merge",
+                "fracture")
+
+#: ``PipelineMirrorScope``'s cases, narrowest first.
+MIRROR_SCOPES = ("prs", "mine", "all")
 
 
 def write_control(switches: dict) -> None:
-    """The switches, and the ``revoke`` asks (when any), which a running sync applies right
-    before each merge and its asks. Never raises: a sync that cannot read ``control.json`` goes by the
-    settings it was started with. Twin of ``Store.writePipelineControl``."""
+    """The switches, the mirror scope (``prs`` unless one of :data:`MIRROR_SCOPES`), and the
+    ``revoke`` asks (when any), which a running sync applies right before each merge and its
+    asks. Never raises: a sync that cannot read ``control.json``, or finds a key missing,
+    goes by the settings it was started with. Twin of ``Store.writePipelineControl``."""
     folder = pipeline_dir()
     tmp = folder / f"control.json.tmp-{os.getpid()}-{uuid.uuid4().hex}"
     try:
@@ -55,6 +60,8 @@ def write_control(switches: dict) -> None:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             control: dict = {k: bool(switches.get(k)) for k in CONTROL_KEYS}
+            scope = switches.get("mirrorScope")
+            control["mirrorScope"] = scope if scope in MIRROR_SCOPES else "prs"
             if switches.get("revoke"):
                 control["revoke"] = sorted(switches["revoke"])
             json.dump(control, fh, sort_keys=True)

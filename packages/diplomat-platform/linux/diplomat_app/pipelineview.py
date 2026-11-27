@@ -713,7 +713,7 @@ _KIND_WORD = {("github", "issue"): "GitHub issue", ("github", "pr"): "GitHub PR"
               ("linear", "issue"): "Linear issue"}
 
 _RATED_BY = {"label": "Read off its labels.",
-             "local": "Rated here, not labelled."}
+             "local": "Rated here."}
 
 
 def can_start_fix(item: dict) -> bool:
