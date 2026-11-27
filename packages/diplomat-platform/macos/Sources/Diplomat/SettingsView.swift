@@ -1218,7 +1218,8 @@ struct SettingsView: View {
 
     private static let pipelineFractureDetail = """
         Only an issue Diplomat may write to, not rated high risk, with no children and no \
-        open PR fixing it. Each child is a real sub-issue and comes back unrated; the parent \
+        open PR fixing it, whose code shows two or more independent fixes, or groups of \
+        fixes, to split it into. Each child is a real sub-issue and comes back unrated; the parent \
         is labelled diplomat:fractured. Fracture on the Pipeline screen splits one whatever \
         its rating.
         """

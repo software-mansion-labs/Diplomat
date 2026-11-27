@@ -1549,8 +1549,10 @@ final class PipelineSync {
         case .success(let answer):
             (parts, why) = answer
         }
-        guard !parts.isEmpty else {
-            let held = "would not split: " + (why.isEmpty ? "the model named no parts" : why)
+        guard parts.count > 1 else {
+            let held = "would not split: " + (parts.isEmpty
+                ? (why.isEmpty ? "the model named no parts" : why)
+                : "the model named one part" + (why.isEmpty ? "" : ": " + why))
             log(e.id, .held, held)
             state.unsplit[e.id] = held
             persist()
