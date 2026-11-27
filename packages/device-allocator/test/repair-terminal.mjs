@@ -33,8 +33,8 @@ script(path.join(RC_BIN, 'claude'), 'for a; do :; done; printf "claude-ran %s\\n
 // Only an interactive shell reads its "rc", which hands off to tmux outside one.
 script(USER_SHELL, `[ "$1" = -i ] && { [ -n "$TMUX" ] || exit 0; PATH='${RC_BIN}':$PATH; }
 [ "$2" = -c ] || exit 97; exec /bin/sh -c "$3"`);
-script(TMUX, `printf '%s\\n' "$@" > '${TMUX_RECORD}'; [ "$1" = new-session ] || exit 98
-TMUX=fake exec /bin/sh -c "$4"`);
+script(TMUX, `printf '%s\\n' "$@" > '${TMUX_RECORD}'; [ "$3" = new-session ] || exit 98
+TMUX=fake exec /bin/sh -c "$6"`);
 
 process.env.DA_EXPOSE_TEST = '1';
 process.env.DA_BASE_DIR = BASE;
@@ -120,8 +120,10 @@ const TERM_ENV = { PATH: '/usr/bin:/bin', SHELL: USER_SHELL };
 const ran = spawnSync('/bin/sh', [launcher], { input: '\n', encoding: 'utf8', env: TERM_ENV });
 assert.equal(ran.status, 0, ran.stderr);
 // Closing the window only detaches tmux: the session has to end with it, agent and all.
+// Its own server, so the agent's `tmux kill-server` reaches nobody else's sessions.
+const session = `diplomat-repair-${path.basename(launcher, '.sh')}`;
 assert.equal(fs.readFileSync(TMUX_RECORD, 'utf8'), [
-  'new-session', '-s', `diplomat-repair-${path.basename(launcher, '.sh')}`, `/bin/sh ${shq(launcher)}`,
+  '-L', session, 'new-session', '-s', session, `/bin/sh ${shq(launcher)}`,
   ';', 'set-option', 'destroy-unattached', 'on', ''].join('\n'));
 assert.match(ran.stdout, /claude-ran A device managed/);
 assert.match(ran.stdout, /press Enter to close/);

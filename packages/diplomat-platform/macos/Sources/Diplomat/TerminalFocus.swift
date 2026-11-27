@@ -26,16 +26,25 @@ enum TerminalFocus {
         var tty: String
     }
 
-    /// A tmux pane: which pane id, and whose session it belongs to.
+    /// A tmux session: its name, on the server holding it - that server's `-L` label, or
+    /// nil for the default server.
+    struct Session: Hashable {
+        var name: String
+        var server: String? = nil
+    }
+
+    /// A tmux pane: which pane id, and whose session it belongs to. Pane ids are per
+    /// server (every server's first pane is `%0`), so `id` names a pane only together
+    /// with `session.server`.
     struct Pane: Equatable {
         var id: String
-        var session: String
+        var session: Session
     }
 
     /// The ttys to try, and the tmux panes to reveal first.
     struct Walk: Equatable {
         var ttys: [String] = []
-        var panes: [String] = []
+        var panes: [Pane] = []
     }
 
     /// How many hops the walk takes before giving up. A pane sits three processes and
@@ -86,7 +95,7 @@ enum TerminalFocus {
     /// Only for a pane a client is attached to. An unattached session is on nobody's
     /// screen, and raising an app over one would report a window that does not exist.
     private static func raiseGhostty(_ walk: Walk, panes: [String: Pane],
-                                     clients: [String: String]) -> Bool {
+                                     clients: [Session: String]) -> Bool {
         let attached = walk.ttys.contains { tty in
             guard let session = panes[tty]?.session else { return false }
             return clients[session] != nil
@@ -207,21 +216,22 @@ enum TerminalFocus {
     /// one. Prefix-matched, which is why the prefix is not something an operator would
     /// type: it is the whole permission to end a session rather than detach from it.
     private static func ownSession(on ttys: [String], _ panes: [String: Pane]) -> String? {
-        ttys.compactMap { panes[$0]?.session }.first { $0.hasPrefix(sessionPrefix) }
+        ttys.compactMap { panes[$0]?.session.name }.first { $0.hasPrefix(sessionPrefix) }
     }
 
-    /// What every tmux session this applet opens is named for. `AgentSpawner` builds the
-    /// names; `ownSession` is why they are recognisable.
+    /// What every tmux session this applet opens is named for, and its server's `-L`
+    /// label with it. `AgentSpawner` builds the names; `ownSession` is why they are
+    /// recognisable, and `servers` why their servers are.
     static let sessionPrefix = "diplomat-"
 
     /// The ordered ttys between a process and its window, nearest first. Pure —
     /// everything it walks over is passed in, so the shape of a wrapped session is
     /// testable without one.
     ///
-    /// `panes` is keyed by pane tty and `clients` by session name, which is how the
-    /// two tmux listings come back.
+    /// `panes` is keyed by pane tty and `clients` by session, which is how the two tmux
+    /// listings come back.
     static func walk(tty: String, pid: Int?, processes: [Int: Proc],
-                     panes: [String: Pane], clients: [String: String]) -> Walk {
+                     panes: [String: Pane], clients: [Session: String]) -> Walk {
         var out = Walk()
         var seen = Set<String>()
         var tty = tty
@@ -230,7 +240,7 @@ enum TerminalFocus {
             guard !tty.isEmpty else { break }
             if seen.insert(tty).inserted { out.ttys.append(tty) }
             if let pane = panes[tty] {
-                out.panes.append(pane.id)
+                out.panes.append(pane)
                 // A session nobody is attached to has no window to raise, and the walk
                 // has nowhere else to go: the pane's own parent is the tmux server.
                 guard let client = clients[pane.session], client != tty else { break }
@@ -270,47 +280,110 @@ enum TerminalFocus {
         return table
     }
 
-    /// pane tty → the pane, for every pane the tmux server holds. Empty when tmux is
-    /// not installed or no server is running, which is the same answer the walk wants:
-    /// nothing to hop across.
+    /// pane tty → the pane, for every pane on the servers `servers` names. Empty when
+    /// tmux is not installed or no server is running, which is the same answer the walk
+    /// wants: nothing to hop across.
     static func panes() -> [String: Pane] { readPanes() ?? [:] }
 
     /// The same listing, with "tmux would not answer" kept apart from "tmux has nothing"
-    /// — see `walkTables`, the one caller that has to tell them apart.
+    /// — see `walkTables` and `paneScreens`, the callers that have to tell them apart.
     private static func readPanes() -> [String: Pane]? {
-        // Space-separated with the session name, the one field that may hold a space,
-        // last: no control byte survives tmux's output. 3.4 prints one as octal, and a
-        // client with no `$TMUX` and no UTF-8 locale (launchd's) gets `_`.
-        guard let out = tmux(["list-panes", "-a", "-F",
-                              "#{pane_tty} #{pane_id} #{session_name}"])
-        else { return nil }
         var found: [String: Pane] = [:]
-        for line in out.split(separator: "\n") {
-            let cols = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
-            guard cols.count == 3, !cols[1].isEmpty else { continue }
-            found[AgentProbes.shortTTY(String(cols[0]))] = Pane(id: String(cols[1]),
-                                                               session: String(cols[2]))
+        for server in servers() {
+            // Space-separated with the session name, the one field that may hold a
+            // space, last: no control byte survives tmux's output. 3.4 prints one as
+            // octal, and a client with no `$TMUX` and no UTF-8 locale (launchd's) gets `_`.
+            let out = tmux(on: server, ["list-panes", "-a", "-F",
+                                        "#{pane_tty} #{pane_id} #{session_name}"])
+            var listed = false
+            for line in (out ?? "").split(separator: "\n") {
+                let cols = line.split(separator: " ", maxSplits: 2,
+                                      omittingEmptySubsequences: false)
+                guard cols.count == 3, !cols[1].isEmpty else { continue }
+                found[AgentProbes.shortTTY(String(cols[0]))] = Pane(
+                    id: String(cols[1]), session: Session(name: String(cols[2]), server: server))
+                listed = true
+            }
+            // A server with no panes shuts itself down, so a live one that listed none
+            // failed to list rather than holding nothing.
+            if !listed, serverRunning(server) { return nil }
         }
         return found
     }
 
-    /// session name → the tty of a client attached to it. Last one wins, arbitrarily:
+    /// session → the tty of a client attached to it. Last one wins, arbitrarily:
     /// several clients on one session are several windows showing the same screen, so
     /// any of them is the right window to raise.
-    static func clients() -> [String: String] { readClients() ?? [:] }
+    static func clients() -> [Session: String] { readClients() ?? [:] }
 
     /// The same listing, failure kept apart from emptiness — see `walkTables`. Split as
     /// `readPanes` is: on spaces, the session name last.
-    private static func readClients() -> [String: String]? {
-        guard let out = tmux(["list-clients", "-F", "#{client_tty} #{client_session}"])
-        else { return nil }
-        var found: [String: String] = [:]
-        for line in out.split(separator: "\n") {
-            let cols = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
-            guard cols.count == 2, !cols[1].isEmpty else { continue }
-            found[String(cols[1])] = AgentProbes.shortTTY(String(cols[0]))
+    private static func readClients() -> [Session: String]? {
+        var found: [Session: String] = [:]
+        for server in servers() {
+            guard let out = tmux(on: server, ["list-clients", "-F",
+                                              "#{client_tty} #{client_session}"]) else {
+                if serverRunning(server) { return nil }
+                continue
+            }
+            for line in out.split(separator: "\n") {
+                let cols = line.split(separator: " ", maxSplits: 1,
+                                      omittingEmptySubsequences: false)
+                guard cols.count == 2, !cols[1].isEmpty else { continue }
+                found[Session(name: String(cols[1]), server: server)] =
+                    AgentProbes.shortTTY(String(cols[0]))
+            }
         }
         return found
+    }
+
+    /// The servers the listings cover: the default one (nil), then every live server
+    /// this applet opened, by `-L` label and in name order so a reading is stable.
+    private static func servers() -> [String?] {
+        let dir = socketDirectory()
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+        return [nil] + names.filter { $0.hasPrefix(sessionPrefix) }.sorted()
+            .filter { listening("\(dir)/\($0)") }
+    }
+
+    /// Where tmux keeps its sockets, resolved as tmux resolves it.
+    private static func socketDirectory() -> String {
+        func resolved(_ path: String) -> String? {
+            guard let p = realpath(path, nil) else { return nil }
+            defer { free(p) }
+            return String(cString: p)
+        }
+        let env = ProcessInfo.processInfo.environment["TMUX_TMPDIR"] ?? ""
+        let base = (env.isEmpty ? nil : resolved(env)) ?? resolved("/tmp") ?? "/tmp"
+        return "\(base)/tmux-\(getuid())"
+    }
+
+    /// Whether a server is listening on the socket at `path`, asked by connecting to it
+    /// rather than by running tmux once per file. tmux leaves its socket behind when a
+    /// server exits, so one refused for over a minute is removed; the minute spares a
+    /// server that has bound its socket and not yet started listening on it.
+    private static func listening(_ path: String) -> Bool {
+        var addr = sockaddr_un()
+        let bytes = path.utf8CString.map { UInt8(bitPattern: $0) }
+        guard bytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else { return false }
+        addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr.sun_path) { $0.copyBytes(from: bytes) }
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        let connected = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        let error = errno
+        Darwin.close(fd)
+        if connected == 0 { return true }
+        var info = stat()
+        if error == ECONNREFUSED, stat(path, &info) == 0,
+           time(nil) - info.st_mtimespec.tv_sec > 60 {
+            unlink(path)
+        }
+        return false
     }
 
     /// Both listings `walk` hops across, or nil when a LIVE tmux server would not answer.
@@ -323,25 +396,23 @@ enum TerminalFocus {
     /// idle-confirmation state for every session in it. Not knowing has to mean not
     /// typing, and it must not also mean forgetting.
     ///
-    /// The nil is narrow on purpose. Both listings fail against a machine with no tmux
-    /// and against one whose server has shut down, and neither is a failure: there is
-    /// genuinely nothing to hop across. `paneScreens` separates them the same way, for
-    /// the same reason — a server with no panes shuts itself down, so an empty answer
-    /// from a LIVE server is a failed command rather than an empty machine.
-    static func walkTables() -> (panes: [String: Pane], clients: [String: String])? {
-        guard binary != nil else { return ([:], [:]) }
-        guard let panes = readPanes(), let clients = readClients() else {
-            return serverRunning() ? nil : ([:], [:])
-        }
+    /// The nil is narrow on purpose, and decided server by server. A listing fails
+    /// against a machine with no tmux and against a server that has shut down, and
+    /// neither is a failure: there is genuinely nothing to hop across. `paneScreens`
+    /// separates them the same way, for the same reason — a server with no panes shuts
+    /// itself down, so an empty answer from a LIVE server is a failed command rather
+    /// than an empty machine.
+    static func walkTables() -> (panes: [String: Pane], clients: [Session: String])? {
+        guard let panes = readPanes(), let clients = readClients() else { return nil }
         return (panes, clients)
     }
 
     /// Select `pane` in its own window and session, so the client attached to it is
     /// showing the agent when the window comes forward. Best-effort: a pane that has
     /// closed is a window that will simply show whatever it was showing.
-    private static func reveal(_ pane: String) {
-        _ = tmux(["select-window", "-t", pane])
-        _ = tmux(["select-pane", "-t", pane])
+    private static func reveal(_ pane: Pane) {
+        _ = tmux(on: pane.session.server, ["select-window", "-t", pane.id])
+        _ = tmux(on: pane.session.server, ["select-pane", "-t", pane.id])
     }
 
     /// Whether tmux can be driven at all. What `SpawnTerminal.unavailableReason` asks
@@ -363,23 +434,21 @@ enum TerminalFocus {
     /// they are different keys, so neither displaces the other.
     ///
     /// Empty when tmux is absent or no server is running — ordinary inert states, not
-    /// failures. nil only when a server is up and the listing still came back empty,
+    /// failures. nil only when a server is up and its listing still came back empty,
     /// which the callers must read as "we could not look" rather than "nothing is there".
     ///
     /// `shownOn` is the ttys a scriptable terminal has already reported; see
     /// `panesToCapture` for what it excludes and why.
     static func paneScreens(shownOn: Set<String>) -> [(tty: String, screen: String)]? {
-        guard binary != nil else { return [] }
-        let table = panes()
-        // A server with no panes shuts itself down, so an empty listing against a live
-        // server is a failed command, not an empty machine.
-        if table.isEmpty { return serverRunning() ? nil : [] }
+        guard let table = readPanes() else { return nil }
+        if table.isEmpty { return [] }
         var out: [(tty: String, screen: String)] = []
         for (tty, pane) in panesToCapture(table, processes: processes(),
                                           attachedTo: clients(), shownOn: shownOn) {
             // A pane that closed between the listing and the capture is skipped, not
             // recorded empty: an empty screen reads as one with nothing on it.
-            guard let screen = tmux(["capture-pane", "-p", "-t", pane.id]) else { continue }
+            guard let screen = tmux(on: pane.session.server, ["capture-pane", "-p", "-t", pane.id])
+            else { continue }
             out.append((tty: tty, screen: screen))
         }
         return out
@@ -399,7 +468,7 @@ enum TerminalFocus {
     /// only reader. Ordered by tty so a dump is stable across ticks. Pure, so the rule is
     /// decidable without a tmux server — the way `walk` is decidable without one.
     static func panesToCapture(_ table: [String: Pane], processes: [Int: Proc],
-                               attachedTo: [String: String],
+                               attachedTo: [Session: String],
                                shownOn: Set<String>) -> [(tty: String, pane: Pane)] {
         table.filter { tty, _ in
             guard !tty.isEmpty else { return false }
@@ -417,8 +486,9 @@ enum TerminalFocus {
     /// containing tmux key names is not read as keys.
     static func sendLine(tty: String, text: String) -> Bool {
         guard let pane = panes()[AgentProbes.shortTTY(tty)] else { return false }
-        guard tmux(["send-keys", "-t", pane.id, "-l", text]) != nil else { return false }
-        return tmux(["send-keys", "-t", pane.id, "Enter"]) != nil
+        let server = pane.session.server
+        guard tmux(on: server, ["send-keys", "-t", pane.id, "-l", text]) != nil else { return false }
+        return tmux(on: server, ["send-keys", "-t", pane.id, "Enter"]) != nil
     }
 
     /// End the tmux session by name, taking the agent running in it with it.
@@ -432,18 +502,25 @@ enum TerminalFocus {
     /// `=` is tmux's exact-match target prefix. Without it a name is matched as a prefix
     /// and then as a pattern, so reaping `diplomat-a1b2` could take the operator's own
     /// session with it.
+    ///
+    /// On the session's own server, the one its spawn named after it, and failing that
+    /// on the default server, where a session an older build opened lives.
     static func killSession(named session: String) -> Bool {
         guard !session.isEmpty else { return false }
-        return tmux(["kill-session", "-t", "=" + session]) != nil
+        let kill = ["kill-session", "-t", "=" + session]
+        return tmux(on: session, kill) != nil || tmux(on: nil, kill) != nil
     }
 
     /// Whether a tmux server is up. Separates "no panes because nothing is running" from
     /// "no panes because the command failed" — `tmuxwatch._server_running`.
-    private static func serverRunning() -> Bool { tmux(["has-session"]) != nil }
+    private static func serverRunning(_ server: String?) -> Bool {
+        tmux(on: server, ["has-session"]) != nil
+    }
 
-    private static func tmux(_ arguments: [String]) -> String? {
+    /// `arguments` on the server with that `-L` label, or on the default one for nil.
+    private static func tmux(on server: String?, _ arguments: [String]) -> String? {
         guard let bin = binary else { return nil }
-        return run(bin, arguments)
+        return run(bin, (server.map { ["-L", $0] } ?? []) + arguments)
     }
 
     /// Where tmux is, or nil when it is not installed — resolved the same way `node`

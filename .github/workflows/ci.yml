@@ -143,8 +143,8 @@ jobs:
       # ALLOCATOR_TEST shells only a stand-in installer it writes to a scratch dir, with
       # its feed, config and daemon dir there too, and reads no ~/.claude.
       # APIWATCH_TEST composes every session, tail and
-      # process it reasons over, bar a tmux server on a private socket where tmux is
-      # installed (not on this runner), so it reads no terminal and types into none —
+      # process it reasons over, bar tmux servers of its own in a private socket dir where
+      # tmux is installed (not on this runner), so it reads no terminal and types into none —
       # though it does provoke a nudge's audit line, so it redirects DIPLOMAT_AUDIT_DIR.
       # PUBLISH_TEST composes the tick it publishes as a literal, so no probe runs and
       # its verdict does not depend on what else is on the runner. QUOTA_TEST pins both
