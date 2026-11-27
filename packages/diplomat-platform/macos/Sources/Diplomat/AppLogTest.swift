@@ -114,11 +114,20 @@ enum AppLogTest {
         await pause(0.5)
 
         let beforeShort = lines().count
-        await AppLog.timed("shortProbe") { spinMain(1.0) }
+        var shortShare = 0.0
+        await AppLog.timed("shortProbe") { shortShare = spinMain(1.0) }
         await pause(0.5)
         let short = lines().dropFirst(beforeShort).first { $0.contains("main thread blocked") }
         check("a short hang names the work that was in flight while it was late, ended since",
               short?.contains("; in flight: shortProbe ") == true, short ?? "no line")
+        // Other work on the machine can hold the spin to part of a core, and the hang is
+        // then rightly partly busy. Not asked of the sampled hang: `sample` takes its share too.
+        let computing = "and tells it was the main thread computing"
+        if shortShare >= 0.9 {
+            check(computing, short?.contains("(busy on the main thread)") == true, short ?? "no line")
+        } else {
+            print("  skip  \(computing) (the spin got \(Int(shortShare * 100))% of a core)")
+        }
 
         let before = lines().count
         var spun = 0.0
@@ -136,8 +145,6 @@ enum AppLogTest {
         check("its end gives the length, up to one interval short",
               busySecs.map { $0 > spun - watch.interval - 0.15 && $0 <= spun + 0.15 } == true,
               "\(busy ?? "no line"); spun \(spun)")
-        check("and tells it was the main thread computing", busy?.contains("(busy on the main thread)") == true,
-              busy ?? "")
         check("and names the sample", busy.map { samplePath != nil && $0.hasSuffix("; sample \(samplePath!)") } == true,
               busy ?? "")
         check("a heartbeat during it says a hang is going on",
@@ -259,12 +266,16 @@ enum AppLogTest {
         return failures.isEmpty
     }
 
-    /// Keeps the main thread computing for `secs`; the name is what the sample must show.
-    static func spinMain(_ secs: Double) {
+    /// Keeps the main thread computing for `secs` and returns the share of a core it got;
+    /// the name is what the sample must show.
+    @discardableResult
+    static func spinMain(_ secs: Double) -> Double {
+        let cpu = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
         let end = AppLog.uptime + secs
         var x = 0.0
         while AppLog.uptime < end { x += sin(x) }
         if x.isNaN { print(x) }
+        return Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - cpu) / 1e9 / secs
     }
 
     /// Keeps the main thread computing until `done` (asked every 50 ms) or `atMost`
