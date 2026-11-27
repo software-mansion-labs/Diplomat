@@ -1015,7 +1015,7 @@ enum PipelineTint {
     static func ratedBy(_ item: PipelineItem) -> String {
         switch item.ratedBy {
         case "label": return "from its labels"
-        case "local": return "rated here, not labelled"
+        case "local": return "rated here"
         case nil: return "unrated"
         case let other?: return other
         }

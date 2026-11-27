@@ -955,13 +955,34 @@ final class Store: ObservableObject {
             pipelineSwitched(on: pipelineEnabled && !oldValue)
         }
     }
-    /// `PipelineSettings.rate`, `.fix`, `.fastTrack`, `.merge`, `.fracture`; moot while
-    /// `pipelineEnabled` is off.
+    /// `PipelineSettings.rate`, `.mirrorGitHub`, `.mirrorLinear`, `.mirrorScope`, `.fix`,
+    /// `.fastTrack`, `.merge`, `.fracture`; moot while `pipelineEnabled` is off.
     @Published var pipelineRate: Bool {
         didSet {
             persist(pipelineRate, forKey: Keys.pipelineRate)
             writePipelineControl()
             pipelineSwitched(on: pipelineRate && !oldValue)
+        }
+    }
+    @Published var pipelineMirrorGitHub: Bool {
+        didSet {
+            persist(pipelineMirrorGitHub, forKey: Keys.pipelineMirrorGitHub)
+            writePipelineControl()
+            pipelineSwitched(on: pipelineMirrorGitHub && !oldValue)
+        }
+    }
+    @Published var pipelineMirrorLinear: Bool {
+        didSet {
+            persist(pipelineMirrorLinear, forKey: Keys.pipelineMirrorLinear)
+            writePipelineControl()
+            pipelineSwitched(on: pipelineMirrorLinear && !oldValue)
+        }
+    }
+    @Published var pipelineMirrorScope: PipelineMirrorScope {
+        didSet {
+            persist(pipelineMirrorScope.rawValue, forKey: Keys.pipelineMirrorScope)
+            writePipelineControl()
+            pipelineSwitched(on: pipelineMirrorScope > oldValue)
         }
     }
     @Published var pipelineFix: Bool {
@@ -1175,6 +1196,9 @@ final class Store: ObservableObject {
         static let commsSeenAt = "commsSeenAt"
         static let pipelineEnabled = "pipelineEnabled"
         static let pipelineRate = "pipelineRate"
+        static let pipelineMirrorGitHub = "pipelineMirrorGitHub"
+        static let pipelineMirrorLinear = "pipelineMirrorLinear"
+        static let pipelineMirrorScope = "pipelineMirrorScope"
         static let pipelineFix = "pipelineFix"
         static let pipelineFastTrack = "pipelineFastTrack"
         static let pipelineMerge = "pipelineMerge"
@@ -1402,6 +1426,10 @@ final class Store: ObservableObject {
         commsSeenAt = defaults.object(forKey: Keys.commsSeenAt) as? Date ?? Date()
         pipelineEnabled = defaults.bool(forKey: Keys.pipelineEnabled)
         pipelineRate = defaults.bool(forKey: Keys.pipelineRate)
+        pipelineMirrorGitHub = defaults.bool(forKey: Keys.pipelineMirrorGitHub)
+        pipelineMirrorLinear = defaults.bool(forKey: Keys.pipelineMirrorLinear)
+        pipelineMirrorScope = defaults.string(forKey: Keys.pipelineMirrorScope)
+            .flatMap(PipelineMirrorScope.init(rawValue:)) ?? .prs
         pipelineFix = defaults.bool(forKey: Keys.pipelineFix)
         pipelineFastTrack = defaults.bool(forKey: Keys.pipelineFastTrack)
         pipelineMerge = defaults.bool(forKey: Keys.pipelineMerge)

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import DiplomatCore
 
 /// `DIPLOMAT_PIPELINE_TEST=1`: the app's half of a pipeline sync (the core's is pinned in
@@ -48,6 +49,9 @@ enum PipelineTest {
                         PRRef.LocalRepo(owner: "g", repo: "third", path: scratch.path, host: "gitlab.com")])
         store.pipelineEnabled = true
         store.pipelineRate = true
+        store.pipelineMirrorGitHub = true
+        store.pipelineMirrorLinear = false
+        store.pipelineMirrorScope = .mine
         store.pipelineFix = true
         store.pipelineFastTrack = true
         store.pipelineMerge = true
@@ -61,6 +65,23 @@ enum PipelineTest {
               settings.roots == [PipelineSettings.Root(owner: "o", repo: "r", path: scratch.path, me: "latekvo")])
         check("each switch as it stands",
               settings.rate && settings.fix && settings.fastTrack && settings.merge && !settings.fracture)
+        check("…the mirrors and their scope too",
+              settings.mirrorGitHub && !settings.mirrorLinear && settings.mirrorScope == .mine)
+        // The argument domain outranks every stored one and lives only in this process.
+        let arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        func launched(_ stored: [String: Any]) -> Store {
+            UserDefaults.standard.setVolatileDomain(arguments.merging(stored) { $1 }, forName: UserDefaults.argumentDomain)
+            defer { UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain) }
+            return Store()
+        }
+        let mirroredAll = launched(["pipelineMirrorGitHub": false, "pipelineMirrorLinear": true,
+                                    "pipelineMirrorScope": "all"])
+        let mirroredBad = launched(["pipelineMirrorGitHub": true, "pipelineMirrorLinear": false,
+                                    "pipelineMirrorScope": "everything"])
+        check("a launch reads the mirrors and their scope under the Linux store's keys, an unknown scope as prs",
+              !mirroredAll.pipelineMirrorGitHub && mirroredAll.pipelineMirrorLinear && mirroredAll.pipelineMirrorScope == .all
+                  && mirroredBad.pipelineMirrorGitHub && !mirroredBad.pipelineMirrorLinear
+                  && mirroredBad.pipelineMirrorScope == .prs)
         check("the Linear teams", settings.linearTeams == [PipelineSettings.LinearTeam(key: "ENG", repo: "o/r")])
         check("no forces while none is asked for", settings.force == nil)
         check("no item while no ask or attempt record is held", settings.queued.isEmpty)
@@ -82,13 +103,38 @@ enum PipelineTest {
                       "Only your own PRs from the repo itself into its default branch that close only "
                           + "candidate issues: the fixes the pipeline asks for.")
                   && SettingsView.pipelineFastTrackDetail.hasSuffix(" A PR rated while this is off stays a person's."))
-        check("Rate issues and PRs says a rating kept here raises the tracker's until its labels are written",
-              SettingsView.pipelineRateDetail.hasSuffix(" A rating already on the tracker is the rating, raised by "
-                  + "a higher one kept here until its labels are written; a PR's diff can only raise one."))
+        check("Rate issues and PRs says a rating is kept here, and labels can only raise it",
+              SettingsView.pipelineRateDetail.hasSuffix(" Each rating is kept on this machine, and goes on the "
+                  + "tracker as labels only where Mirror ratings says; someone else's PR is not rated. Labels "
+                  + "already on an item rate it, or raise the rating kept for it, never lower it; a PR's diff "
+                  + "can only raise one."))
         check("Merge cleared PRs points at every hold rather than listing some",
               SettingsView.pipelineMergeDetail.hasPrefix(
                   "A cleared PR is merged only when none of the holds in docs/pipeline.md applies "
                       + "to it, checked again right before the merge."))
+        // Settings' `.task` checks the self repo for an update and the allocator's install.
+        setenv("DIPLOMAT_SELF_REPO", scratch.appendingPathComponent("no-checkout").path, 1)
+        let settingsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: MainRoot.width, height: 800),
+                                      styleMask: [.titled], backing: .buffered, defer: true)
+        settingsWindow.isReleasedWhenClosed = false
+        settingsWindow.contentView = NSHostingView(rootView: SettingsView(isPresented: .constant(true))
+            .environmentObject(store))
+        func scopeShown(github: Bool, linear: Bool) -> Bool {
+            store.pipelineMirrorGitHub = github
+            store.pipelineMirrorLinear = linear
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            settingsWindow.contentView?.layoutSubtreeIfNeeded()
+            return segments(in: settingsWindow.contentView).contains(["My PRs", "My PRs and issues", "All rated items"])
+        }
+        let scopeRows = [(false, false), (true, false), (false, true), (true, true)].map {
+            scopeShown(github: $0.0, linear: $0.1)
+        }
+        print("  Mirror onto shown with neither, GitHub, Linear, both mirrored: \(scopeRows)")
+        check("Settings draws Mirror onto, its three scopes, only while a mirror is on",
+              scopeRows == [false, true, true, true])
+        settingsWindow.close()
+        store.pipelineMirrorGitHub = true
+        store.pipelineMirrorLinear = false
         func feed(_ action: String) -> [String] {
             AuditLog.read().filter { $0.action == action }.map { "\($0.source) \($0.detail)" }.reversed()
         }
@@ -882,15 +928,16 @@ enum PipelineTest {
 
         print("\npipeline: control.json")
         let control = PipelineLog.dir.appendingPathComponent("control.json")
-        func switches() -> [String: Bool]? {
-            (try? Data(contentsOf: control)).flatMap { try? JSONDecoder().decode([String: Bool].self, from: $0) }
+        func switches() -> NSDictionary? {
+            (try? Data(contentsOf: control)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? NSDictionary }
         }
         try? FileManager.default.createDirectory(at: PipelineLog.dir, withIntermediateDirectories: true)
         chmod(PipelineLog.dir.path, 0o755)
         store.pipelineMerge = false
-        check("a switch writes every switch as it stands",
-              switches() == ["enabled": true, "rate": true, "fix": true, "fastTrack": true, "merge": false,
-                             "fracture": false])
+        check("a switch writes every switch as it stands, the mirror scope by name",
+              switches() == ["enabled": true, "rate": true, "mirrorGitHub": true, "mirrorLinear": false,
+                             "mirrorScope": "mine", "fix": true, "fastTrack": true, "merge": false,
+                             "fracture": false] as NSDictionary)
         func mode(_ url: URL) -> Int? {
             (try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? Int
         }
@@ -898,13 +945,14 @@ enum PipelineTest {
         check("…owner-only in a folder made owner-only, replaced whole",
               mode(control) == 0o600 && mode(PipelineLog.dir) == 0o700 && !beside.contains { $0.hasPrefix("control.json.") })
         try? FileManager.default.removeItem(at: control)
-        var handed: [String: Bool]?
+        var handed: NSDictionary?
         Store.pipelineTickOverride = { _ in
             handed = switches()
             return result([])
         }
         await store.runPipelineSyncOnce()
-        check("…and a sync writes it before it runs", handed?["merge"] == false && handed?["enabled"] == true)
+        check("…and a sync writes it before it runs",
+              handed?["merge"] as? Bool == false && handed?["enabled"] as? Bool == true)
         store.pipelineMerge = true
 
         print("\npipeline: a sync's own result, and another's")
@@ -1761,6 +1809,13 @@ enum PipelineTest {
         _ = await signOut(revoke: 200)
     }
 
+    /// The segment labels of each segmented control under `view`.
+    private static func segments(in view: NSView?) -> [[String]] {
+        guard let view else { return [] }
+        let own = (view as? NSSegmentedControl).map { c in (0..<c.segmentCount).compactMap(c.label(forSegment:)) }
+        return [own].compactMap { $0 } + view.subviews.flatMap(segments)
+    }
+
     /// `DIPLOMAT_PIPELINE_E2E=<dir>`: real syncs (`PipelineTick.run`) of `acme/app`, checked
     /// out at `<dir>/checkout`, through the stubs DIPLOMAT_GH, DIPLOMAT_CLAUDE and
     /// DIPLOMAT_LINEAR_API name, which log to `<dir>/gh.log`, `claude.log` and `linear.log`,
@@ -1856,6 +1911,9 @@ enum PipelineTest {
                                         path: harness.appendingPathComponent("checkout").path)])
         store.pipelineEnabled = true
         store.pipelineRate = true
+        store.pipelineMirrorGitHub = true
+        store.pipelineMirrorLinear = true
+        store.pipelineMirrorScope = .all
         store.pipelineFix = true
         store.pipelineFastTrack = true
         store.pipelineMerge = true
@@ -2292,6 +2350,9 @@ enum PipelineTest {
         reborn.pinRoots([PRRef.LocalRepo(owner: "acme", repo: "app", path: checkout)])
         reborn.pipelineEnabled = true
         reborn.pipelineRate = true
+        reborn.pipelineMirrorGitHub = store.pipelineMirrorGitHub
+        reborn.pipelineMirrorLinear = store.pipelineMirrorLinear
+        reborn.pipelineMirrorScope = store.pipelineMirrorScope
         reborn.pipelineFix = true
         reborn.pipelineFastTrack = true
         reborn.pipelineMerge = true
