@@ -581,8 +581,10 @@ class Store(QObject):
         # Why the last sync could not run; None once one did.
         self.pipeline_error: str | None = None
         self.pipeline_syncing = False
-        # Over the flags and the force sets below, never over a CLI call.
-        self._pipeline_lock = threading.Lock()
+        # Over the flags and the force sets below, never over a CLI call. Reentrant:
+        # :meth:`stop_pipeline_sync` runs from signal handlers, which may land inside a
+        # block holding it.
+        self._pipeline_lock = threading.RLock()
         # Over a control.json write and the switches it reads: the Qt thread's switches and
         # a sync's worker both write it, so the last write has the latest.
         self._control_lock = threading.Lock()
@@ -618,9 +620,10 @@ class Store(QObject):
         self._pipeline_stale: set[str] = set()
         self._pipeline_synced.connect(self._apply_pipeline_sync)
         # The rating jobs running, by item link (:attr:`running_ratings`); replaced, never
-        # mutated, under the lock: workers and the Qt thread both change it.
+        # mutated, under the lock: workers and the Qt thread both change it. Reentrant, as
+        # `_pipeline_lock` is.
         self._ratings: dict[str, RatingJob] = {}
-        self._rating_lock = threading.Lock()
+        self._rating_lock = threading.RLock()
         self._rating_finished.connect(self._rating_done)
 
         # Pruned on every start — a Store outlives thousands of polls.
