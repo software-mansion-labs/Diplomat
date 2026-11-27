@@ -7,6 +7,7 @@ Pure, offline — no gh, no display. Run with: ``python -m pytest packages/diplo
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -19,11 +20,11 @@ sys.path.insert(0, _LINUX)
 # the applet for the side effect is what the standalone run exists to not need.
 sys.path.insert(0, os.path.join(_LINUX, "..", "..", "diplomat-runtime"))
 
-from diplomat_runtime import review  # noqa: E402
+from diplomat_runtime import core, review  # noqa: E402
 from diplomat_runtime.models import Filters, Fmt, OpenIssue, OpenPR, ReviewThread  # noqa: E402
 from diplomat_runtime.prref import parse_pr_ref  # noqa: E402
 from diplomat_runtime.prtarget import PRTarget  # noqa: E402
-from diplomat_app.store import Store  # noqa: E402
+from diplomat_app.store import Store, tools  # noqa: E402
 
 NOW = datetime.now(timezone.utc)
 OLD = NOW - timedelta(days=15)
@@ -122,6 +123,17 @@ def test_store_lookup():
     assert s.lookup(201).on_lists == ["unaddressedIssues"]
     assert s.lookup(999).on_lists == []
     assert not s.lookup(999).is_on_any_list
+
+
+def test_the_assets_readme_names_the_icon_and_tint_linux_draws():
+    assert [(t.glyph, t.color_hex) for t in tools()] == [
+        (c["linuxGlyph"], c["colorHex"]) for c in core.catalog()]
+    readme = (core.assets_dir() / "README.md").read_text(encoding="utf-8")
+    row = next(r for r in readme.splitlines() if r.startswith("| `catalog.json` |"))
+    assert re.findall(r"`(\w+)` for Linux", row) == ["linuxGlyph", "colorHex"]
+    note = " ".join(readme.split())
+    assert re.findall(r"`(\w+)`\+`(\w+)` are the Linux assets", note) == [
+        ("linuxGlyph", "colorHex")]
 
 
 def test_review_prompt_blocks_by_target():
