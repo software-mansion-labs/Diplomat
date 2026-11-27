@@ -13,7 +13,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { ADB_BIN, EMULATOR_BIN } from './paths.js';
+import { ADB_BIN, EMULATOR_BIN, locateAndroidTools } from './paths.js';
 import { log } from './log.js';
 
 const pexec = promisify(execFile);
@@ -120,6 +120,7 @@ export async function listAndroid() {
   const fake = fakeDevices();
   if (fake) return fake.filter((d) => isAndroidPlatform(d.platform));
 
+  await locateAndroidTools();
   const r = await run(EMULATOR_BIN, ['-list-avds']);
   if (!r.ok) return [];
   const avds = r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
@@ -156,6 +157,7 @@ function androidClass(avd) {
 }
 
 async function androidRunningMap() {
+  await locateAndroidTools();
   const map = {};
   const r = await run(ADB_BIN, ['devices']);
   if (!r.ok) return map;
@@ -306,6 +308,7 @@ async function waitForAndroidGone(avd, timeoutMs) {
 
 export async function shutdownAndroid(serial) {
   if (FAKE() || !serial) return { ok: true };
+  await locateAndroidTools();
   return run(ADB_BIN, ['-s', serial, 'emu', 'kill'], { timeout: 30000 });
 }
 
@@ -344,6 +347,7 @@ export async function motionHash(dev) {
       try { fs.unlinkSync(tmp); } catch {}
       return bmpFrameHash(buf);
     }
+    await locateAndroidTools();
     if (dev.source === 'remote' && dev.serial) {
       const r = await run(ADB_BIN, ['-s', dev.serial, 'shell', REMOTE_FRAME_HASH], { timeout: 20000 });
       return r.ok && /^[0-9a-f]{32}\b/.test(r.stdout) ? r.stdout.slice(0, 32) : null;

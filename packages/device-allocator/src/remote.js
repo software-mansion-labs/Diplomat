@@ -31,7 +31,7 @@ import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import {
   ADB_BIN, BASE_DIR, REMOTE_ACQUIRE_BUDGET_MS, REMOTE_ATTACH_BUDGET_MS, REMOTE_POOL_INTERVAL_MS, REMOTE_RELEASES_PATH,
-  REMOTE_RELEASE_RETRY_MS,
+  REMOTE_RELEASE_RETRY_MS, locateAndroidTools,
 } from './paths.js';
 import { atomicWrite, readConfig } from './state.js';
 import { run, matchesRequirements, androidApi } from './devices.js';
@@ -59,7 +59,7 @@ async function provider(path) {
   if (!entry) {
     entry = { provider: null, error: null };
     entry.ready = import(pathToFileURL(path).href)
-      .then((mod) => { entry.provider = mod.default({ log, run, adb: ADB_BIN, stateDir: BASE_DIR, atomicWrite, matchesRequirements, androidApi, wsock }); })
+      .then(async (mod) => { await locateAndroidTools(); entry.provider = mod.default({ log, run, adb: ADB_BIN, stateDir: BASE_DIR, atomicWrite, matchesRequirements, androidApi, wsock }); })
       .catch((e) => { entry.error = String(e.message || e); log('remote: provider failed to load', path, entry.error); })
       .finally(() => onChange?.());
     instances.set(path, entry);
