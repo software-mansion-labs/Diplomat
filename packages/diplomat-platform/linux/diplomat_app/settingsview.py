@@ -1393,8 +1393,7 @@ class SettingsView(QWidget):
             [("My PRs", "prs"), ("My PRs and issues", "mine"), ("All rated items", "all")],
             tint=_INDIGO)
         self._pipeline_scope.set_value(st.pipeline_mirror_scope)
-        self._pipeline_scope.changed.connect(
-            lambda scope: setattr(self.store, "pipeline_mirror_scope", str(scope)))
+        self._pipeline_scope.changed.connect(self._on_pipeline_scope)
         self._pipeline_scope_row = self._track(SettingRow(
             "Mirror onto", self._pipeline_scope, stacked=True,
             summary="Which rated items get the labels",
@@ -1500,6 +1499,14 @@ class SettingsView(QWidget):
         """A switch turned on acts at once, not a sync period later."""
         setattr(self.store, attr, on)
         if on:
+            self.store.run_pipeline_sync_async()
+
+    def _on_pipeline_scope(self, scope) -> None:
+        """A wider scope acts at once, as a switch turned on does."""
+        wider = (pipeline.MIRROR_SCOPES.index(str(scope))
+                 > pipeline.MIRROR_SCOPES.index(self.store.pipeline_mirror_scope))
+        self.store.pipeline_mirror_scope = str(scope)
+        if wider:
             self.store.run_pipeline_sync_async()
 
     def _on_pipeline_teams_changed(self, text: str) -> None:

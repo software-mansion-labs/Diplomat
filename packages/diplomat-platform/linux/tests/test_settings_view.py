@@ -694,7 +694,10 @@ def test_mirror_onto_opens_on_the_stored_scope_and_writes_through(make_view, mon
     assert Store().pipeline_mirror_scope == "all"
     assert json.loads((pipeline.pipeline_dir() / "control.json").read_text()
                       )["mirrorScope"] == "all"
-    assert synced == []
+    assert synced == [True]
+    view._pipeline_scope._group.button(0).click()
+    assert Store().pipeline_mirror_scope == "prs"
+    assert synced == [True]
 
 
 def test_the_linear_teams_line_reports_what_it_cannot_read(make_view, monkeypatch):
