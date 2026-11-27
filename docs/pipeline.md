@@ -344,8 +344,8 @@ its commits, its base branch and the checks it requires read only for a PR nothi
 A hold shows on the card and is logged each time it changes. A merge `gh` refuses (no admin rights, a
 head that moved) is a notice, and the next sync tries again. The PR is read again after every merge,
 by a later sync if that read fails or the sync ends first, as `gh` exits 0 on one merged already:
-it counts as Diplomat's merge only if GitHub then shows it merged at that head by you, and merged
-by anyone else or at another head, it is a notice.
+it counts as Diplomat's merge only if GitHub then shows it merged at that head by you and, read
+only by a later sync, `gh` had said it merged; any other merge is a notice.
 
 ## The Pipeline screen
 
@@ -479,7 +479,8 @@ trackers' labels, this is what a sync needs:
   try again; the issues that would not split and why, and those being split with the parts the
   model answered and those filed so far; and the issues Diplomat filed as parts, with the ban each
   carries; the ratings asked for and not yet applied, and the items whose rating was cancelled in
-  the queue. An item missing from a read keeps these until it is read merged or closed, or goes 90 days unseen. Also what was last
+  the queue. An item missing from a read keeps these until it is read merged or closed, or goes 90 days unseen. Also each
+  merge asked of `gh` whose end no read after it saw, until one does or for 90 days, and what was last
   logged, so the log does not repeat itself. A `state.json` or `ratings.json` that is there but
   cannot be read leaves every sync reading and showing only, with a notice.
 - `rate/` - each rating asked for: the call its job makes, and the answer it leaves for the next
@@ -509,9 +510,9 @@ the app quits.
   merged or closed PRs updated last, with the closed issues of the repo they link to.
 - Linear: the 300 open issues of the tracked teams updated last, and each one's first 10 attachments
   (more holds it).
-- Past either cap a notice says so. An item an ask or attempt record names that these reads miss (closed, archived
-  on Linear, or past a cap) is read by itself. A source that cannot be read, or is read only in part, is a
-  notice, and the sync goes on without what it missed: a root read past its cap fixes and splits
+- Past either cap a notice says so. An item these reads miss (closed, archived on Linear, or past a cap) is read by
+  itself when an ask, an attempt record or a merge whose end no read saw names it. A source that cannot be read,
+  or is read only in part, is a notice, and the sync goes on without what it missed: a root read past its cap fixes and splits
   none of its issues, one read with errors, or whose Linear team was not read, is only read and
   shown, and an item missing from a read keeps its guards.
 - One sync at a time: another started meanwhile reads nothing, with a notice in the activity feed,

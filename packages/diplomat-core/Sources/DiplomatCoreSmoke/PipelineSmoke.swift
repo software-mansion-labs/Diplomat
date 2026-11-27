@@ -2825,8 +2825,9 @@ private func pipelineClearsAndMerges(base: URL, root: PipelineSettings.Root, t0:
         try Data(#"{"cleared": {"\#(prURL(15))": "\#(sha("e0"))"}}"#.utf8)
             .write(to: dir(kept).appendingPathComponent("state.json"))
         if kept == "switched-off" {
-            PipelineControl(enabled: true, rate: false, fix: false, fastTrack: false, merge: false, fracture: false)
-                .save(in: dir(kept))
+            var off = PipelineControl(settings: ftOn)
+            off.fastTrack = false
+            off.save(in: dir(kept))
         } else {
             t.refuseLabels = ["15 diplomat:cleared"]
         }
@@ -2843,10 +2844,26 @@ private func pipelineClearsAndMerges(base: URL, root: PipelineSettings.Root, t0:
                 + "\(stageOf(s2.result, prURL(15)))")
     }
 
-    // A merge whose sync died once gh was asked is told by a later sync that reads it, once.
+    // A merge whose sync died once gh was asked is told once, by a later sync: past one whose
+    // read after failed, one that read nothing, and the PRs merged last that a read lists. It
+    // is this Diplomat's merge only if gh said so before the sync died.
+    func past(_ data: Data) -> Data {
+        func walk(_ v: Any) -> Any {
+            guard var d = v as? [String: Any] else { return v }
+            for (k, x) in d { d[k] = walk(x) }
+            if var done = d["done"] as? [String: Any], let nodes = done["nodes"] as? [[String: Any]] {
+                done["nodes"] = nodes.filter { $0["number"] as? Int != 13 }
+                d["done"] = done
+            }
+            return d
+        }
+        return (try? JSONSerialization.jsonObject(with: data)).map { json(walk($0)) } ?? data
+    }
     let unread = "#13 may have been merged: it could not be read again: gh: Bad Gateway (HTTP 502)"
+    let unsaid = "#13 was merged at c3c3c3c, but gh did not say it was this Diplomat's merge"
     let merges: [(String, (Trackers) -> Void, [String])] = [
-        ("mine", { _ in }, []),
+        ("asked", { _ in }, [unsaid]),
+        ("answered", { _ in }, []),
         ("theirs", { $0.mergedAt = sha("c4") }, ["#13 was merged, but not by this sync at c3c3c3c"]),
         ("open", { $0.mergeIgnored = true }, ["#13 was not merged: it is still open"]),
     ]
@@ -2855,17 +2872,23 @@ private func pipelineClearsAndMerges(base: URL, root: PipelineSettings.Root, t0:
         change(t)
         let died = dir("died-" + name), disk = dir("disk-" + name)
         try seedRerate(died, 13, sha("c3"), at: later(-60))
-        var rereadFails = false
+        var asked = false, rereadFails = false, unlisted = false
         var io = t.io()
         io.gh = { args in
-            // What the sync had saved as it died.
-            if args.starts(with: ["pr", "merge"]) { try? fm.copyItem(at: died, to: disk) }
+            // What the sync had saved as it died: as it asked gh, or as it read the PR after.
+            if args.starts(with: ["pr", "merge"]) {
+                asked = true
+                if name != "answered" { try? fm.copyItem(at: died, to: disk) }
+            }
             if args.contains("operationName=PullRequest") {
+                if asked && name == "answered" { try? fm.copyItem(at: died, to: disk) }
                 // As GitHub answers a read naming no head.
                 if args.contains("head=") { return .init(status: 1, stderr: "gh: Could not resolve head ref ''.\n") }
                 if rereadFails { return .init(status: 1, stderr: "gh: Bad Gateway (HTTP 502)\n") }
             }
-            return t.gh(args)
+            let out = t.gh(args)
+            guard unlisted, args.contains("operationName=Repo") else { return out }
+            return .init(status: out.status, stdout: past(out.stdout), stderr: out.stderr)
         }
         func run(_ settings: PipelineSettings, _ d: URL, _ now: Date) -> PipelineTickResult {
             PipelineTick.run(settings: settings, now: now, dir: d, io: io)
@@ -2873,24 +2896,70 @@ private func pipelineClearsAndMerges(base: URL, root: PipelineSettings.Root, t0:
         _ = run(PipelineSettings(roots: [root], merge: true), died, t0)
         rereadFails = true
         let d1 = run(PipelineSettings(roots: [root]), disk, later(5))
-        rereadFails = false
+        (rereadFails, t.ghFails) = (false, true)
+        _ = run(PipelineSettings(roots: [root]), disk, later(7))
+        (t.ghFails, unlisted) = (false, true)
         let d2 = run(PipelineSettings(roots: [root]), disk, later(10))
         let d3 = run(PipelineSettings(roots: [root]), disk, later(15))
         let logged = d2.events.filter { $0.at == later(10) && $0.kind == .merged }.map(\.detail)
         check(d1.notices == [unread] && d2.notices == told && d3.notices.isEmpty
-              && logged == (name == "mine" ? ["merged c3c3c3c with --admin --squash"] : [])
+              && logged == (name == "answered" ? ["merged c3c3c3c with --admin --squash"] : [])
               && !d3.events.contains { $0.at == later(15) },
               "a merge whose sync died, \(name): \(d1.notices) then \(logged) \(d2.notices) then \(d3.notices)")
     }
+    // One gh failed on and the read after too, merged by hand before the next sync: told once
+    // there, not here, and not as this Diplomat's.
+    let byHand = only([13, 27])
+    try seedRerate(dir("by-hand"), 13, sha("c3"), at: later(-60))
+    var down = false
+    var hio = byHand.io()
+    hio.gh = { args in
+        if args.starts(with: ["pr", "merge"]) { down = true }
+        guard down, args.starts(with: ["pr", "merge"]) || args.contains("operationName=PullRequest") else {
+            return byHand.gh(args)
+        }
+        return .init(status: 1, stderr: "gh: dial tcp: i/o timeout\n")
+    }
+    let mergeOn = PipelineSettings(roots: [root], merge: true)
+    let h1 = PipelineTick.run(settings: mergeOn, now: t0, dir: dir("by-hand"), io: hio)
+    down = false
+    (byHand.prs[0].state, byHand.prs[0].mergedBy) = ("MERGED", opLogin)
+    let h2 = PipelineTick.run(settings: mergeOn, now: later(10), dir: dir("by-hand"), io: hio)
+    let timeout = "gh: dial tcp: i/o timeout"
+    check(h1.notices == ["#13 was not merged (\(timeout)): it could not be read again: \(timeout)"]
+          && h2.notices == [unsaid] && !h2.events.contains { $0.kind == .merged },
+          "merged by hand after a merge gh failed on: \(h1.notices) then \(h2.notices)")
+    // One gh refused is told in gh's words.
+    let refused = only([13, 27])
+    try seedRerate(dir("merge-refused"), 13, sha("c3"), at: later(-60))
+    var rio = refused.io()
+    rio.gh = { args in
+        guard args.starts(with: ["pr", "merge"]) else { return refused.gh(args) }
+        return .init(status: 1, stderr: "gh: Pull request is not mergeable\n")
+    }
+    let rf = PipelineTick.run(settings: mergeOn, now: t0, dir: dir("merge-refused"), io: rio)
+    check(rf.notices == ["#13 was not merged: gh: Pull request is not mergeable"], "a merge gh refused: \(rf.notices)")
     // One of a PR still cleared is asked again, and only the new one told.
+    func asked(_ d: URL, at when: String) throws {
+        try Data(#"{"merging": {"\#(prURL(13))": {"head": "\#(sha("c3"))", "flag": "--squash", "at": "\#(when)"}}}"#.utf8)
+            .write(to: d.appendingPathComponent("state.json"))
+    }
     let again = only([13, 27])
     try seedRerate(dir("again"), 13, sha("c3"), at: later(-60))
-    try Data(#"{"merging": {"\#(prURL(13))": "\#(sha("c3")) --squash"}}"#.utf8)
-        .write(to: dir("again").appendingPathComponent("state.json"))
+    try asked(dir("again"), at: "2026-11-20T11:00:00Z")
     let ag = sync(again, PipelineSettings(roots: [root], merge: true), dir("again"), t0)
     check(ag.writes == ["merge #13 --squash \(sha("c3"))"] && ag.result.notices.isEmpty
           && ag.events.filter { $0.kind == .merged }.count == 1,
           "a merge asked again: \(ag.writes) \(ag.result.notices) \(trail(ag.events, ag.result))")
+    // One no read told of is forgotten 90 days after it was asked.
+    let old = only([13, 27])
+    try seedRerate(dir("old"), 13, sha("c3"), at: later(-60))
+    try asked(dir("old"), at: "2026-08-21T11:59:00Z")
+    old.ghFails = true
+    _ = sync(old, PipelineSettings(roots: [root]), dir("old"), t0)
+    old.ghFails = false
+    let od = sync(old, PipelineSettings(roots: [root]), dir("old"), later(5))
+    check(od.result.notices.isEmpty, "a merge asked 91 days ago: \(od.result.notices)")
 }
 
 /// A banned Linear author, a PR behind its base, a Linear recheck that failed, and failures
