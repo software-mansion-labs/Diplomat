@@ -21,7 +21,9 @@ written through the real recorder into the per-test temp dir.
 
 from __future__ import annotations
 
+import re
 import time
+from pathlib import Path
 
 import pytest
 
@@ -175,6 +177,27 @@ def test_the_spread_measures_each_window_separately(store):
     assert len(lines) == 2, "a window was drawn without figures of its own"
     assert lines[0].startswith("◼ 5-hour  2.0%"), "50.5k of a 2.5M window"
     assert lines[1].startswith("◼ 7-day  0.20%"), "the same 50.5k of a 25M week"
+
+
+def test_the_spread_entry_is_read_for_the_fields_its_comment_names(store, monkeypatch):
+    from diplomat_app import telemetryview
+
+    read = set()
+
+    class Recording(dict):
+        def get(self, key, default=None):
+            read.add(key)
+            return super().get(key, default)
+
+    entry = telemetryview._METRIC["limitSpread"]
+    monkeypatch.setitem(telemetryview._METRIC, "limitSpread", Recording(entry))
+    _seed()
+    _view(store)
+    named = re.findall(r"Only its (\w+) is read", entry["_comment"])
+    assert read == set(named)
+    swift = (Path(__file__).parents[2] / "macos" / "Sources" / "Diplomat"
+             / "TelemetryView.swift").read_text(encoding="utf-8")
+    assert re.findall(r'(\w*)\(?"limitSpread"', swift) == named
 
 
 def test_a_week_the_samples_never_priced_says_so_instead_of_drawing_zero(store):
