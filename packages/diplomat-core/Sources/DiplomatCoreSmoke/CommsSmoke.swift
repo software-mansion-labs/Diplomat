@@ -2196,13 +2196,20 @@ private func classifierSmoke() throws {
           == ["-l", "-c", "'/bin/zsh' -i -c 'whence -p '\\''claude'\\'' 2>/dev/null || type -P '\\''claude'\\'' 2>/dev/null'"],
           "the probe asks for the file, not the alias: \(LoginShell.arguments(shell: "/bin/zsh", probe: LoginShell.locateProbe("claude")))")
     let bin = dir.appendingPathComponent("bin", isDirectory: true)
-    try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-    try FileManager.default.copyItem(at: stub, to: bin.appendingPathComponent("claude"))
-    let alias = "alias claude='claude --dangerously-skip-permissions'\n"
-    try alias.write(to: dir.appendingPathComponent(".zshrc"), atomically: true, encoding: .utf8)
-    try alias.write(to: dir.appendingPathComponent(".bashrc"), atomically: true, encoding: .utf8)
-    let env = ["HOME": dir.path, "ZDOTDIR": dir.path,
-               "PATH": "\(bin.path):/usr/bin:/bin:/usr/sbin:/sbin"]
+    let profileBin = dir.appendingPathComponent("profile-bin", isDirectory: true)
+    for d in [bin, profileBin] {
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: stub, to: d.appendingPathComponent("claude"))
+    }
+    // The profile stands in for the login stage, which puts its own dirs first (path_helper,
+    // Homebrew's shellenv); the stub goes on PATH from the rc read after it, as nvm does.
+    let profile = "export PATH=\(profileBin.path):$PATH\n"
+    try profile.write(to: dir.appendingPathComponent(".zprofile"), atomically: true, encoding: .utf8)
+    try profile.write(to: dir.appendingPathComponent(".bash_profile"), atomically: true, encoding: .utf8)
+    let rc = "export PATH=\(bin.path):$PATH\nalias claude='claude --dangerously-skip-permissions'\n"
+    try rc.write(to: dir.appendingPathComponent(".zshrc"), atomically: true, encoding: .utf8)
+    try rc.write(to: dir.appendingPathComponent(".bashrc"), atomically: true, encoding: .utf8)
+    let env = ["HOME": dir.path, "ZDOTDIR": dir.path, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]
     var shellsTried = 0
     for shell in ["/bin/zsh", "/bin/bash"] where FileManager.default.isExecutableFile(atPath: shell) {
         shellsTried += 1
@@ -2212,7 +2219,7 @@ private func classifierSmoke() throws {
     }
     check(shellsTried > 0, "at least one real shell was asked")
     // iTerm2's integration, sourced from the rc of a shell with no TERM, opens with these.
-    let integration = alias + "printf '\\033]1337;RemoteHost=u@h\\007\\033]1337;ShellIntegrationVersion=14\\007'\n"
+    let integration = rc + "printf '\\033]1337;RemoteHost=u@h\\007\\033]1337;ShellIntegrationVersion=14\\007'\n"
     try integration.write(to: dir.appendingPathComponent(".zshrc"), atomically: true, encoding: .utf8)
     try integration.write(to: dir.appendingPathComponent(".bashrc"), atomically: true, encoding: .utf8)
     for shell in ["/bin/zsh", "/bin/bash"] where FileManager.default.isExecutableFile(atPath: shell) {
