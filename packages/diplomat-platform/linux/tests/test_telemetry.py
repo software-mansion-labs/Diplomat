@@ -1514,10 +1514,11 @@ def test_a_logged_out_machine_never_rounds(credentials):
 
 def test_the_telemetry_doc_lists_the_two_gatherers_it_counts():
     doc = (Path(__file__).resolve().parents[4] / "docs" / "telemetry.md").read_text(encoding="utf-8")
-    head = "Two gatherers fill in what GitHub doesn't know:\n\n"
-    # Markdown ends a list at an unindented non-bullet line, not at a blank one.
-    listed = re.split(r"\n\n+(?!- |\s)", doc[doc.index(head) + len(head):], maxsplit=1)[0]
-    assert re.findall(r"^- \*\*(.+?)\*\*", listed, re.M) == ["Quota", "Token attribution"]
+    head = "Two gatherers fill in what GitHub doesn't know:"
+    item = r"(?:[-*+]|\d+[.)]) "
+    # A blank line ends the list only before an unindented line that is not an item.
+    listed = re.split(rf"\n\n+(?!{item}|\s)", doc[doc.index(head) + len(head):], maxsplit=1)[0]
+    assert re.findall(rf"^{item}(?:\*\*(.+?)\*\*)?", listed, re.M) == ["Quota", "Token attribution"]
 
 
 # MARK: - The assets README
