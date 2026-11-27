@@ -555,9 +555,8 @@ def clamp_auto_task_limit(value: int) -> int:
 # → `per_task_week`), or, for a runner billed in money, at what the provider charged for
 # the model it ran on (`per_task_usd`). So the question "can we afford one more" has
 # a statistical answer — and the one worth asking is about the NEXT task, not about
-# the average one. Half of all tasks cost more than the mean, and the distribution
-# is right-skewed (most small, a few enormous), so a gate set at the mean would wave
-# through the expensive tail every time.
+# the average one. The distribution is right-skewed (most small, a few enormous),
+# so a gate set at the mean would wave through the expensive tail every time.
 #
 # Hence a one-sided upper PREDICTION bound: the cost that one more task will come
 # in under, with the configured confidence. That is what `autoBudgetConfidence`
@@ -651,7 +650,7 @@ def task_cost_bound(mean: float, sd: float, count: int, *,
     uncertainty in where their average sits, and so stops narrowing as the ledger
     fills. (The interval the Telemetry screen draws is the other one, ``z·sd/√n``,
     and converges on the mean — a gate built from it would end up approving the
-    average task, which by construction half of them cost more than.)
+    average task and waving the expensive tail through.)
 
     None when the ledger cannot answer: fewer finished-and-priced tasks than the
     caller's minimum, or a non-finite figure from an unusable one. The caller then

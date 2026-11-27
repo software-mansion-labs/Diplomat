@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import re
 import time
+from pathlib import Path
 
 import pytest
 
@@ -1284,6 +1286,28 @@ def test_task_cost_bound_is_a_prediction_interval_not_one_on_the_mean():
     assert bound > 2.0 + z
     assert autofix.task_cost_bound(2.0, 1.0, 10_000, z=z, min_sample=2) > 2.0 + z
     assert autofix.task_cost_bound(2.0, float("nan"), 9, z=z, min_sample=2) is None
+
+
+def test_the_case_for_the_bound_never_puts_half_the_tasks_above_the_mean():
+    """A right-skewed cost's mean sits above its median, so fewer than half the tasks
+    cost more than it."""
+    root = Path(__file__).resolve().parents[4]
+    homes = ["docs/automation.md",
+             "packages/diplomat-core/Sources/DiplomatCore/Autofix.swift",
+             "packages/diplomat-runtime/diplomat_runtime/autofix.py",
+             "packages/diplomat-platform/linux/tests/test_autobudget.py"]
+
+    def prose(text: str) -> str:
+        lines = text.splitlines()
+        return " ".join(re.sub(r"^\s*(/{2,}|#:?)?\s*", "", ln) for ln in lines).lower()
+
+    claim = re.compile(
+        r"(?<!fewer than )(?<!less than )\bhalf\b[^.]*\bcost more than(?! the median)")
+    assert claim.search(prose("/// Half of all tasks cost more\n/// than the mean.")), \
+        "the pattern no longer sees the claim it guards against"
+    found = {rel: m.group(0) for rel in homes
+             if (m := claim.search(prose((root / rel).read_text(encoding="utf-8"))))}
+    assert found == {}
 
 
 _FIRST = "first"
