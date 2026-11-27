@@ -1,8 +1,8 @@
 """Resolve-conflicts config + prompt builder.
 
 The prompt text (scope templates, action blocks) all comes from the shared
-``assets/conflicts.json``; only the *assembly* order/conditions live here as a thin
-glue layer, identical to ConflictConfig's ``buildPrompt`` in DiplomatCore. The
+``assets/conflicts.json``; the *assembly* order/conditions live in Swift
+(DiplomatCore/Conflict.swift), reached through the ``diplomat-core`` CLI. The
 terminal spawner is shared with :mod:`review` (``review.spawn`` / ``review.resolved``).
 """
 

@@ -1,5 +1,5 @@
 {
-  "_comment": "The Review-PRs prompt model: depth levels + the scope/action text blocks that the wizard assembles into the agent prompt. Verbatim from ReviewWizard.swift. The assembly order/conditions live as a tiny glue layer in each front-end.",
+  "_comment": "The Review-PRs prompt model: depth levels + the scope/action text blocks that the wizard assembles into the agent prompt. The assembly order/conditions live in Review.swift, reached from Linux through the diplomat-core CLI.",
   "defaultDepth": "deep",
   "depths": [
     {
