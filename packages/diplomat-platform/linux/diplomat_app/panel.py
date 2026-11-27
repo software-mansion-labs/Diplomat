@@ -83,6 +83,8 @@ def _clear_layout(layout) -> None:
         item = layout.takeAt(0)
         w = item.widget()
         if w is not None:
+            # Hidden first: a show its layout queued this turn would open it as a window of its own.
+            w.hide()
             w.setParent(None)  # remove from display synchronously …
             w.deleteLater()  # … then free it on the next loop turn
         elif item.layout() is not None:
@@ -790,6 +792,7 @@ class Panel(QWidget):
         offering = self.store.network_offering
         free = self.store.free_auto_slots
         running = self.store.running_tasks
+        ratings = self.store.running_ratings
         parts = [f"{len(queued)} queued" if queued else "",
                  f"{free} free" if free else ""]
         caption = " · ".join(p for p in parts if p)
@@ -798,8 +801,8 @@ class Panel(QWidget):
         # would drop the count for as long as its spawn takes. Empty bays are not:
         # a device with nothing to do reads "0", not "2".
         header = SectionHeader(glyph=glyphs.G_TASKS, title="Agent tasks",
-                               count=(len(running) + len(starting) + len(offering)
-                                      + len(queued)),
+                               count=(len(running) + len(ratings) + len(starting)
+                                      + len(offering) + len(queued)),
                                caption=caption or None,
                                expanded=self._tasks_expanded)
         header.clicked.connect(self._toggle_tasks)
@@ -836,6 +839,18 @@ class Panel(QWidget):
                 hex_color=tint,
                 tracked=agent.tracked,
                 awaiting_input=agent.awaiting_input,
+            )))
+        glyph, tint = _task_look(autofix.QUEUE_RATE_ACTION)
+        for rating in ratings:
+            ranked.append((agentstate.STATE_ORDER.index(agentstate.RUNNING), RunningTaskRow(
+                label=rating.label,
+                detail=_running_detail(autofix.RunningAgent(
+                    pr_number=0, label=rating.label, kind=autofix.QUEUE_RATE_ACTION,
+                    tracked=True, started_at=rating.started_at)),
+                glyph=glyph,
+                hex_color=tint,
+                tracked=True,
+                rating=True,
             )))
         starting_rank = agentstate.STATE_ORDER.index(agentstate.STARTING)
         for task in starting:

@@ -51,6 +51,7 @@
     "network-stop": "network",
     "pipeline-fix": "issues",
     "pipeline-review": "review",
+    "pipeline-rate": "review",
     "pipeline-merge": "merge",
     "pipeline-fracture": "issues",
     "pipeline-notice": "system",

@@ -12,6 +12,11 @@ private var linearLoginTerminated: sig_atomic_t = 0
 ///                  stdin is not settings or stdout cannot be written.
 ///   pipeline-last  no stdin. stdout = the last sync's PipelineTickResult, or an empty one
 ///                  dated 1970-01-01 before the first.
+///   pipeline-rate  stdin = `{"item", "stamp", "cancel"?}`: a rating effect's `url` and
+///                  `stamp`. `PipelineRateJob.run`, or with `cancel` true
+///                  `PipelineRateJob.cancel`; stdout = `{"outcome": "rated" | "failed" |
+///                  "answered" | "superseded" | "cancelled", "detail"}`. Exits 0 either
+///                  way, 1 when stdin names no item and stamp.
 ///   pipeline-teams stdin = `{"raw": <the Linear teams setting>}`. stdout = `{"teams":
 ///                  [{"key", "repo"}], "bad": [entry]}` (`PipelineSettings.LinearTeam.parse`),
 ///                  so the Linux twin of the parse is tested against this one.
@@ -39,6 +44,25 @@ enum PipelineCommand {
         // error, not a signal.
         signal(SIGPIPE, SIG_IGN)
         emitJSON(result)
+    }
+
+    static func rate(_ obj: [String: Any]) {
+        guard let item = obj["item"] as? String, let stamp = obj["stamp"] as? String else {
+            die("stdin names no item and stamp", 1)
+        }
+        if (obj["cancel"] as? JSONInput.Flag)?.on == true {
+            let done = PipelineRateJob.cancel(item: item, stamp: stamp)
+            return emitObject(["outcome": done ? "cancelled" : "superseded", "detail": ""])
+        }
+        signal(SIGPIPE, SIG_IGN)
+        let (outcome, detail): (String, String)
+        switch PipelineRateJob.run(item: item, stamp: stamp) {
+        case .rated(let r): (outcome, detail) = ("rated", r)
+        case .failed(let why): (outcome, detail) = ("failed", why)
+        case .answered: (outcome, detail) = ("answered", "")
+        case .superseded: (outcome, detail) = ("superseded", "")
+        }
+        emitObject(["outcome": outcome, "detail": detail])
     }
 
     static func teams(_ obj: [String: Any]) {
