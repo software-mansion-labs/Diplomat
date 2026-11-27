@@ -116,6 +116,9 @@ _GH_CALLS_PER_CLAUDE = 16
 #: Per split part: a re-read, the parts filed before (twice after a failed create), the
 #: create and its sub-issue link.
 _GH_CALLS_PER_PART = 5
+#: Per kept rating a mirror labels past those answered (``labels.mirrorPerSync``): a re-read,
+#: then for each of its two labels a create, an add and the other levels' removal.
+_GH_CALLS_PER_MIRROR = 9
 #: Per takeover or revoke asked: a re-read, then the fast-track label's create and add, or
 #: the fast-track labels' removal; and a PR's clear in the same sync, as `cleared`'s.
 _GH_CALLS_PER_TAKEOVER = 6
@@ -159,10 +162,13 @@ def tick_timeout(settings: dict) -> float:
     per_split = (int((t.get("fracture") or {}).get("maxChildren", 6)) * _GH_CALLS_PER_PART
                  * _GH_CALL_SECS)
     takeovers = len(force.get("takeover") or []) + len(force.get("revoke") or [])
+    mirrors = (int((t.get("labels") or {}).get("mirrorPerSync", 10))
+               if settings.get("mirrorGitHub") or settings.get("mirrorLinear") else 0)
     roots = max(1, len(settings.get("roots") or []))
     return min(MAX_SYNC_SECS, ratings * _GH_CALLS_PER_CLAUDE * _GH_CALL_SECS
                + splits * (per_claude + per_split)
                + takeovers * _GH_CALLS_PER_TAKEOVER * _GH_CALL_SECS
+               + mirrors * _GH_CALLS_PER_MIRROR * _GH_CALL_SECS
                + roots * (_read_calls(t) + _MERGES_PER_ROOT * _GH_CALLS_PER_MERGE) * _GH_CALL_SECS
                + len(settings.get("queued") or []) * _GH_CALL_SECS
                + (_LINEAR_SECS if settings.get("linearTeams") else 0)

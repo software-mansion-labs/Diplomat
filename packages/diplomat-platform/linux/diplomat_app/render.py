@@ -990,7 +990,7 @@ def pipeline_fixture_result(slug: str, now: datetime) -> dict:
                        kind="issue", source="linear", repo="ENG", stage="candidate",
                        lane="fast", writable=True, updated=ago(30), author="Marta Kowalska",
                        rating=low, rated_by="local",
-                       hold="it could not be read again right before its fix was asked for"),
+                       hold="its rating waits for a sync that reads it again"),
         _pipeline_item(issue(1833), "#1833", "Keep the device list in boot order across reboots",
                        kind="issue", stage="candidate", lane="fast", writable=True,
                        updated=ago(70), author="ola", rating=("medium", "medium"),

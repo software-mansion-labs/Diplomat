@@ -1106,6 +1106,16 @@ def test_a_syncs_deadline_grows_with_what_it_may_do(monkeypatch):
         pipeline.tick_timeout({}) + 3 * 6 * 65)
 
 
+def test_a_syncs_deadline_holds_the_labels_a_mirror_writes():
+    """``labels.mirrorPerSync`` kept ratings past those answered, each a re-read and, for
+    each of its two labels, a create, an add and two removals."""
+    assert pipeline.tunables()["labels"]["mirrorPerSync"] == 10
+    for mirror in ("mirrorGitHub", "mirrorLinear"):
+        assert pipeline.tick_timeout({mirror: True}) == pipeline.tick_timeout({}) + 10 * 9 * 65
+    assert pipeline.tick_timeout({"mirrorGitHub": False, "mirrorLinear": False}) == (
+        pipeline.tick_timeout({}))
+
+
 def test_a_syncs_deadline_fits_a_capped_roots_whole_read():
     """A root read whole at ``githubMaxItems`` open issues and as many open PRs, every page
     cut to ``githubPage.least`` by timeouts: 300 / 3 pages of each, the first two in one
