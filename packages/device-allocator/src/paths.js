@@ -68,12 +68,11 @@ const isExecutableFile = (p) => {
 const onPath = (name, dirs = '') => dirs.split(path.delimiter).filter(Boolean)
   .map((d) => path.join(d, name)).find(isExecutableFile);
 
-// A bare name no PATH entry holds is looked up where the operator's terminal would
-// find it: the SDK under the ANDROID_HOME / ANDROID_SDK_ROOT their shell's rc files
-// export, else on that shell's PATH. A daemon launchd started inherits neither. Run
-// before either binary. Callers wait on the first probe only. A shell that answered is
-// not asked again in this process; one that did not is asked again, in the background,
-// LOGIN_SHELL_RETRY_MS later.
+// A bare name no PATH entry holds is looked up where the operator's terminal finds it:
+// the SDK under the ANDROID_HOME / ANDROID_SDK_ROOT their shell's rc files export, else
+// that shell's PATH. A daemon launchd started inherits neither. Await before either
+// binary; only the first probe is waited on. A shell that answered is not asked again;
+// one that did not is, in the background, LOGIN_SHELL_RETRY_MS later.
 let located;
 let retryAt = 0;
 export function locateAndroidTools() {

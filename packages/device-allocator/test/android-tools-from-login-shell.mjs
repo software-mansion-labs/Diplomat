@@ -17,8 +17,8 @@ const HOME = path.join(BASE, 'home');
 const PROBES = path.join(BASE, 'probes.log');
 const CALLS = path.join(BASE, 'adb.log');
 const PID = path.join(BASE, 'hung.pid');
-// What the rc's leave running sits in the probe's own process group, out of reach of a
-// signal to this test's; each names BASE on its command line.
+// What an rc leaves running sits in the probe's own process group, beyond a signal to
+// this test's; each such command line names BASE.
 const cleanup = () => {
   try { execFileSync('pkill', ['-f', BASE]); } catch {}
   fs.rmSync(BASE, { recursive: true, force: true });
