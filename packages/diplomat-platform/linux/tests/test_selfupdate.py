@@ -998,8 +998,49 @@ def test_update_button_reports_a_relaunched_applet_that_dies(repos):
     assert _click_update(qapp, store, view) == "error", store.update_state
     assert store.update_state["error"] == \
         "the relaunched applet exited 3; this one is still the old build"
+    # Logged too: the view loses the reason once it is closed or the app restarts.
+    assert _log()[-1] == \
+        "update failed: the relaunched applet exited 3; this one is still the old build"
     _pump_until(qapp, store, lambda: "exited 3" in view._update_row.summary(),
                 "the view to show the failure", 5.0)
+
+    view.deleteLater()
+
+
+def test_a_failed_updates_error_copies_verbatim(repos):
+    """By the Copy error button, and by a drag over the line then Ctrl+C."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    origin, clone, _ = repos
+    _advance_origin(origin)
+    (clone / "VERSION").write_text("local\n")
+    qapp, store, view = _settings_view()
+    view.show()
+    QTest.qWaitForWindowExposed(view)
+
+    assert _click_update(qapp, store, view) == "error", store.update_state
+    error = store.update_state["error"]
+    assert error == "checkout has local changes — commit or stash them first"
+    _pump_until(qapp, store, lambda: view._update_copy.isVisible(),
+                "the view to offer Copy error", 5.0)
+    clipboard = QGuiApplication.clipboard()
+    clipboard.clear()
+    view._update_copy.click()
+    assert clipboard.text() == error
+
+    clipboard.clear()
+    line, left = view._update_row._summary, Qt.MouseButton.LeftButton
+    end = QPoint(line.width() - 1, line.height() - 1)
+    # Not (0, 0): QTest reads a null point as the widget's centre.
+    QTest.mousePress(line, left, Qt.KeyboardModifier.NoModifier, QPoint(1, 1))
+    QTest.mouseMove(line, end)
+    QTest.mouseRelease(line, left, Qt.KeyboardModifier.NoModifier, end)
+    assert QApplication.focusWidget() is line
+    QTest.keyClick(line, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+    assert clipboard.text() == error
 
     view.deleteLater()
 

@@ -1407,7 +1407,8 @@ class SettingsView(QWidget):
             inner, "Split big issues", st.pipeline_fracture, "pipeline_fracture",
             "One medium- or high-complexity issue a sync becomes low-complexity child issues",
             "Only an issue Diplomat may write to, not rated high risk, with no children "
-            "and no open PR fixing it. Each child is a real sub-issue and comes back "
+            "and no open PR fixing it, whose code shows two or more independent fixes, or "
+            "groups of fixes, to split it into. Each child is a real sub-issue and comes back "
             "unrated; the parent is labelled diplomat:fractured. Fracture on the Pipeline "
             "screen splits one whatever its rating.")
         options.addWidget(nest)
@@ -1797,6 +1798,11 @@ class SettingsView(QWidget):
         recheck.setToolTip("Re-check for updates")
         recheck.clicked.connect(self.store.refresh_update_status_async)
         row.addWidget(recheck)
+        self._update_copy = QPushButton("Copy error")
+        self._update_copy.setVisible(False)
+        self._update_copy.clicked.connect(
+            lambda: QGuiApplication.clipboard().setText(self._update_row.summary()))
+        row.addWidget(self._update_copy)
         row.addStretch(1)
 
         self._update_row = self._track(SettingRow(
@@ -1811,6 +1817,7 @@ class SettingsView(QWidget):
     def _refresh_update_ui(self) -> None:
         s = self.store.update_state or {"phase": "checking"}
         phase = s.get("phase")
+        self._update_copy.setVisible(bool(s.get("error")))
 
         if phase == "checking":
             self._update_pill.set_state("checking…", _GREY)

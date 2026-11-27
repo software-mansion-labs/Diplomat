@@ -68,14 +68,16 @@ export function tmuxBinary(platform = process.platform) {
 }
 
 // Closing the window only detaches tmux, and the agent never exits on its own: the
-// session ends once unattached. `diplomat-` is TerminalFocus.sessionPrefix.
+// session ends once unattached. On a server of its own (`-L`, as the applets' spawns),
+// so a `tmux kill-server` the agent runs cannot end the operator's sessions.
+// `diplomat-` is TerminalFocus.sessionPrefix.
 export function launcherScript(command, launcher) {
   const tmux = tmuxBinary();
   const session = `diplomat-repair-${path.basename(launcher, '.sh')}`;
   return [
     '#!/bin/sh',
     `export PATH="\${PATH:+$PATH:}"${shq(process.env.PATH || '')}`,
-    ...(tmux ? [`[ -z "$TMUX" ] && exec ${shq(tmux)} new-session -s ${shq(session)} ${shq(`/bin/sh ${shq(launcher)}`)} \\; set-option destroy-unattached on`] : []),
+    ...(tmux ? [`[ -z "$TMUX" ] && exec ${shq(tmux)} -L ${shq(session)} new-session -s ${shq(session)} ${shq(`/bin/sh ${shq(launcher)}`)} \\; set-option destroy-unattached on`] : []),
     `"\${SHELL:-/bin/bash}" -i -c ${shq(command)}`,
     "printf '\\n[repair agent exited - press Enter to close] '",
     'read _',

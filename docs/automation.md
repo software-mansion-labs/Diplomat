@@ -70,8 +70,8 @@ root its PR or issue belongs to.
   the tmux panes neither of them shows - which is every Ghostty agent, since Ghostty
   can be told to open a window but never asked what is in one; Linux: **tmux panes
   only** - there's no portable way to read or type into an arbitrary Linux emulator,
-  so the Linux spawner opens each agent in a tmux session of its own and an agent
-  started outside one is not watched). A screen with
+  so the Linux spawner opens each agent in a tmux session on a server of its own and
+  an agent started outside tmux is not watched). A screen with
   nobody's agent behind it is never written to, whatever it happens to show: the
   nudge is submitted as a line of input, so in a plain shell it would run as a
   command. The process table decides that, since nothing on a screen can - a shell

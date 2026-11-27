@@ -215,7 +215,8 @@ swaps the panel to a settings screen:
   there is no window sitting empty for the command to be typed into and dropped -
   the other two are driven by typing, which is what the five-second input settle is
   for. The trade is that Ghostty can be told to open a window but never asked what
-  is in one, so its agents are run inside **tmux** and read with `capture-pane`;
+  is in one, so its agents are run inside **tmux**, each on a server of its own
+  (`tmux -L <session> attach`), and read with `capture-pane`;
   without tmux on the box Ghostty is not offered at all, because a run whose screen
   cannot be read holds its task-cap slot until a human closes the window.
   The device allocator opens its repair agents in the same terminal: the applet
@@ -253,8 +254,9 @@ swaps the panel to a settings screen:
   is read from, and **Test**. Every one is described in
   [Comms → Settings](comms.md#settings).
 - **Pipeline** - the [Pipeline](pipeline.md) (**default off**): the switch, one switch per thing it
-  may do (rate, open fix PRs, fast-track your PRs, merge cleared PRs with your admin rights, split
-  big issues), the Linear teams and the Linear login, signed in through the browser. Every one is
+  may do (rate, mirror the ratings to GitHub and to Linear as labels, open fix PRs, fast-track your
+  PRs, merge cleared PRs with your admin rights, split big issues), which items the mirrors label, the
+  Linear teams and the Linear login, signed in through the browser. Every one is
   described in [Pipeline → Settings](pipeline.md#settings), the login in
   [Pipeline → Linear](pipeline.md#linear).
 - **Update** - pull the checkout, rebuild, and relaunch in place. Shows how many
