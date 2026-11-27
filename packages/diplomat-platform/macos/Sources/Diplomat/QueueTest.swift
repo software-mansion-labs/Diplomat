@@ -640,7 +640,18 @@ enum QueueTest {
         check("…and keeps the mark, so each is judged once it reads: \(banSkip)",
               store.requestedWork.map(\.key) == [key("issues", 75)]
                   && banSkip == "Issue #74 by @mallory — author is banned, not queued")
+        try? Data("{".utf8).write(to: BanList.fileURL)
+        store.requestedWork = []
+        store.queuedTasks = []
+        store.communityIssuesEnabled = false
+        store.communityIssuesEnabled = true
+        store.queueCommunityIssues([filed(76, minutes: 6)], root: argent, me: store.effectiveMe)
+        let spell = [filed(76, minutes: 6), filed(77, minutes: 7)]
+        store.queueCommunityIssues(spell, root: argent, me: store.effectiveMe)
         try? FileManager.default.removeItem(at: BanList.fileURL)
+        store.queueCommunityIssues(spell, root: argent, me: store.effectiveMe)
+        check("…as is each filed after a root with no mark is first read in it",
+              store.requestedWork.map(\.key) == [key("issues", 77)])
         store.requestedWork = []
         store.queuedTasks = []
 

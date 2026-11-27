@@ -1930,7 +1930,8 @@ class Store(QObject):
         dispatched, can be cancelled, and re-reads its issue when its turn comes.
 
         Each root keeps its own mark, and one with none is baselined on its first read,
-        so adding a root never queues its backlog. A removed root's mark is dropped, so
+        so adding a root never queues its backlog, even while the ban list cannot be
+        read; a marked root's mark holds then. A removed root's mark is dropped, so
         re-adding it does not either. A root whose read failed keeps its mark (logged by
         :meth:`_note_roots_read`), as does every root while one fails to resolve
         (``complete``: :func:`review.roots_complete` of the reading ``roots`` came from)."""
@@ -1950,14 +1951,14 @@ class Store(QObject):
                 failed.append((root, exc))
                 continue
             read.append(root)
-            if unreadable:
-                continue
             try:
                 since = datetime.fromisoformat(marks.get(key, ""))
             except ValueError:
                 # Unset or unreadable: re-baseline rather than fail every poll from
                 # here on.
                 since = None
+            if unreadable and since is not None:
+                continue
             fresh, mark = Filters.new_community_issues(
                 found, since, datetime.now().astimezone())
             for issue in fresh:

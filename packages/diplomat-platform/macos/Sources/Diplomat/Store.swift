@@ -3198,15 +3198,16 @@ final class Store: ObservableObject {
     /// (`Filters.newCommunityIssues`). So it is offered until it is dispatched, can be
     /// cancelled, and re-reads its issue when its turn comes.
     ///
-    /// While the ban list cannot be read nothing is queued and the mark stays, so each
-    /// issue filed meanwhile is judged once it reads.
+    /// While the ban list cannot be read nothing is queued and only a root with no mark
+    /// takes one, so each issue filed meanwhile is judged once it reads.
     ///
     /// Not private: the queue self-test drives it with a fixture fetch.
     func queueCommunityIssues(_ found: [OpenIssue], root: PRRef.LocalRepo, me: String) {
         let bans = BanList.readFile()
-        guard !bans.isUnreadable else { return }
         let key = root.key
-        let scan = Filters.newCommunityIssues(found, since: communityIssuesSince[key], now: Date())
+        let since = communityIssuesSince[key]
+        guard !bans.isUnreadable || since == nil else { return }
+        let scan = Filters.newCommunityIssues(found, since: since, now: Date())
         let banned = BanList.read(bans)
         for issue in scan.fresh {
             let label = itemLabel(PRRef.itemKey(owner: root.owner, repo: root.repo,

@@ -169,6 +169,21 @@ def test_an_unreadable_ban_list_queues_no_issue_and_keeps_the_mark(watched, monk
     assert _feed("ban-skip") == ["Issue #7 by @mallory - author is banned, not queued"]
 
 
+def test_a_root_first_read_while_the_ban_list_is_unreadable_takes_its_mark(watched, monkeypatch):
+    """So an issue filed after that scan is judged once the list reads."""
+    monkeypatch.setattr(bans, "read", _REAL_READ)
+    bans.banned_path().parent.mkdir(parents=True)
+    bans.banned_path().write_text("{")
+    watched.found[:] = [_filed(7)]
+    watched._autofix_poll_once()
+    watched.found.append(_filed(8, minutes=2))
+    watched._autofix_poll_once()
+    assert watched.requested_work == []
+    bans.banned_path().unlink()
+    watched._autofix_poll_once()
+    assert [a.key for a in watched.requested_work] == [f"issues:{PRIMARY}#8"]
+
+
 def test_a_failed_read_is_logged_and_keeps_the_mark(watched, monkeypatch):
     """Not a poll failure: nothing owed is read from it."""
     watched._autofix_poll_once()
