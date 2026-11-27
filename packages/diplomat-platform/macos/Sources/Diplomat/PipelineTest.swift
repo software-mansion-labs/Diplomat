@@ -67,6 +67,9 @@ enum PipelineTest {
               settings.rate && settings.fix && settings.fastTrack && settings.merge && !settings.fracture)
         check("…the mirrors and their scope too",
               settings.mirrorGitHub && !settings.mirrorLinear && settings.mirrorScope == .mine)
+        check("the Linear teams", settings.linearTeams == [PipelineSettings.LinearTeam(key: "ENG", repo: "o/r")])
+        check("no forces while none is asked for", settings.force == nil)
+        check("no item while no ask or attempt record is held", settings.queued.isEmpty)
         // The argument domain outranks every stored one and lives only in this process.
         let arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
         func launched(_ stored: [String: Any]) -> Store {
@@ -78,13 +81,10 @@ enum PipelineTest {
                                     "pipelineMirrorScope": "all"])
         let mirroredBad = launched(["pipelineMirrorGitHub": true, "pipelineMirrorLinear": false,
                                     "pipelineMirrorScope": "everything"])
-        check("a launch reads the mirrors and their scope under the Linux store's keys, an unknown scope as prs",
+        check("a launch reads the mirrors and their scope stored, an unknown scope as prs",
               !mirroredAll.pipelineMirrorGitHub && mirroredAll.pipelineMirrorLinear && mirroredAll.pipelineMirrorScope == .all
                   && mirroredBad.pipelineMirrorGitHub && !mirroredBad.pipelineMirrorLinear
                   && mirroredBad.pipelineMirrorScope == .prs)
-        check("the Linear teams", settings.linearTeams == [PipelineSettings.LinearTeam(key: "ENG", repo: "o/r")])
-        check("no forces while none is asked for", settings.force == nil)
-        check("no item while no ask or attempt record is held", settings.queued.isEmpty)
         check("Linear teams: the core's parse, keys in capitals, entries missing a part skipped",
               Store.pipelineTeams("eng=o/r; OPS = o/other\nBAD, =o/x, X=nope, Y=o/, Z=/r, ENG=o/second")
                   == [PipelineSettings.LinearTeam(key: "ENG", repo: "o/r"),
