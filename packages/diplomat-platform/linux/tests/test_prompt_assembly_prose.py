@@ -21,17 +21,23 @@ PROMPTS = {
     "review": ("Review.swift", "diplomat_runtime.review"),
 }
 
+_FILES = re.compile(r"\w+\.(?:swift|py)\b")
+
 
 @pytest.mark.parametrize("asset", sorted(PROMPTS))
-def test_the_prompt_asset_comment_names_only_its_swift_builder(asset: str):
+def test_the_prompt_asset_comment_places_assembly_in_its_swift_builder(asset: str):
     swift, _ = PROMPTS[asset]
-    assert "func buildPrompt" in (CORE / swift).read_text(encoding="utf-8")
+    assert "func buildPrompt() -> String" in (CORE / swift).read_text(encoding="utf-8")
     comment = getattr(core, asset)()["_comment"]
-    assert re.findall(r"\w+\.(?:swift|py)\b", comment) == [swift]
+    assert _FILES.findall(comment) == [swift]
+    assert (f"assembly order/conditions live in {swift}, reached from Linux through the "
+            "diplomat-core CLI.") in comment
 
 
 @pytest.mark.parametrize("asset", sorted(PROMPTS))
-def test_the_linux_config_module_names_its_swift_builder(asset: str):
+def test_the_linux_config_module_places_assembly_in_its_swift_builder(asset: str):
     swift, module = PROMPTS[asset]
-    doc = importlib.import_module(module).__doc__
-    assert re.findall(r"DiplomatCore/(\w+\.swift)", doc) == [swift]
+    doc = " ".join(importlib.import_module(module).__doc__.split())
+    assert _FILES.findall(doc) == [swift]
+    assert (f"the *assembly* order/conditions live in Swift (DiplomatCore/{swift}) and are "
+            "reached by shelling out to the ``diplomat-core`` CLI") in doc

@@ -12,7 +12,7 @@ a small ``*Config`` dataclass. A few properties were byte-identical across them:
   review configs sweep a *whose-PRs* axis with an optional single-PR override.
 
 Those live here once as mix-in classes the dataclasses inherit. The per-wizard
-``is_valid`` and ``build_prompt`` stay in their own modules — those genuinely
+``is_valid`` and ``prompt_payload`` stay in their own modules — those genuinely
 differ (audit is always valid, review additionally needs a PR-state box ticked,
 Fix-issues sweeps a wider axis of its own, each builds a different prompt
 payload).

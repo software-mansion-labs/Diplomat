@@ -2,8 +2,9 @@
 
 The prompt text (scope templates, action blocks) all comes from the shared
 ``assets/conflicts.json``; the *assembly* order/conditions live in Swift
-(DiplomatCore/Conflict.swift), reached through the ``diplomat-core`` CLI. The
-terminal spawner is shared with :mod:`review` (``review.spawn`` / ``review.resolved``).
+(DiplomatCore/Conflict.swift) and are reached by shelling out to the
+``diplomat-core`` CLI. The terminal spawner is shared with :mod:`review`
+(``review.spawn`` / ``review.resolved``).
 """
 
 from __future__ import annotations

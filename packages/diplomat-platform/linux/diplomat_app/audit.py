@@ -1,9 +1,9 @@
 """Full-E2E-test config + prompt builder.
 
 The prompt text (scope + action blocks) all comes from the shared ``assets/audit.json``;
-the *assembly* order/conditions live in Swift (DiplomatCore/Audit.swift), reached
-through the ``diplomat-core`` CLI. The terminal spawner is shared with
-:mod:`review` (``review.spawn`` / ``review.resolved``).
+the *assembly* order/conditions live in Swift (DiplomatCore/Audit.swift) and are
+reached by shelling out to the ``diplomat-core`` CLI. The terminal spawner is
+shared with :mod:`review` (``review.spawn`` / ``review.resolved``).
 
 Unlike the other three wizards there is no scope axis at all: the audit always
 targets the whole repository. Two independent toggles gate the optional scope:
