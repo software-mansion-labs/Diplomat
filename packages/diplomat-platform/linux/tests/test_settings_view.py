@@ -481,6 +481,25 @@ def test_the_update_line_is_drawn_only_when_there_is_something_to_pull_or_keep(
     assert view._update_row._summary.isVisibleTo(view) is bool(line)
 
 
+@pytest.mark.parametrize("state,copyable", [
+    ({"phase": "error", "error": "git merge: exit 1"}, True),
+    ({"phase": "idle", "commit": "abc1234", "error": "git fetch: exit 128"}, True),
+    ({"phase": "idle", "commit": "abc1234", "branch": "main", "upstream": "origin/main",
+      "ahead": 0, "behind": 2}, False),
+    ({"phase": "updating", "step": "pulling from origin…"}, False),
+])
+def test_copy_error_is_offered_with_an_error_and_copies_its_line(view, state, copyable):
+    from PySide6.QtGui import QGuiApplication
+
+    view.store.update_state = state
+    view._refresh_update_ui()
+    assert view._update_copy.isVisibleTo(view) is copyable
+    if copyable:
+        QGuiApplication.clipboard().clear()
+        view._update_copy.click()
+        assert QGuiApplication.clipboard().text() == state["error"]
+
+
 def test_the_slack_options_are_drawn_only_while_slack_is_watched(make_view, monkeypatch):
     """Like the verdict rows: nothing under the switch acts until the watcher runs."""
     monkeypatch.setattr(Store, "run_comms_poll_async", lambda self: None)

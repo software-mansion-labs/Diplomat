@@ -24,11 +24,12 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import weakref
 from dataclasses import dataclass, replace
 from enum import Enum
 
-from . import appconfig, comms, core, localrepos, pipeline, runner
+from . import appconfig, comms, core, localrepos, pipeline, runner, tmuxwatch
 from .configbase import PRSweepConfig, listed_payload
 from .depths import DepthLadder
 from .prref import LocalRepo
@@ -786,20 +787,25 @@ def terminal_argv(command: str, session: str | None = None) -> list[str]:
     hand-off guard described in :func:`agent_argv`.
 
     ``session`` names that session, which is what gives a run a handle on its own
-    window. Without one the session is auto-named and the only route back to the
-    window is the tty its agent happens to be on — and a run whose pid was never
-    adopted has no tty, so a backstop that ended it retired it and closed nothing
-    (:func:`tmuxwatch.kill_window_for_tty` refuses an empty tty outright). The macOS
-    spawner records an equivalent handle keyed on the run id, and tries it FIRST.
-    Left unnamed for a window nobody has to find again: the provider-login wizard.
+    window. Without one the only route back to the window is the tty its agent happens
+    to be on — and a run whose pid was never adopted has no tty, so a backstop that
+    ended it retired it and closed nothing (:func:`tmuxwatch.kill_window_for_tty`
+    refuses an empty tty outright). The macOS spawner records an equivalent handle
+    keyed on the run id, and tries it FIRST. A window nobody has to find again (the
+    provider-login wizard) gets a name no run id produces.
+
+    The session runs on a tmux server of its own, labelled with its name. A bare
+    ``tmux`` in its panes reaches the server ``$TMUX`` names, whatever ``TMUX_TMPDIR``
+    says, so an agent's ``tmux kill-server`` ends its own session and not the
+    operator's tmux. :mod:`tmuxwatch` reads these servers beside the default one.
     """
     shell = user_shell()
     if shutil.which("tmux") is None:
         return [shell, "-i", "-c", command]
-    named = ["-s", session] if session else []
+    name = session or tmuxwatch.SESSION_PREFIX + uuid.uuid4().hex[:8]
     # One string, because that is the single shell-command argument `new-session`
     # takes; tmux hands it to `sh -c`, which splits it back into the argv above.
-    return ["tmux", "new-session", *named,
+    return ["tmux", "-L", name, "new-session", "-s", name,
             f"{shlex.quote(shell)} -i -c {shlex.quote(command)}"]
 
 
@@ -828,13 +834,12 @@ def spawn_env() -> dict:
     nothing: it is about to be in a pane of its own, which sets both to that pane's real
     values.
 
-    Note the launcher, not the agent. Where tmux is in play this environment reaches
-    the tmux *client* and stops there: the session's command is started by the
-    already-running server, with the server's environment. Anything the agent itself
-    must see belongs in the command (:func:`runner.agent_command`), not here.
+    Where tmux is in play this environment is also the agent's: the session's command
+    is started by the server this launch starts (:func:`terminal_argv`), with this
+    environment. Anything the agent must see belongs in the command all the same
+    (:func:`runner.agent_command`), the one channel the macOS spawner has too.
 
-    The :data:`SECRET_ENVS` are dropped too, so a tmux server this launch starts never
-    holds them.
+    The :data:`SECRET_ENVS` are dropped too, so that server never holds them.
     """
     return {k: v for k, v in os.environ.items()
             if k not in ("TMUX", "TMUX_PANE", *SECRET_ENVS)}

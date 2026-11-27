@@ -20,6 +20,7 @@ opens a real terminal and turns a stub prompt loose in their checkout.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import time
 
@@ -89,6 +90,31 @@ def no_host_window_closed(monkeypatch):
     monkeypatch.setattr(tmuxwatch, "kill_session", lambda name: False)
     monkeypatch.setattr(tmuxwatch, "kill_window_for_tty", lambda tty: False)
     yield real
+
+
+@pytest.fixture(autouse=True)
+def private_tmux_server(monkeypatch):
+    """Give every tmux the suite reaches a socket directory of its own.
+
+    Otherwise a test lists, kills and types into whatever server ``tmux`` reaches,
+    which is the operator's own when the suite runs inside their tmux, and the readers
+    unlink stale ``diplomat-`` sockets in the operator's socket directory. ``/tmp``
+    because a tmux socket path is capped at 108 bytes."""
+    import shutil
+    import tempfile
+
+    sockets = tempfile.mkdtemp(prefix="dpt-", dir="/tmp")
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    monkeypatch.setenv("TMUX_TMPDIR", sockets)
+    yield
+    servers = os.path.join(sockets, f"tmux-{os.getuid()}")
+    if shutil.which("tmux") and os.path.isdir(servers):
+        # By socket: a test that set $TMUX would otherwise name the server killed.
+        for name in os.listdir(servers):
+            subprocess.run(["tmux", "-S", os.path.join(servers, name), "kill-server"],
+                           capture_output=True, check=False)
+    shutil.rmtree(sockets, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

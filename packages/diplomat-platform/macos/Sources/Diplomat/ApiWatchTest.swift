@@ -19,8 +19,8 @@ import DiplomatCore
 ///     DIPLOMAT_APIWATCH_TEST=1 swift run Diplomat
 ///
 /// Pure: every session, tail and process is a literal, so no terminal is read, nothing
-/// is typed, and the answer does not depend on what else is running. The one real
-/// process is a tmux server of its own, on a private socket, when tmux is installed.
+/// is typed, and the answer does not depend on what else is running. The exception is
+/// tmux servers of its own, in a private socket dir, when tmux is installed.
 /// Exit code is pass/fail.
 enum ApiWatchTest {
     /// A real Claude Code banner, the shape the matcher is written against.
@@ -146,8 +146,8 @@ enum ApiWatchTest {
         ]
         let reachable = AgentProbes.ttysRunningAnAgent(
             procs: procs, processes: processes,
-            panes: ["ttys037": TerminalFocus.Pane(id: "%80", session: "1")],
-            clients: ["1": "ttys036"])
+            panes: ["ttys037": TerminalFocus.Pane(id: "%80", session: .init(name: "1"))],
+            clients: [.init(name: "1"): "ttys036"])
         check("a wrapped agent is reached through the tty its window is dumped as",
               reachable.contains("ttys034"))
         check("…by the whole way out, and no further",
@@ -163,9 +163,11 @@ enum ApiWatchTest {
         print("")
         let agentUp = Observation.present(procs)
         var walked = 0
-        func tables() -> (panes: [String: TerminalFocus.Pane], clients: [String: String])? {
+        func tables() -> (panes: [String: TerminalFocus.Pane],
+                          clients: [TerminalFocus.Session: String])? {
             walked += 1
-            return (["ttys037": TerminalFocus.Pane(id: "%80", session: "1")], ["1": "ttys036"])
+            return (["ttys037": TerminalFocus.Pane(id: "%80", session: .init(name: "1"))],
+                    [.init(name: "1"): "ttys036"])
         }
         check("a tmux that would not answer is unavailable, not an empty set",
               AgentProbes.ttysRunningAnAgent(procs: agentUp, processes: { processes },
@@ -183,6 +185,26 @@ enum ApiWatchTest {
                                                              isAgent: false)]),
                   processes: { processes }, tmux: tables).value == [] && walked == 1)
 
+        // Every tmux reading from here on is of a private socket dir, with nothing
+        // inherited naming a server: the readers take in every `diplomat-` server in
+        // tmux's socket dir, and the real block below kills servers. Short, because a
+        // socket path is capped near 104 bytes.
+        let sockets = "/tmp/diplomat-tmux-\(UUID().uuidString.prefix(8))"
+        try? FileManager.default.createDirectory(atPath: sockets,
+                                                 withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: sockets) }
+        let keys = ["TMUX", "TMUX_PANE", "TMUX_TMPDIR", "DIPLOMAT_TMUX",
+                    "LANG", "LC_ALL", "LC_CTYPE"]
+        let saved = keys.map { ProcessInfo.processInfo.environment[$0] }
+        defer {
+            for (key, value) in zip(keys, saved) {
+                if let value { setenv(key, value, 1) } else { unsetenv(key) }
+            }
+        }
+        unsetenv("TMUX")
+        unsetenv("TMUX_PANE")
+        setenv("TMUX_TMPDIR", sockets, 1)
+
         // And that the nil above is a state a real tmux can actually be in. The listings
         // and the liveness probe are separate calls, so a stand-in that fails one and
         // answers the other is the transient hiccup itself, not a machine without tmux.
@@ -190,11 +212,6 @@ enum ApiWatchTest {
             .appendingPathComponent("diplomat-faketmux-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: fake, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: fake) }
-        let previousTmux = ProcessInfo.processInfo.environment["DIPLOMAT_TMUX"]
-        defer {
-            if let previousTmux { setenv("DIPLOMAT_TMUX", previousTmux, 1) }
-            else { unsetenv("DIPLOMAT_TMUX") }
-        }
         func fakeTmux(_ body: String) -> String {
             let path = fake.appendingPathComponent("tmux-\(UUID().uuidString)").path
             try? ("#!/bin/sh\ncase \"$1\" in\n\(body)\nesac\n")
@@ -221,8 +238,9 @@ enum ApiWatchTest {
                      + " -e 's|#{client_session}|my agents|' ;;")
         let whole = TerminalFocus.walkTables()
         check("…and a server that answers both is read whole, a session name's space and all",
-              whole?.panes == ["ttys037": TerminalFocus.Pane(id: "%80", session: "my agents")]
-                && whole?.clients == ["my agents": "ttys036"])
+              whole?.panes == ["ttys037": TerminalFocus.Pane(id: "%80",
+                                                             session: .init(name: "my agents"))]
+                && whole?.clients == [.init(name: "my agents"): "ttys036"])
 
         // A failed dump names its source: a refused terminal is fixed under Privacy &
         // Security, a tmux listing is not. The listing below is what launchd's locale
@@ -243,38 +261,159 @@ enum ApiWatchTest {
               ApiErrorWatcher.dumpSessions(terminals: [iterm]).value?.map(\.tty) == ["ttys034"])
 
         // The stand-ins pin the format; only a real tmux can say it survives launchd's
-        // environment: no `$TMUX` and no UTF-8 locale. The socket dir is private, and
-        // short because a socket path is capped near 104 bytes.
+        // environment: no `$TMUX` and no UTF-8 locale — and that a Ghostty run's server
+        // of its own is read, typed into, reaped and killed as itself.
         if let real = ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"]
             .first(where: FileManager.default.fileExists(atPath:)) {
-            let sockets = "/tmp/diplomat-tmux-\(UUID().uuidString.prefix(8))"
-            try? FileManager.default.createDirectory(atPath: sockets,
-                                                     withIntermediateDirectories: true)
-            let keys = ["TMUX", "TMUX_TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"]
-            let saved = keys.map { ProcessInfo.processInfo.environment[$0] }
-            for key in ["TMUX", "LANG", "LC_CTYPE"] { unsetenv(key) }
+            for key in ["LANG", "LC_CTYPE"] { unsetenv(key) }
             setenv("LC_ALL", "C", 1)
-            setenv("TMUX_TMPDIR", sockets, 1)
-            setenv("DIPLOMAT_TMUX", real, 1)
-            func tmux(_ args: [String]) {
+            let fm = FileManager.default
+            let dir = "\(sockets)/tmux-\(getuid())"
+            // Every call the readers make is logged, so a stale socket can be shown to
+            // cost none.
+            let calls = "\(sockets)/calls"
+            let logged = "\(sockets)/tmux"
+            try? "#!/bin/sh\necho \"$*\" >> '\(calls)'\nexec '\(real)' \"$@\"\n"
+                .write(toFile: logged, atomically: true, encoding: .utf8)
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: logged)
+            setenv("DIPLOMAT_TMUX", logged, 1)
+            @discardableResult
+            func tmux(_ args: [String], env: [String: String] = [:]) -> String? {
                 let p = Process()
                 p.executableURL = URL(fileURLWithPath: real)
                 p.arguments = args
-                p.standardOutput = FileHandle.nullDevice
+                p.environment = ProcessInfo.processInfo.environment.merging(env) { $1 }
+                let out = Pipe()
+                p.standardOutput = out
                 p.standardError = FileHandle.nullDevice
-                try? p.run()
+                do { try p.run() } catch { return nil }
+                let data = out.fileHandleForReading.readDataToEndOfFile()
                 p.waitUntilExit()
+                return p.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil
             }
-            let session = "diplomat-apiwatch-\(UUID().uuidString.prefix(8))"
-            tmux(["new-session", "-d", "-s", session, "sleep 60"])
+            func alive(_ session: String, on server: String? = nil) -> Bool {
+                tmux((server.map { ["-L", $0] } ?? [])
+                     + ["has-session", "-t", "=" + session]) != nil
+            }
+
+            // The operator's own session on the default server, and two runs opened as a
+            // Ghostty window opens them: the spawn's own command, run outside tmux in a
+            // host pane that stands in for the window and its tty.
+            tmux(["new-session", "-d", "-s", "mine", "sleep 60"])
+            let reaped = AgentSpawner.ghosttySession(), killer = AgentSpawner.ghosttySession()
+            for (session, command) in [(reaped, "sleep 60"),
+                                       (killer, "printf %s \"$TMUX\" > '\(sockets)/env'; sleep 60")] {
+                let launcher = "\(sockets)/\(session).sh"
+                try? AgentSpawner.ghosttyLauncher(command: command, session: session, tmux: real)
+                    .write(toFile: launcher, atomically: true, encoding: .utf8)
+                tmux(["new-session", "-d", "-s", "host-\(session)", "unset TMUX TMUX_PANE; exec "
+                      + AgentSpawner.ghosttyCommand(session: session, launcher: launcher,
+                                                    tmux: real)])
+            }
+            let killerTTY = AgentSpawner.ghosttyPaneTTY(session: killer)
+            let reapedTTY = AgentSpawner.ghosttyPaneTTY(session: reaped)
             let panes = TerminalFocus.panes()
-            tmux(["kill-server"])
-            for (key, value) in zip(keys, saved) {
-                if let value { setenv(key, value, 1) } else { unsetenv(key) }
-            }
-            try? FileManager.default.removeItem(atPath: sockets)
+            let mine = panes.first { $0.value.session == .init(name: "mine") }
             check("a real tmux read under launchd's locale still lists its panes",
-                  panes.values.contains { $0.session == session && $0.id.hasPrefix("%") })
+                  mine?.value.id.hasPrefix("%") == true)
+            check("a Ghostty run's pane is read off a server of its own, named after it",
+                  !killerTTY.isEmpty && !reapedTTY.isEmpty
+                    && panes[killerTTY]?.session == .init(name: killer, server: killer)
+                    && panes[reapedTTY]?.session == .init(name: reaped, server: reaped))
+            check("…each a %0, as the default server's first pane is, and kept apart by server",
+                  [mine?.value.id, panes[killerTTY]?.id, panes[reapedTTY]?.id]
+                    == ["%0", "%0", "%0"])
+
+            let marker = "nudge-\(UUID().uuidString.prefix(8))"
+            let sent = TerminalFocus.sendLine(tty: killerTTY, text: marker)
+            var screens: [String: String] = [:]
+            for _ in 0..<30 where screens[killerTTY]?.contains(marker) != true {
+                usleep(100_000)
+                screens = Dictionary((TerminalFocus.paneScreens(shownOn: []) ?? [])
+                    .map { ($0.tty, $0.screen) }) { a, _ in a }
+            }
+            check("a line typed into a run's %0 lands there, and its screen is read from there",
+                  sent && screens[killerTTY]?.contains(marker) == true)
+            check("…and on neither other server's %0",
+                  screens[reapedTTY].map { !$0.contains(marker) } == true
+                    && mine.flatMap { screens[$0.key] }.map { !$0.contains(marker) } == true)
+
+            // A server killed outright leaves its socket behind, and a socket can be bound
+            // with nothing ever listening on it. Neither is a server.
+            let stale = "diplomat-stale-\(UUID().uuidString.prefix(8))"
+            let bound = "diplomat-bound-\(UUID().uuidString.prefix(8))"
+            tmux(["-L", stale, "new-session", "-d", "-s", stale, "sleep 60"])
+            if let pid = tmux(["-L", stale, "display-message", "-p", "#{pid}"])
+                .flatMap({ pid_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) }) {
+                kill(pid, SIGKILL)
+                for _ in 0..<20 where kill(pid, 0) == 0 { usleep(50_000) }
+            }
+            var addr = sockaddr_un()
+            addr.sun_family = sa_family_t(AF_UNIX)
+            withUnsafeMutableBytes(of: &addr.sun_path) {
+                $0.copyBytes(from: Array("\(dir)/\(bound)".utf8))
+            }
+            let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+            _ = withUnsafePointer(to: &addr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            close(fd)
+            let leftovers = [stale, bound].map { "\(dir)/\($0)" }
+            try? fm.removeItem(atPath: calls)
+            let tables = TerminalFocus.walkTables()
+            let asked = (try? String(contentsOfFile: calls, encoding: .utf8)) ?? ""
+            check("a dead server's socket and a never-listened one are skipped, the reading whole",
+                  leftovers.allSatisfy(fm.fileExists(atPath:))
+                    && tables?.panes[killerTTY] != nil && tables?.panes[reapedTTY] != nil
+                    && TerminalFocus.paneScreens(shownOn: []) != nil
+                    && !asked.isEmpty && !asked.contains(stale) && !asked.contains(bound))
+            let minuteAgo = time(nil) - 120
+            for path in leftovers + ["\(dir)/\(killer)"] {
+                var times = [timeval(tv_sec: minuteAgo, tv_usec: 0),
+                             timeval(tv_sec: minuteAgo, tv_usec: 0)]
+                utimes(path, &times)
+            }
+            _ = TerminalFocus.panes()
+            check("…and removed once over a minute old, where a live server's socket is not",
+                  !leftovers.contains(where: fm.fileExists(atPath:))
+                    && fm.fileExists(atPath: "\(dir)/\(killer)"))
+
+            let older = AgentSpawner.ghosttySession()
+            tmux(["new-session", "-d", "-s", older, "sleep 60"])
+            check("a reap ends the run's session on its own server, one an older build opened "
+                  + "on the default server there, and nothing else",
+                  alive(reaped, on: reaped) && TerminalFocus.killSession(named: reaped)
+                    && !alive(reaped, on: reaped)
+                    && TerminalFocus.killSession(named: older) && !alive(older)
+                    && alive("mine") && alive(killer, on: killer))
+
+            // What an agent did, twice: `TMUX_TMPDIR` pointed elsewhere, believed to keep a
+            // `kill-server` off the operator's tmux. The pane's own `$TMUX` beats it, so the
+            // server it reaches is the one the run is on. Run as a child of this process
+            // with that pane's `$TMUX`, and only once it is seen to name this private dir.
+            let elsewhere = "\(sockets)/elsewhere"
+            try? fm.createDirectory(atPath: elsewhere, withIntermediateDirectories: true)
+            var paneTMUX = ""
+            for _ in 0..<30 where paneTMUX.isEmpty {
+                paneTMUX = (try? String(contentsOfFile: "\(sockets)/env", encoding: .utf8)) ?? ""
+                if paneTMUX.isEmpty { usleep(100_000) }
+            }
+            let privateDir = realpath(sockets, nil).map { p in
+                defer { free(p) }
+                return String(cString: p)
+            } ?? sockets
+            let ownSocket = paneTMUX.hasPrefix("\(privateDir)/tmux-\(getuid())/\(killer),")
+            if paneTMUX.hasPrefix(privateDir + "/") {
+                tmux(["kill-server"], env: ["TMUX": paneTMUX, "TMUX_TMPDIR": elsewhere])
+            }
+            check("a bare kill-server inside a run's pane ends that run's own server",
+                  ownSocket && !alive(killer, on: killer))
+            check("…and never the default server beside it", alive("mine"))
+
+            for server in [reaped, killer, stale] { tmux(["-L", server, "kill-server"]) }
+            tmux(["-S", "\(dir)/default", "kill-server"])
         } else {
             print("SKIP — no tmux on this machine, so no real server to list")
         }
@@ -282,14 +421,16 @@ enum ApiWatchTest {
         // Which panes the dump adds on top of what the terminals reported. The same box
         // as above, plus a Ghostty run — a session on a client no scriptable app can be
         // asked about, which is the only reader that agent's screen has.
-        let panes = ["ttys037": TerminalFocus.Pane(id: "%80", session: "1"),
-                     "ttys050": TerminalFocus.Pane(id: "%91", session: "diplomat-a1b2")]
+        let ghosttyRun = TerminalFocus.Session(name: "diplomat-a1b2", server: "diplomat-a1b2")
+        let panes = ["ttys037": TerminalFocus.Pane(id: "%80", session: .init(name: "1")),
+                     "ttys050": TerminalFocus.Pane(id: "%91", session: ghosttyRun)]
         let ghostly = processes.merging([
             2500: TerminalFocus.Proc(ppid: 2200, tty: "ttys050"),  // the Ghostty pane
             2600: TerminalFocus.Proc(ppid: 2599, tty: "ttys051"),  // the tmux client
             2599: TerminalFocus.Proc(ppid: 1, tty: ""),            // Ghostty itself
         ]) { a, _ in a }
-        let attached = ["1": "ttys036", "diplomat-a1b2": "ttys051"]
+        let attached: [TerminalFocus.Session: String] = [.init(name: "1"): "ttys036",
+                                                         ghosttyRun: "ttys051"]
         func captured(_ shownOn: Set<String>) -> [String] {
             TerminalFocus.panesToCapture(panes, processes: ghostly, attachedTo: attached,
                                          shownOn: shownOn).map(\.tty)

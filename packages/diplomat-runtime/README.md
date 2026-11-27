@@ -60,7 +60,8 @@ diplomat_runtime/
                   whose it is, mid-turn or not, spend, and interrupting a 2.x turn
   hermesstore.py  the same, for a Hermes run's session in its SQLite store
   apiwatch.py     "is this a Claude API error?" matcher + nudge bookkeeping
-  tmuxwatch.py    tmux capture-pane / send-keys — the Linux stand-in for AppleScript
+  tmuxwatch.py    tmux capture-pane / send-keys — the Linux stand-in for AppleScript;
+                  covers the default server and each spawn's own
   activity.py     the unified audit feed (audit.jsonl) + its category taxonomy
   telemetry.py    the append-only telemetry ledger + the arithmetic over it (twin of Telemetry.swift)
   usagescan.py    Claude Code transcript scanner: repo-vs-other tokens, per-task attribution

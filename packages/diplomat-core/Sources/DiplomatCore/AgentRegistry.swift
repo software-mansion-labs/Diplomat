@@ -46,7 +46,7 @@ public enum AgentRegistry {
            !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true)
         }
-        return FileManager.default.homeDirectoryForCurrentUser
+        return PrivateFiles.home
             .appendingPathComponent(".diplomat", isDirectory: true)
             .appendingPathComponent("agents", isDirectory: true)
     }

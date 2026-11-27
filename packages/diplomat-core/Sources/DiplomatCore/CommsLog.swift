@@ -70,8 +70,7 @@ public enum CommsLog {
         if let env = ProcessInfo.processInfo.environment["DIPLOMAT_COMMS_DIR"], !env.isEmpty {
             return URL(fileURLWithPath: env, isDirectory: true)
         }
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".diplomat/comms", isDirectory: true)
+        return PrivateFiles.home.appendingPathComponent(".diplomat/comms", isDirectory: true)
     }
 
     public static func eventsURL(in dir: URL = dir) -> URL {

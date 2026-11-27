@@ -259,9 +259,10 @@ With **Split big issues** on, a sync splits at most one issue Diplomat may write
 than its repo's limit and not high risk, not triaged or taken over, with no stop label, no sub-issues, no open PR fixing it (nor, on
 Linear, attachments past what one read lists), and a repo root to read its code in that this sync
 read whole. **Fracture** on the screen splits one at once, whatever its
-rating. One `claude -p` call (`sonnet`, sandboxed as a rating is) reads the code and answers up to
-six parts, each low complexity by itself, together exactly what the issue asks, each able to merge
-on its own - or no parts, and why, as for an issue asking for anything new.
+rating. One `claude -p` call (`sonnet`, sandboxed as a rating is) reads the code and answers two to
+six parts, each low complexity by itself, together exactly what the issue asks, each one fix or a
+group of fixes that only work together, independent of the others, as none is fixed waiting for
+another to merge - or no parts, and why, as for an issue asking for anything new. One part is no split.
 
 The parent is labelled `diplomat:fractured` first, the split recorded in `state.json` before that,
 then each part becomes a real child, so the trackers themselves keep the graph: on GitHub an issue

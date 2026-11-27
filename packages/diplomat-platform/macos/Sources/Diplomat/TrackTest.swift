@@ -160,13 +160,13 @@ enum TrackTest {
             100: .init(ppid: 99998, tty: "ttys034"),    // the window's shell
             99998: .init(ppid: 1, tty: ""),
         ]
-        let panes = ["ttys037": TerminalFocus.Pane(id: "%80", session: "80")]
-        let attached = ["80": "ttys036"]
+        let panes = ["ttys037": TerminalFocus.Pane(id: "%80", session: .init(name: "80"))]
+        let attached: [TerminalFocus.Session: String] = [.init(name: "80"): "ttys036"]
         let hop = TerminalFocus.walk(tty: "ttys038", pid: 392, processes: wrapped,
                                      panes: panes, clients: attached)
         check("the walk crosses tmux and ends on the window's tty",
               hop.ttys == ["ttys038", "ttys037", "ttys036", "ttys034"]
-                && hop.panes == ["%80"])
+                && hop.panes.map(\.id) == ["%80"])
         check("…and starts from the tty alone when no pid is known",
               TerminalFocus.walk(tty: "ttys038", pid: nil, processes: wrapped,
                                  panes: panes, clients: attached) == hop)

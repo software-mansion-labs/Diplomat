@@ -153,8 +153,9 @@ here there are no session rows to sort, so the list starts at that order's *star
   rc that starts every terminal inside tmux (`exec tmux new-session`, guarded on an
   empty `$TMUX`) would replace the agent's command with an empty session. Diplomat
   opens that session itself, which satisfies the guard and is also the only way the
-  API-error watcher can see the agent. Without tmux the agent runs directly under
-  `$SHELL -i`, and such an rc swallows it
+  API-error watcher can see the agent. Each such session runs on a tmux server of its
+  own, so a `tmux kill-server` inside it ends that session and none of yours. Without
+  tmux the agent runs directly under `$SHELL -i`, and such an rc swallows it
 
 ## Run
 
