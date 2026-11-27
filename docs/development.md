@@ -150,10 +150,10 @@ launchd starts each of the three as `install/Diplomat <the bundle's binary>`, wh
 its program's code signature and kills a start whose signature has changed since
 (`Launch Constraint Violation`, with a crash report), and every build re-signs the
 ad-hoc-signed binary; env never changes. Login Items lists each agent by the link's
-name. An agent an older installer wrote, starting the binary itself, gets the link at
-the next GUI launch, which also loads the updater and the watchdog again once neither
-is running: until the next login, launchd refuses to start an agent loaded at login
-whose plist has changed since.
+name. An agent an older installer wrote, starting the binary itself, gets the link
+beside its bundle at the next GUI launch, which also loads the updater and the watchdog
+again, each once it is not running: until the next login, launchd refuses to start an
+agent loaded at login whose plist has changed since.
 
 ### Logs
 

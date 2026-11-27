@@ -86,9 +86,8 @@ enum Daemon {
     /// Has an agent plist an older installer wrote, starting a bundle's binary itself,
     /// start it through the `install/Diplomat` beside that bundle, as the installers write
     /// it: macOS kills an agent loaded at login whose program's signature has changed
-    /// since, and every build re-signs Diplomat, so each update costs such an agent its
-    /// next start. Not this instance's link: one run from another checkout would tie the
-    /// agents to that checkout. Returns whether it wrote.
+    /// since, and every build re-signs Diplomat. Not this instance's link: a run from
+    /// another checkout would tie the agents to that one. Returns whether it wrote.
     @discardableResult
     static func startThroughLauncher(plist url: URL) -> Bool {
         rewrite(url) { dict in
