@@ -109,8 +109,9 @@ struct PipelineState: Codable, Equatable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case labelsMade, decided, takenOver, untracked, unsplit, splitting, parts, rerated, cleared, merging, retry,
-             syncs, lineage, seen, holds, clean, asked, rateAsks, rateSeq, declined, notices
+        case merging
+        case labelsMade, decided, takenOver, untracked, unsplit, splitting, parts, rerated, cleared, retry, syncs,
+             lineage, seen, holds, clean, asked, rateAsks, rateSeq, declined, notices
     }
 
     /// A field missing is empty; one there but not of its type fails the whole file.
