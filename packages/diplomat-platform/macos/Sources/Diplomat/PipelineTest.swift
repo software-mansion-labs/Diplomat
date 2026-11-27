@@ -111,7 +111,8 @@ enum PipelineTest {
         check("Merge cleared PRs points at every hold rather than listing some",
               SettingsView.pipelineMergeDetail.hasPrefix(
                   "A cleared PR is merged only when none of the holds in docs/pipeline.md applies "
-                      + "to it, checked again right before the merge."))
+                      + "to it, checked again right before the merge. With Fast-track my PRs on, one "
+                      + "behind its base has the base merged into it first."))
         let settingsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: MainRoot.width, height: 800),
                                       styleMask: [.titled], backing: .buffered, defer: true)
         settingsWindow.isReleasedWhenClosed = false

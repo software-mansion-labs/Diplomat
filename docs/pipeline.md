@@ -17,7 +17,7 @@ Every five minutes while it is on, a **sync**:
    the next sync keeps on this machine, as labels too where you [mirror](#settings) it and Diplomat
    [may write](#who-diplomat-may-write-to).
 3. **Routes** a low/low issue down the [fast track](#the-fast-track): its fix PR, that PR reviewed
-   until clean, rated again at the clean head, and merged.
+   until clean, rated again at the clean head, brought up to date with its base, and merged.
 4. **Splits** one medium- or high-complexity issue into low-complexity
    [sub-issues](#fracturing).
 
@@ -73,7 +73,7 @@ A PR:
 | `human` | rated, and not on the fast track; every PR that is not yours, once a person labelled it | Human |
 | `fast-track` | yours, labelled `diplomat:fast-track`, closing only `candidate` issues, at least one unless taken over, no clean marker at its head | Fast |
 | `clean` | the same, with a clean marker at its head | Fast |
-| `cleared` | labelled `diplomat:cleared`, clean at its head, and rated low/low again there by this Diplomat (its state or log says so), or, taken over, labelled so there by this Diplomat | Fast |
+| `cleared` | labelled `diplomat:cleared`, clean at its head, and rated low/low again there by this Diplomat (its state or log says so), or, taken over, labelled so there by this Diplomat; or at a later head carrying that one's change [unchanged](#the-merge) | Fast |
 | `merged`, `closed` | one of the repo's 20 merged or closed PRs updated last, carrying a pipeline label, or read for an ask waiting on it | Done |
 
 An issue labelled `wontfix`, `wont fix`, `won't fix`, `duplicate`, `invalid`, `question`,
@@ -114,10 +114,12 @@ a Linear team was not read whole, no issue in the repo it maps to is fixed, spli
    so a sync stopped before acting on it never asks again for that head. Still low/low, it is labelled
    `diplomat:cleared`; anything else, its labels written or not, takes both labels off and leaves it
    to a person until you [take it over](#takeover).
-5. A cleared PR is [merged](#the-merge) (**Merge cleared PRs**) once nothing holds it.
+5. A cleared PR is [merged](#the-merge) (**Merge cleared PRs**) once nothing holds it, its base
+   merged into it first whenever it is behind.
 
 A head no clean marker names, as after a push, takes `diplomat:cleared` off, and the PR goes back
-to `fast-track` for a review of that head. A person who takes `diplomat:cleared` off a PR before
+to `fast-track` for a review of that head, unless it carries the cleared change
+[unchanged](#the-merge). A person who takes `diplomat:cleared` off a PR before
 Diplomat does takes it off the fast track until you [take it over](#takeover): Diplomat neither
 labels, reviews nor merges it again, and takes `diplomat:fast-track` off too, so the labels say so. One who
 takes `diplomat:fast-track` off leaves it to a person: Diplomat puts that label back only for a takeover.
@@ -312,7 +314,8 @@ its commits, its base branch and the checks it requires read only for a PR nothi
 - it was turned back into a draft after it was ready for review;
 - a commit authored or committed by anyone but you (GitHub's own committer of a web commit aside), or
   more commits than one read lists, by the accounts GitHub maps their emails to (whoever wrote them,
-  the head merged is the one the review run found clean and, unless taken over, Diplomat rated low/low again);
+  the head merged is the one the review run found clean and, unless taken over, Diplomat rated low/low again,
+  or one carrying its change unchanged);
 - changes requested; an unresolved review thread;
 - a stop label: `do not merge`, `do-not-merge`, `don't merge`, `blocked`, `on hold`, `wip` or
   `work in progress`, matched as triage labels are (`pipeline.json` `stopLabels`);
@@ -340,6 +343,17 @@ its commits, its base branch and the checks it requires read only for a PR nothi
 - it is assigned to anyone but you;
 - its repo allows none of squash, merge or rebase, or the pull request rules on its base branch allow
   none of those it allows.
+
+With **Fast-track my PRs** on too, a cleared PR whose hold, read again, is being behind its base has
+its base merged into it once nothing else would hold it up to date, being a draft aside (CI still
+running at its head would): `gh api -X PUT repos/<repo>/pulls/<n>/update-branch` at the head read,
+GitHub making the merge commit, logged `asked`. A later sync keeps it cleared at any head it moves to
+that carries the change cleared: its diff against its base (GitHub's compare) changes the same files
+to the same contents as at the head cleared, each in the same mode, and its base changed none of
+those files since; what cannot be read whole, a compare of 300 files (GitHub's most) or a tree GitHub
+cuts short, counts as a change. CI then runs at that head, and the PR merges once nothing holds it,
+its base merged in again whenever it falls behind first. A head carrying any other change takes
+`diplomat:cleared` off, for a review of it.
 
 A hold shows on the card and is logged each time it changes. A merge `gh` refuses (no admin rights, a
 head that moved) is a notice, and the next sync tries again. The PR is read again after every merge,
@@ -412,8 +426,10 @@ it takes and every `claude` call.
 - **Open fix PRs** - a Fix-issues run for each `candidate` issue no open PR fixes.
 - **Fast-track my PRs** - `diplomat:fast-track` on each PR of yours rated low/low at its first rating
   that closes only `candidate` issues, or taken over, a review run per head until clean, and `diplomat:cleared` taken
-  off a PR whose head no marker names. A PR rated while it is off stays a person's.
-- **Merge cleared PRs** - [the merge](#the-merge), with your admin rights.
+  off a PR whose head no marker names and carries no cleared change unchanged. A PR rated while it is
+  off stays a person's.
+- **Merge cleared PRs** - [the merge](#the-merge), with your admin rights, and, with **Fast-track my
+  PRs** on, its base merged into a cleared PR behind it.
 - **Split big issues** - [fracturing](#fracturing): one issue and one `claude -p` call a sync.
 - **Linear teams** - `ENG=owner/repo, OPS=owner/other`, commas, semicolons or new lines between
   them: each Linear team key (ASCII letters and digits, read in capitals as Linear spells it) and the
@@ -473,7 +489,8 @@ trackers' labels, this is what a sync needs:
 - `ratings.json` - the ratings Diplomat made, each with the rater's sentence.
 - `state.json` - the labels made per repo, the items taken over, and the guards against repeating a step: each PR's
   re-rates by head, which prove a `cleared` label this Diplomat's own, and the head it was cleared
-  at, which alone does for a PR taken over; the PRs Diplomat took off the fast track, or could not put on it; the items whose rating, its
+  at, which alone does for a PR taken over; the later heads that carry
+  that clear, their change the one cleared; the PRs Diplomat took off the fast track, or could not put on it; the items whose rating, its
   labels or split failed, and when to
   try again; the issues that would not split and why, and those being split with the parts the
   model answered and those filed so far; and the issues Diplomat filed as parts, with the ban each
