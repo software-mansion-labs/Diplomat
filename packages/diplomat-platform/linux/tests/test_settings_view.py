@@ -615,8 +615,8 @@ def test_the_pipeline_rows_read_as_their_macos_twins_do(make_view, monkeypatch):
     assert (limits._control.accessibleName(), limits.summary(), limits._detail.text()) == (
         "Fast-track limits",
         "The highest rating each repo's fast track fixes, reviews and merges",
-        "Low/low by default. Risk stops at medium: high risk is the ground the fast track "
-        "never takes. A Linear team's issues go by the repo it maps to.")
+        "Low/low unless set. Risk stops at medium: a high-risk item goes down the fast track "
+        "only taken over. A Linear team's issues go by the repo it maps to.")
     assert rows[0]._detail.text().endswith(
         " A rating already on the tracker is the rating, raised by a higher one kept here "
         "until its labels are written; a PR's diff can only raise one.")
