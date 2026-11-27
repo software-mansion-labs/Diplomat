@@ -1425,10 +1425,10 @@ final class PipelineSync {
             let e = entries[i]
             guard own(e), open(e), has(e, model.labels.fastTrack), has(e, model.labels.cleared),
                   partial[e.item.repo] == nil, let head = e.item.headSha, e.item.cleanAt != head,
-                  offTrack(e) == nil, recheck(i) else { continue }
+                  offTrack(e) == nil, may(.fastTrack), recheck(i) else { continue }
             let off = takeOff(i, model.labels.cleared, .fastTrack)
-            guard off != false else { continue }
-            // Also when gh failed: GitHub may have taken it off all the same.
+            // A failed call may have taken it off all the same.
+            guard off == true || off == nil && refresh(i) && !has(entries[i], model.labels.cleared) else { continue }
             state.cleared[e.id] = nil
             if off == true {
                 log(e.id, .labelled, "-\(model.labels.cleared): " + (e.item.cleanAt == nil

@@ -2471,6 +2471,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     try pipelinePins9(base: base, root: root, team: team, t0: t0)
     try pipelinePins10(base: base, root: root, team: team, t0: t0)
     try pipelineGatePass1(base: base, root: root, team: team, t0: t0)
+    try pipelineClearsAndMerges(base: base, root: root, t0: t0)
     try pipelineTakeover(base: base, root: root, team: team, t0: t0)
 }
 
@@ -2787,6 +2788,42 @@ private func pipelineJudged(base: URL, root: PipelineSettings.Root, team: Pipeli
     cased.labelBook = [("lab-RL", "Risk:Low", nil), ("lab-CL", "Complexity:Low", nil)]
     let cs = sync(cased, PipelineSettings(roots: [root], linearTeams: [team], rate: true), dir("label-case"), t0)
     check(cs.writes == ["+Risk:Low ENG-1", "+Complexity:Low ENG-1"], "Linear labels in another case: \(cs.writes)")
+}
+
+/// A stale `cleared` the sync left on.
+private func pipelineClearsAndMerges(base: URL, root: PipelineSettings.Root, t0: Date) throws {
+    section("pipeline clears and merges")
+    let fm = FileManager.default
+    func dir(_ name: String) -> URL { base.appendingPathComponent("clears-" + name) }
+    func later(_ minutes: Double) -> Date { t0.addingTimeInterval(minutes * 60) }
+
+    // `cleared` the Fast track switch or GitHub kept on stays Diplomat's: a person who takes
+    // it off after opts out. Switched off, nothing reads it again; refused, a read after the
+    // removal finds it still on.
+    let ftOn = PipelineSettings(roots: [root], fastTrack: true)
+    for (kept, reads) in [("switched-off", 0), ("refused", 2)] {
+        let t = only([15, 25])
+        try fm.createDirectory(at: dir(kept), withIntermediateDirectories: true)
+        try Data(#"{"cleared": {"\#(prURL(15))": "\#(sha("e0"))"}}"#.utf8)
+            .write(to: dir(kept).appendingPathComponent("state.json"))
+        if kept == "switched-off" {
+            PipelineControl(enabled: true, rate: false, fix: false, fastTrack: false, merge: false, fracture: false)
+                .save(in: dir(kept))
+        } else {
+            t.refuseLabels = ["15 diplomat:cleared"]
+        }
+        let n = t.ghCalls.count
+        let s1 = sync(t, ftOn, dir(kept), t0)
+        let items = t.ghCalls[n...].filter { $0.contains("operationName=Item") }.count
+        PipelineControl(settings: ftOn).save(in: dir(kept))
+        t.refuseLabels = []
+        t.prs[0].labels.removeAll { $0 == "diplomat:cleared" }
+        let s2 = sync(t, ftOn, dir(kept), later(5))
+        check(s1.writes.isEmpty && items == reads && s2.writes == ["-diplomat:fast-track #15"]
+              && s2.result.effects.isEmpty && stageOf(s2.result, prURL(15)) == "human/human",
+              "cleared \(kept), then taken off by a person: \(s1.writes) \(items) reads, then \(s2.writes) "
+                + "\(stageOf(s2.result, prURL(15)))")
+    }
 }
 
 /// A banned Linear author, a PR behind its base, a Linear recheck that failed, and failures
