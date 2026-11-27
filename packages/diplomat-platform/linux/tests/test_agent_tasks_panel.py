@@ -195,6 +195,21 @@ def test_a_running_row_says_how_long_it_has_been_going(panel, monkeypatch):
     assert "running · for 1h 35m" in _row_text(_rows(panel, RunningTaskRow)[0])
 
 
+def test_a_running_rating_holds_a_bay_and_a_row_of_its_own(panel):
+    from diplomat_app.store import RatingJob
+
+    url = "https://github.com/o/r/pull/7"
+    panel.store._ratings = {url: RatingJob(url=url, stamp="s1", label="Rating · #7",
+                                           started_at=time.time() - 5 * 60, forced=False)}
+    panel._rebuild_agent_tasks()
+
+    [row] = _rows(panel, RunningTaskRow)
+    assert "Rating · #7 ● running · for 5m" in _row_text(row)
+    assert row.toolTip() == RunningTaskRow._RATING_HELP
+    assert _row_kinds(panel) == ["RunningTaskRow", "FreeSlotRow"]
+    assert _task_count(panel) == 1
+
+
 def test_a_manual_spawn_gets_a_row_but_takes_no_bay(panel, monkeypatch):
     """A panel click spends none of the automatic budget, so every bay of the cap is
     still free. It is drawn anyway: the list answers "what is this machine doing about
@@ -296,6 +311,7 @@ def test_a_pipeline_asks_cancel_says_what_asks_for_it_again(panel):
         _queued(31, counter="pipeline", action="review"),
         _queued(32, counter="pipeline", action="issues", kind="issues"),
         _queued(33, counter=None, action="review"),
+        _queued(34, counter="pipeline", action="rate", kind="rate"),
     ]
     panel._rebuild_agent_tasks()
     tips = [next(b for b in row.findChildren(QPushButton) if b.text() == "cancel").toolTip()
@@ -306,6 +322,8 @@ def test_a_pipeline_asks_cancel_says_what_asks_for_it_again(panel):
         "Drop this fix from the queue without running it. The pipeline does not ask for it "
         "again; Start fix on the Pipeline screen does.",
         QueuedTaskRow._CANCEL_HELP,
+        "Drop this rating from the queue without running it. The pipeline does not ask for it "
+        "again; Rate now on the Pipeline screen does.",
     ]
 
 

@@ -85,8 +85,8 @@ def test_auto_work_holds_on_a_full_disk_and_resumes_once_it_drains(
     store.commit_queue()
     assert [e.id for e in store.queued_tasks] == ["review:o/r#1", "review:o/r#2", "review:o/r#3"]
 
-    # The drain stops at the disk like it stops at the budget: the one it tried is
-    # re-staged, the rest wait on the list.
+    # The drain stops at the disk: the one it tried is re-staged, the rest wait on the
+    # list.
     store.queued_tasks = [autofix.QueuedTask("review:o/r#6", _job(6), 1),
                           autofix.QueuedTask("review:o/r#7", _job(7), 1)]
     store._drain_queued_tasks([], closed=set())

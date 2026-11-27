@@ -82,7 +82,11 @@ fs.writeFileSync(CONFIG, '{not json');
 assert.equal(resolveTerminal('darwin'), 'terminal', 'corrupt config degrades to the fallback');
 setTerminal(undefined);
 fake('gnome-terminal', 'exit 0');
+fake('kitty', 'exit 0');
+// BIN alone: a host's /usr/bin may hold a terminal listed ahead of gnome-terminal.
+process.env.PATH = BIN;
 assert.equal(resolveTerminal('linux'), 'gnome-terminal', 'unpublished on Linux: first installed');
+process.env.PATH = `${BIN}:/usr/bin:/bin`;
 assert.deepEqual(openArgv('gnome-terminal', '/x/l.sh'), ['gnome-terminal', ['--', '/bin/sh', '/x/l.sh']]);
 assert.deepEqual(openArgv('kitty', '/x/l.sh'), ['kitty', ['/bin/sh', '/x/l.sh']]);
 console.log('ok   resolution + Linux argv');
@@ -157,14 +161,15 @@ const staged = (daemonPath) => {
   }
   return file;
 };
-// macOS's /bin/sh fills an unset $SHELL in from passwd: the bash fallback is dash's.
-if (!MAC) {
+// A bash /bin/sh fills an unset $SHELL in from passwd: the bash fallback is dash's.
+if (!spawnSync('/bin/sh', ['-c', 'echo "$SHELL"'], { encoding: 'utf8', env: {} }).stdout.trim()) {
   fs.writeFileSync(path.join(BASE, '.bashrc'), `PATH='${RC_BIN}':$PATH\n`);
   runs(staged('/usr/bin:/bin'), { PATH: '/usr/bin:/bin' });
   fs.rmSync(path.join(BASE, '.bashrc'));
 }
 runs(staged('/usr/bin:/bin'), { PATH: `${RC_BIN}:/usr/bin:/bin` });
-runs(staged(`${RC_BIN}:/usr/bin:/bin`), { PATH: '/usr/bin:/bin' });
+// BIN: a host's /usr/bin may hold a real `claude`.
+runs(staged(`${RC_BIN}:/usr/bin:/bin`), { PATH: BIN });
 const DAEMON_BIN = path.join(BASE, 'daemon-bin');
 fs.mkdirSync(DAEMON_BIN);
 script(path.join(DAEMON_BIN, 'claude'), 'echo claude-ran daemon');

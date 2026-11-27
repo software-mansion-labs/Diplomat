@@ -218,13 +218,15 @@ public struct PipelineEvent: Codable, Equatable, Sendable {
     }
 }
 
-/// Agent work a sync asks the front-end to queue. The front-end dedupes it by `key` and
-/// `stamp` through its attempt records, as it does a review request.
+/// Work a sync asks the front-end to queue. The front-end dedupes it by `key` and `stamp`:
+/// a fix or review through its attempt records, as it does a review request; a rating by
+/// the stamp its job runs at (`PipelineRateJob.run`).
 ///
 /// JSON, flat: `{"kind": "fixIssue", "repo", "number", "url"}`, `{"kind": "fixLinear",
 /// "repo", "identifier", "url", "text"}`, `{"kind": "review", "repo", "number", "url",
-/// "headSha"}`, each with its `author`, `key` and `stamp` beside (the last two written,
-/// never read back).
+/// "headSha"}`, `{"kind": "rate", "repo", "number", "url", "stamp", "forced"}`, each with its
+/// `author`, `key` and `stamp` beside (the last two written, never read back but a rating's
+/// `stamp`).
 ///
 /// `author` is the work's ban dimension, which a front-end checks against the ban list:
 /// the issue's author, or for a split's part, its root ancestor's; "" only for the
@@ -236,16 +238,21 @@ public enum PipelineEffect: Codable, Equatable, Sendable {
     case fixLinear(repo: String, identifier: String, url: String, text: String, author: String)
     /// A fast-track review of the operator's PR at `headSha`.
     case review(repo: String, number: Int, url: String, headSha: String, author: String)
+    /// A rating of one item of the root `repo` (`number` 0 for a Linear issue), run at
+    /// `stamp`; `forced` by Rate now.
+    case rate(repo: String, number: Int, url: String, stamp: String, forced: Bool, author: String)
 
     public var url: String {
         switch self {
-        case .fixIssue(_, _, let url, _), .fixLinear(_, _, let url, _, _), .review(_, _, let url, _, _): return url
+        case .fixIssue(_, _, let url, _), .fixLinear(_, _, let url, _, _), .review(_, _, let url, _, _),
+             .rate(_, _, let url, _, _, _): return url
         }
     }
 
     public var author: String {
         switch self {
-        case .fixIssue(_, _, _, let a), .fixLinear(_, _, _, _, let a), .review(_, _, _, _, let a): return a
+        case .fixIssue(_, _, _, let a), .fixLinear(_, _, _, _, let a), .review(_, _, _, _, let a),
+             .rate(_, _, _, _, _, let a): return a
         }
     }
 
@@ -254,17 +261,21 @@ public enum PipelineEffect: Codable, Equatable, Sendable {
         switch self {
         case .fixIssue, .fixLinear: return "pipeline-fix:" + url
         case .review: return "pipeline-review:" + url
+        case .rate: return "pipeline-rate:" + url
         }
     }
 
-    /// What a new attempt is owed for: a review per head; a fix once.
+    /// What a new attempt is owed for: a review per head; a fix once; a rating per ask.
     public var stamp: String {
-        if case .review(_, _, _, let sha, _) = self { return sha }
-        return "fix"
+        switch self {
+        case .review(_, _, _, let sha, _): return sha
+        case .rate(_, _, _, let stamp, _, _): return stamp
+        case .fixIssue, .fixLinear: return "fix"
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
-        case kind, repo, number, url, identifier, text, headSha, author, key, stamp
+        case kind, repo, number, url, identifier, text, headSha, author, key, stamp, forced
     }
 
     /// An effect without its `author` does not decode: a missing one must not read as
@@ -284,6 +295,10 @@ public enum PipelineEffect: Codable, Equatable, Sendable {
         case "review":
             self = .review(repo: repo, number: try c.decode(Int.self, forKey: .number), url: url,
                            headSha: try c.decode(String.self, forKey: .headSha), author: author)
+        case "rate":
+            self = .rate(repo: repo, number: try c.decode(Int.self, forKey: .number), url: url,
+                         stamp: try c.decode(String.self, forKey: .stamp),
+                         forced: try c.decode(Bool.self, forKey: .forced), author: author)
         default:
             throw DecodingError.dataCorruptedError(forKey: .kind, in: c,
                                                    debugDescription: "unknown effect \(kind)")
@@ -307,6 +322,11 @@ public enum PipelineEffect: Codable, Equatable, Sendable {
             try c.encode(repo, forKey: .repo)
             try c.encode(number, forKey: .number)
             try c.encode(headSha, forKey: .headSha)
+        case .rate(let repo, let number, _, _, let forced, _):
+            try c.encode("rate", forKey: .kind)
+            try c.encode(repo, forKey: .repo)
+            try c.encode(number, forKey: .number)
+            try c.encode(forced, forKey: .forced)
         }
         try c.encode(author, forKey: .author)
         try c.encode(url, forKey: .url)
@@ -365,8 +385,8 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
         }
     }
 
-    /// What the operator asked for from the view, ahead of every limit: items to rate, to
-    /// split, to take over and whose takeover to revoke.
+    /// What the operator asked for from the view, past a sync's own limits on asks and splits:
+    /// items to rate, to split, to take over and whose takeover to revoke.
     public struct Force: Codable, Equatable, Sendable {
         public var rate: [String]
         public var fracture: [String]

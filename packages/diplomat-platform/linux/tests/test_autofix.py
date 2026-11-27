@@ -2140,9 +2140,10 @@ def test_requested_work_waits_behind_the_monitors_and_ahead_of_a_conflict_fix():
         "review-req:o/r#3", "review-reply:o/r#4", "review:o/r#2", "issues:o/r#5", "investigate:6",
         "conflicts:o/r#1"
     ]
-    assert (autofix.queue_band("review:o/r#2"), autofix.queue_band("issues:o/r#5"),
-            autofix.queue_band("investigate:6"),
-            autofix.queue_band("conflicts:o/r#1")) == (1, 2, 3, 4)
+    # A rating waits between the requested review and the requested issue fix.
+    assert (autofix.queue_band("review:o/r#2"), autofix.queue_band("rate:o/r#7"),
+            autofix.queue_band("issues:o/r#5"), autofix.queue_band("investigate:6"),
+            autofix.queue_band("conflicts:o/r#1")) == (1, 2, 3, 4, 5)
     # An investigation is its own band, so a drag into the issue band is refused.
     assert (autofix.queue_reorder(["issues:o/r#5", "investigate:6"], "investigate:6", "issues:o/r#5")
             == ["issues:o/r#5", "investigate:6"])
@@ -2177,10 +2178,27 @@ def test_an_investigation_is_asked_for_work_with_the_label_the_core_gave_it():
     assert work.action == autofix.QUEUE_INVESTIGATE_ACTION == "investigate"
     assert work.key == "investigate:1508284197000015"
     assert work.label == "Investigate · Slack · alice · login page crashes"
-    assert autofix.QUEUE_REQUESTED_ACTIONS == {"review", "issues", "investigate"}
+    assert autofix.QUEUE_REQUESTED_ACTIONS == {"review", "issues", "investigate", "rate"}
     job = autofix.AgentJob(kind="investigate", audit_action="investigate", label=work.label,
                            prompt="p")
     assert job.requested
+
+
+def test_a_rating_is_asked_for_work_keyed_and_labelled_by_its_item():
+    """No depth: a rating has none. A Linear issue's is named by its identifier."""
+    def rating(number: int, url: str, **config) -> autofix.RequestedWork:
+        return autofix.RequestedWork(number=number, url=url, author="", repo="o/r", config={
+            "kind": "rate", "pipeline": True, "url": url, "stamp": "3", "forced": False,
+            **config})
+
+    pr = rating(7, "https://github.com/o/r/pull/7")
+    assert (pr.action, pr.key, pr.label, pr.label_among(2), pr.pipeline) == (
+        "rate", "rate:o/r#7", "Rating · #7", "Rating · r#7", True)
+    linear = rating(0, "https://linear.app/a/issue/ENG-12/x", linear={"identifier": "ENG-12"})
+    assert (linear.item, linear.key, linear.label_among(2)) == (
+        None, "rate:linear:ENG-12", "Rating · ENG-12")
+    assert autofix.AgentJob(kind="rate", audit_action="rate", label=pr.label,
+                            prompt="").requested
 
 
 def test_queue_reorder_can_reach_every_position():

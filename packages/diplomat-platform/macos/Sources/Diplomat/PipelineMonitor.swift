@@ -5,12 +5,13 @@ import DiplomatCore
 
 // MARK: - Pipeline: the sync, on the macOS side
 //
-// The core reads, rates, labels and merges, and says which agent work is owed
+// The core reads, labels and merges, and says which agent work and ratings are owed
 // (`PipelineTick.run`); this side runs it on a timer while the master switch is on and
 // turns each effect into the same requested ask a sweep or a Slack ping makes. Nothing
 // here starts an agent: every ask waits in the queue for a bay, behind the ban list, the
 // task cap, the spending budget, the disk floor and the master switch itself
-// (`AutoCounter.pipeline`).
+// (`AutoCounter.pipeline`). A rating the queue dispatches runs headless here, in its bay
+// until it returns (`startPipelineRate`), and the next sync applies its answer.
 
 extension Store {
     /// Never under `minSyncSecs` (a sync reads every root and team, and may spend `claude`
@@ -248,10 +249,11 @@ extension Store {
 
     /// Queues each owed effect whose switch is still on (the sync may have been handed it
     /// before the switch went off) and that is not queued, running, cooling down after an
-    /// attempt or concluded by one or a Cancel (`ReviewReconcile.decide`). A queued Linear
-    /// fix whose repo or text changed is queued again as the same attempt: its agent cannot
-    /// read Linear. Not one that is starting or that the network carries: a second ask would
-    /// be a second fix run. Not private: the self-test hands it composed results.
+    /// attempt or concluded by one or a Cancel (`ReviewReconcile.decide`); a rating by its
+    /// stamp alone (`queuePipelineRate`). A queued Linear fix whose repo or text changed is
+    /// queued again as the same attempt: its agent cannot read Linear. Not one that is
+    /// starting or that the network carries: a second ask would be a second fix run. Not
+    /// private: the self-test hands it composed results.
     ///
     /// With the master switch off it queues and withdraws nothing (a sync switched off
     /// midway emits no effect). Only a `judged` result, a sync's own (`pipelineRan`) begun in
@@ -292,6 +294,12 @@ extension Store {
             for effect in result.effects {
                 guard pipelineAsking(effect) else { continue }
                 guard var ask = pipelineAsk(effect) else { continue }
+                if case .rate = effect {
+                    if queuePipelineRate(ask, banned: unreadable || BanList.isBanned(ask.author, in: banned)) {
+                        queued = true
+                    }
+                    continue
+                }
                 if case .fixLinear = effect, let old = requestedWork.first(where: { $0.key == ask.key }),
                    !startingTasks.contains(where: { $0.id == ask.key }), old.offered.isEmpty,
                    old.repo != ask.repo || Store.pipelineLinear(old) != Store.pipelineLinear(ask) {
@@ -333,13 +341,46 @@ extension Store {
     }
 
     private func pipelineAsking(_ effect: PipelineEffect) -> Bool {
-        if case .review = effect { return pipelineFastTrack }
-        return pipelineFix
+        switch effect {
+        case .review: return pipelineFastTrack
+        case .rate(_, _, _, _, let forced, _): return pipelineRate || forced
+        case .fixIssue, .fixLinear: return pipelineFix
+        }
+    }
+
+    /// Queues the rating `ask` a sync emitted while the master switch is on (an earlier
+    /// effect's wait may have outlasted it), unless its author is `banned` or its job is
+    /// starting or running. One queued at another stamp is replaced; one at its stamp only
+    /// becomes Rate now's (`byHand`) when this ask is, keeping its place and with no feed
+    /// line. No attempt record: the stamp is what a rating is asked again by. Whether it
+    /// queued.
+    private func queuePipelineRate(_ ask: RequestedWork, banned: Bool) -> Bool {
+        guard pipelineEnabled, !banned, !pipelineRateRuns.contains(where: { $0.key == ask.key }),
+              !startingTasks.contains(where: { $0.id == ask.key }) else { return false }
+        if let held = requestedWork.first(where: { $0.key == ask.key }) {
+            let same = Store.pipelineRateStamp(held) == Store.pipelineRateStamp(ask)
+            if same && (held.byHand || !ask.byHand) { return false }
+            forgetRequested(ask.key)
+            dropQueuedTask(ask.key)
+            if same {
+                requestOne(ask)
+                return false
+            }
+        }
+        guard requestOne(ask) else { return false }
+        AuditLog.log("auto", "pipeline-rate", "\(ask.label(roots: roots.count)) queued"
+                     + (ask.byHand ? " (Rate now)" : ""))
+        return true
+    }
+
+    nonisolated static func pipelineRateStamp(_ ask: RequestedWork) -> String? {
+        if case .rate(let cfg) = ask.config { return cfg.stamp }
+        return nil
     }
 
     func withdrawPipelineAsks(_ result: PipelineTickResult?, handed: Set<String>? = nil) {
         let gone = Set(Store.pipelineWithdrawn(requestedWork, by: result, handed: handed, fix: pipelineFix,
-                                               fastTrack: pipelineFastTrack))
+                                               fastTrack: pipelineFastTrack, rate: pipelineRate))
             .subtracting(startingTasks.map(\.id))
         var carried = Set<String>()
         for entry in requestedWork where gone.contains(entry.key) {
@@ -358,25 +399,33 @@ extension Store {
 
     /// The keys of the pipeline's `asks` no longer owed: one a sync queued while its kind's
     /// switch is off; one `result` (a sync's own; nil judges by the switches alone) judged
-    /// and emitted no effect for; a Start fix (`byHand`) in a root judged in full whose
-    /// issue is not `fixable`. Twin of `pipeline.withdrawn`.
+    /// and emitted no effect for (a rating's at its stamp); a Start fix (`byHand`) in a root
+    /// judged in full whose issue is not `fixable`. A Rate now's rating (`byHand`) only by
+    /// `result`. Twin of `pipeline.withdrawn`.
     nonisolated static func pipelineWithdrawn(_ asks: [RequestedWork], by result: PipelineTickResult?,
                                               handed: Set<String>? = nil, fix: Bool,
-                                              fastTrack: Bool) -> [String] {
+                                              fastTrack: Bool, rate: Bool) -> [String] {
         let owed = Set((result?.effects ?? []).map { effect -> String in
-            if case .review = effect { return "review " + pipelineIdentity(effect.url) }
-            return "fix " + pipelineIdentity(effect.url)
+            switch effect {
+            case .review: return "review " + pipelineIdentity(effect.url)
+            case .fixIssue, .fixLinear: return "fix " + pipelineIdentity(effect.url)
+            case .rate: return "rate \(effect.stamp) " + pipelineIdentity(effect.url)
+            }
         })
         let fixable = Set((result?.fixable ?? []).map(pipelineIdentity))
         let judged = Set(result.map { pipelineJudgedAsks(asks, by: $0, handed: handed) } ?? [])
         let short = pipelineShort(result?.unread ?? [], handed: handed)
         return asks.filter { ask in
             guard ask.config.isPipeline else { return false }
+            let id = pipelineIdentity(ask.url)
+            if let stamp = pipelineRateStamp(ask) {
+                if !ask.byHand && !rate { return true }
+                return result != nil && !owed.contains("rate \(stamp) " + id) && judged.contains(ask.key)
+            }
             let review: Bool
             if case .review = ask.config { review = true } else { review = false }
             if !ask.byHand && !(review ? fastTrack : fix) { return true }
             guard result != nil else { return false }
-            let id = pipelineIdentity(ask.url)
             return ask.byHand ? !short(ask.repo.lowercased()) && !fixable.contains(id)
                 : !owed.contains((review ? "review " : "fix ") + id) && judged.contains(ask.key)
         }.map(\.key)
@@ -401,8 +450,11 @@ extension Store {
     }
 
     nonisolated static func pipelineVerb(_ effect: PipelineEffect) -> String {
-        if case .review = effect { return "pipeline-review" }
-        return "pipeline-fix"
+        switch effect {
+        case .review: return "pipeline-review"
+        case .rate: return "pipeline-rate"
+        case .fixIssue, .fixLinear: return "pipeline-fix"
+        }
     }
 
     /// The `merged` and `fractured` events of `result` that `previous` did not show: none
@@ -456,6 +508,12 @@ extension Store {
             cfg.fastTrack = true
             return RequestedWork(number: number, url: url, author: author, config: .review(cfg),
                                  repo: root.key)
+        case .rate(_, let number, let url, let stamp, let forced, _):
+            var ask = RequestedWork(number: number, url: url, author: author,
+                                    config: .rate(RateConfig(url: url, stamp: stamp, forced: forced)),
+                                    repo: root.key)
+            ask.byHand = forced
+            return ask
         }
     }
 
@@ -614,6 +672,12 @@ extension Store {
     /// `Store.pipeline_cancel_help`.
     nonisolated static func pipelineCancelHelp(_ job: AgentJob) -> String? {
         guard job.counter == .pipeline else { return nil }
+        if job.rating != nil {
+            return """
+                Drop this rating from the queue without running it. The pipeline does not ask for \
+                it again; Rate now on the Pipeline screen does.
+                """
+        }
         if job.kind == AgentTaskQueue.reviewAction {
             return """
                 Drop this review from the queue without running it. The pipeline asks for it \
@@ -702,8 +766,8 @@ extension Store {
         Task { await runPipelineSyncOnce() }
     }
 
-    /// Rate now / Fracture / Authorize or Revoke takeover: done on the next sync, ahead of
-    /// every limit. Of a takeover and a revoke asked of one item, the last asked wins.
+    /// Rate now / Fracture / Authorize or Revoke takeover: asked of the next sync, past its
+    /// own limits. Of a takeover and a revoke asked of one item, the last asked wins.
     func forcePipeline(rate id: String? = nil, fracture split: String? = nil,
                        takeover taken: String? = nil, revoke: String? = nil) {
         if let id, !pipelineForce.rate.contains(id) { pipelineForce.rate.append(id) }
@@ -727,8 +791,10 @@ extension Store {
     func pipelineFixEffect(for item: PipelineItem) -> PipelineEffect? {
         guard item.kind == .issue, item.writable, item.hold == nil else { return nil }
         let emitted = pipelineResult?.effects.first {
-            if case .review = $0 { return false }
-            return Store.pipelineIdentity($0.url) == Store.pipelineIdentity(item.id)
+            switch $0 {
+            case .review, .rate: return false
+            case .fixIssue, .fixLinear: return Store.pipelineIdentity($0.url) == Store.pipelineIdentity(item.id)
+            }
         }
         if emitted != nil || item.source == .linear { return emitted }
         guard let number = PRRef.itemKey(url: item.id).flatMap(PRRef.splitItemKey)?.number else { return nil }
@@ -809,7 +875,8 @@ extension Store {
 
     nonisolated static func pipelineRepo(_ effect: PipelineEffect) -> String {
         switch effect {
-        case .fixIssue(let repo, _, _, _), .fixLinear(let repo, _, _, _, _), .review(let repo, _, _, _, _): return repo
+        case .fixIssue(let repo, _, _, _), .fixLinear(let repo, _, _, _, _), .review(let repo, _, _, _, _),
+             .rate(let repo, _, _, _, _, _): return repo
         }
     }
 
@@ -817,20 +884,71 @@ extension Store {
 
     enum PipelineBadge: Equatable { case agent, queued }
 
-    /// By `pipelineIdentity`; an agent on an item outranks work queued for it.
+    /// By `pipelineIdentity`; an agent or a rating job on an item outranks work queued for it.
     var pipelineBadges: [String: PipelineBadge] {
-        Store.pipelineBadges(rows: agentRows, waiting: queuedTasks + startingTasks, asks: requestedWork)
+        Store.pipelineBadges(rows: agentRows, waiting: queuedTasks + startingTasks, asks: requestedWork,
+                             rating: pipelineRateRuns)
     }
 
     nonisolated static func pipelineBadges(rows: [AgentRow], waiting: [QueuedAgentTask],
-                                           asks: [RequestedWork]) -> [String: PipelineBadge] {
+                                           asks: [RequestedWork],
+                                           rating: [PipelineRateRun] = []) -> [String: PipelineBadge] {
         var out: [String: PipelineBadge] = [:]
         for link in waiting.compactMap(\.job.prURL) + asks.map(\.url) where !link.isEmpty {
             out[pipelineIdentity(link)] = .queued
         }
-        for row in rows where blocks(row) && !row.record.prURL.isEmpty {
-            out[pipelineIdentity(row.record.prURL)] = .agent
+        for link in rows.filter(blocks).map(\.record.prURL) + rating.map(\.url) where !link.isEmpty {
+            out[pipelineIdentity(link)] = .agent
         }
         return out
+    }
+
+    // MARK: rating jobs
+
+    /// A rating ask's config: its item's link, the stamp the sync wrote its job at, and
+    /// whether Rate now asked for it.
+    struct RateConfig: Codable, Equatable, Sendable {
+        let url: String
+        let stamp: String
+        let forced: Bool
+    }
+
+    /// A rating job the queue started, holding a bay of the cap until it returns.
+    struct PipelineRateRun: Equatable {
+        /// Its ask's queue key.
+        let key: String
+        /// Its queued row's, which its running row and feed lines wear.
+        let label: String
+        let url: String
+        let startedAt: Date
+        let forced: Bool
+    }
+
+    /// Runs the dispatched `rating`'s job off the main actor, its bay held
+    /// (`pipelineRateRuns`) until it returns; then says in the feed what it did, frees the
+    /// bay and, for Rate now, syncs to apply it. Not awaited at a quit.
+    func startPipelineRate(_ rating: RateConfig, label: String) {
+        let run = PipelineRateRun(
+            key: AgentTaskQueue.key(auditAction: AgentTaskQueue.rateAction, item: Store.pipelineIdentity(rating.url)),
+            label: label, url: rating.url, startedAt: Date(), forced: rating.forced)
+        pipelineRateRuns.append(run)
+        Task {
+            let outcome = await Task.detached(priority: .utility) {
+                PipelineRateJob.run(item: rating.url, stamp: rating.stamp)
+            }.value
+            finishPipelineRate(run, outcome)
+        }
+    }
+
+    func finishPipelineRate(_ run: PipelineRateRun, _ outcome: PipelineRateJob.Outcome) {
+        pipelineRateRuns.removeAll { $0 == run }
+        switch outcome {
+        case .rated(let rating): AuditLog.log("auto", "pipeline-rate", "\(run.label) rated: \(rating)")
+        case .failed(let why): AuditLog.log("auto", "pipeline-rate", "\(run.label) was not rated: \(why)")
+        case .answered, .superseded: break
+        }
+        refreshAudit()
+        bringPollForward(capLoad: autoTasksMeasured)
+        if run.forced { syncPipelineNow() }
     }
 }

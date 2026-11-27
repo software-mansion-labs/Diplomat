@@ -108,7 +108,7 @@ def test_an_investigation_round_trips_into_the_queue_and_its_prompt():
     work = autofix.RequestedWork(number=config["number"], url=MESSAGE["permalink"],
                                  author="", config=config)
     assert work.key == "investigate:1508284197000015"
-    assert autofix.queue_band(work.key) == 3
+    assert autofix.queue_band(work.key) == 4
     assert work.label == config["label"]
 
     # ...and the build-prompt payload.

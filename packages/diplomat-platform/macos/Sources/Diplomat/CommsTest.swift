@@ -297,7 +297,7 @@ enum CommsTest {
         let askFix = item(.fixIssue, 90020)
         await apply([askFix])
         check("a fix ask lands first in the issue band",
-              band(2) == ["issues:o/r#90020", "issues:o/r#90004"])
+              band(3) == ["issues:o/r#90020", "issues:o/r#90004"])
         check("…behind every review", ids().firstIndex(of: "issues:o/r#90020")!
                 > ids().firstIndex(of: "review:o/r#90002")!)
         check("…carrying the issue's author", store.requestedWork.first {
@@ -311,7 +311,7 @@ enum CommsTest {
         let askBump = item(.bump, 90003)
         await apply([askBump])
         check("a bump moves each queued item for that number to the front of its band",
-              band(1).first == "review:o/r#90003" && band(2).first == "issues:o/r#90003")
+              band(1).first == "review:o/r#90003" && band(3).first == "issues:o/r#90003")
         check("…and nothing whose number merely ends in it", band(1).last == "review:o/r#190003")
         check("…adding no work of its own", Set(ids()) == Set(beforeBump)
                 && folded(askBump)?.queueKey == nil)
@@ -327,7 +327,7 @@ enum CommsTest {
         await apply([askInvestigate])
         let invKey = "investigate:\(CommsTS.number(askInvestigate.message.ts)!)"
         check("an investigation lands in its own band, after the fixes",
-              band(3) == [invKey] && ids().last == invKey)
+              band(4) == [invKey] && ids().last == invKey)
         let stored = Store.decodeRequestedWork(try? JSONEncoder().encode(store.requestedWork),
                                                 configured: "o/r")
         let reloaded = stored.first { $0.key == invKey }
