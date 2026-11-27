@@ -142,7 +142,7 @@ struct TelemetryView: View {
     // MARK: - Cards
 
     /// A card's heading row: tinted symbol, title, the headline number on the right —
-    /// the one shape all four cards share. `valueTint` colours the number as the
+    /// the one shape every card shares. `valueTint` colours the number as the
     /// series it quotes when that is not the card's own.
     private func cardHead(_ id: String, _ value: String,
                           valueTint: Color? = nil) -> some View {

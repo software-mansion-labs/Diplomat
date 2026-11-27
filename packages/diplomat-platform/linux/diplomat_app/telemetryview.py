@@ -798,7 +798,7 @@ class TelemetryView(QWidget):
     def _card_head(self, layout, metric_id: str, value: str, *,
                    caption: str | None = None, value_tint: str | None = None) -> None:
         """A card's heading row: tinted glyph, title, the headline number on the
-        right — the one shape all four cards share. ``value_tint`` colours the
+        right — the one shape every card shares. ``value_tint`` colours the
         number as the series it quotes when that is not the card's own."""
         row = QHBoxLayout()
         row.setSpacing(6)
