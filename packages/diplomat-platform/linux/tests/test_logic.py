@@ -125,7 +125,7 @@ def test_store_lookup():
     assert not s.lookup(999).is_on_any_list
 
 
-def test_the_assets_readme_names_the_icon_and_tint_fields_linux_reads():
+def test_the_assets_readme_names_every_tool_field_and_the_ones_linux_reads():
     assert [(t.glyph, t.color_hex) for t in tools()] == [
         (c["linuxGlyph"], c["colorHex"]) for c in core.catalog()]
     readme = (core.assets_dir() / "README.md").read_text(encoding="utf-8")
