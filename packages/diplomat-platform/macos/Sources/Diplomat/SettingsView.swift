@@ -1103,8 +1103,8 @@ struct SettingsView: View {
                 switchControl("Merge cleared PRs", $store.pipelineMerge)
             }
             SettingRow(title: "Split big issues",
-                       summary: "Each sync, one issue more complex than its repo's fast-track limit "
-                           + "becomes low-complexity child issues",
+                       summary: "Each sync splits one issue more complex than its repo's limit into "
+                           + "low-complexity child issues",
                        detail: SettingsView.pipelineFractureDetail) {
                 switchControl("Split big issues", $store.pipelineFracture)
             }

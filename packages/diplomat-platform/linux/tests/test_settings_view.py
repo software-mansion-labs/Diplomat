@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from diplomat_runtime import autofix, review
+from diplomat_runtime.prref import LocalRepo
 from diplomat_app.settingsview import SettingsView
 from diplomat_app.store import Store
 
@@ -453,7 +454,8 @@ def test_a_healthy_screen_draws_no_line_under_any_row(make_view, monkeypatch, tm
     # But the PIPELINE card's, whose one-liners read as its macOS twin's do.
     pipeline_rows = {view._pipeline_row, view._pipeline_teams_row, view._pipeline_login_row,
                      *(_row_of(w) for w in (view._sw_pipeline_rate, view._sw_pipeline_fix,
-                                            view._sw_pipeline_fast, view._sw_pipeline_merge,
+                                            view._sw_pipeline_fast, view._pipeline_limits,
+                                            view._sw_pipeline_merge,
                                             view._sw_pipeline_fracture))}
     assert [(r._control.accessibleName(), r.summary()) for r in view._rows
             if r.summary() and r not in pipeline_rows] == []
@@ -552,8 +554,8 @@ def _pipeline_view(make_view, monkeypatch, **settings):
 def test_the_pipeline_options_are_drawn_only_while_it_runs(make_view, monkeypatch):
     view, synced = _pipeline_view(make_view, monkeypatch)
     nested = [view._sw_pipeline_rate, view._sw_pipeline_fix, view._sw_pipeline_fast,
-              view._sw_pipeline_merge, view._sw_pipeline_fracture, view._pipeline_teams,
-              view._pipeline_login_row]
+              view._pipeline_limits, view._sw_pipeline_merge, view._sw_pipeline_fracture,
+              view._pipeline_teams, view._pipeline_login_row]
     assert view._pipeline_row.isVisibleTo(view)
     assert not any(w.isVisibleTo(view) for w in nested)
     assert view._pipeline_pill.text() == "off"
@@ -596,16 +598,25 @@ def test_the_pipeline_rows_read_as_their_macos_twins_do(make_view, monkeypatch):
     assert [(r._control.accessibleName(), r.summary()) for r in rows] == [
         ("Rate issues and PRs",
          "Risk and complexity, by claude, as labels where Diplomat may write"),
-        ("Open fix PRs", "Queues an agent that fixes each low-risk, low-complexity issue, and each you take over"),
+        ("Open fix PRs",
+         "Queues an agent that fixes each issue within its repo's fast-track limit, and each you "
+         "take over"),
         ("Fast-track my PRs",
-         "Labels diplomat:fast-track each low/low PR of yours that closes a candidate issue, "
-         "or that you take over, and reviews it until clean"),
+         "Labels diplomat:fast-track each PR of yours within its repo's limit that closes a "
+         "candidate issue, or that you take over, and reviews it until clean"),
         ("Merge cleared PRs",
          "Merges past the review requirement with admin rights (gh pr merge --admin): "
          "no person approves the PR first"),
         ("Split big issues",
-         "One medium- or high-complexity issue a sync becomes low-complexity child issues"),
+         "Each sync splits one issue more complex than its repo's limit into low-complexity "
+         "child issues"),
     ]
+    limits = _row_of(view._pipeline_limits)
+    assert (limits._control.accessibleName(), limits.summary(), limits._detail.text()) == (
+        "Fast-track limits",
+        "The highest rating each repo's fast track fixes, reviews and merges",
+        "Low/low by default. Risk stops at medium: high risk is the ground the fast track "
+        "never takes. A Linear team's issues go by the repo it maps to.")
     assert rows[0]._detail.text().endswith(
         " A rating already on the tracker is the rating, raised by a higher one kept here "
         "until its labels are written; a PR's diff can only raise one.")
@@ -622,6 +633,56 @@ def test_the_pipeline_rows_read_as_their_macos_twins_do(make_view, monkeypatch):
     assert [view._pipeline_teams_row._control.accessibleName(),
             view._pipeline_login_row._control.accessibleName()] == ["Linear teams",
                                                                     "Linear login"]
+
+
+def _limit_sliders(view) -> dict:
+    """Each root's ``(complexity, risk)``: their badges and their slider ranges."""
+    return {slug: tuple((s.badge(), s.minimum(), s.maximum()) for s in pair.values())
+            for slug, pair in view._pipeline_limit_sliders.items()}
+
+
+def test_each_github_root_has_a_complexity_and_a_risk_slider_on_its_limit(make_view,
+                                                                          monkeypatch):
+    """Risk stops at medium; a GitLab root, which the Pipeline does not read, has none."""
+    monkeypatch.setattr(review, "repo_roots", lambda: [
+        LocalRepo("o", "r", "/src/r"), LocalRepo("Acme", "App", "/src/app"),
+        LocalRepo("group/sub", "r", "/src/lab", host="gitlab.example.com")])
+    Store().set_pipeline_limit("acme/app", {"risk": "medium", "complexity": "high"})
+    view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    assert _limit_sliders(view) == {"o/r": (("low", 0, 2), ("low", 0, 1)),
+                                    "Acme/App": (("high", 0, 2), ("medium", 0, 1))}
+    assert view._pipeline_limits_list.count() == 2
+
+
+def test_moving_a_limit_slider_writes_it_through_and_syncs(make_view, monkeypatch):
+    monkeypatch.setattr(review, "repo_roots", lambda: [LocalRepo("o", "r", "/src/r")])
+    view, synced = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    complexity, risk = view._pipeline_limit_sliders["o/r"].values()
+    complexity._slider.setValue(1)
+    assert (Store().pipeline_limits, synced) == (
+        {"o/r": {"risk": "low", "complexity": "medium"}}, [True])
+    epoch = view.store._pipeline_epoch
+    risk._slider.setValue(1)
+    complexity._slider.setValue(0)
+    assert (Store().pipeline_limits, synced) == (
+        {"o/r": {"risk": "medium", "complexity": "low"}}, [True, True, True])
+    assert view.store._pipeline_epoch == epoch + 1
+    assert complexity.badge() == "low"
+
+
+def test_the_limit_rows_follow_the_roots(make_view, monkeypatch):
+    from PySide6.QtWidgets import QLabel
+
+    roots = [LocalRepo("group/sub", "r", "/src/lab", host="gitlab.example.com")]
+    monkeypatch.setattr(review, "repo_roots", lambda: roots)
+    view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    lines = view._pipeline_limits.findChildren(QLabel)
+    assert (view._pipeline_limit_sliders, [w.text() for w in lines]) == (
+        {}, ["No GitHub repo root is set"])
+    roots.append(LocalRepo("o", "r", "/src/r"))
+    view.store.local_repos_changed.emit()
+    assert list(view._pipeline_limit_sliders) == ["o/r"]
+    assert view._pipeline_limits_list.count() == 1
 
 
 def test_the_linear_teams_line_reports_what_it_cannot_read(make_view, monkeypatch):
