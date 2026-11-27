@@ -891,9 +891,10 @@ private func fixture() -> Trackers {
 private typealias Synced = (result: PipelineTickResult, writes: [String], claude: [String], events: [PipelineEvent])
 
 /// One sync and what it did; its events are those at `now`, so give each sync its own. Both
-/// trackers mirror ratings onto `mirror`; nil leaves `settings` as they are. With `drain`, a front-end's part too: each rating it asked for is run as its queued job
-/// would be, and a second sync, forcing nothing, applies the answers; the result is the
-/// second's, with the first's notices ahead of its own, as a front-end logs both.
+/// trackers mirror ratings onto `mirror`; nil leaves `settings` as they are. With `drain`, a
+/// front-end's part too: each rating it asked for is run as its queued job would be, and a
+/// second sync, forcing nothing, applies the answers; the result is the second's, with the
+/// first's notices ahead of its own, as a front-end logs both.
 private func sync(_ t: Trackers, _ settings: PipelineSettings, _ dir: URL, _ now: Date,
                   key: String? = smokeKey, drain: Bool = true, mirror: PipelineMirrorScope? = .all) -> Synced {
     let w = t.writes.count, c = t.claudeCalls.count

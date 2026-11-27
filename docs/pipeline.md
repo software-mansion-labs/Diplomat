@@ -181,9 +181,9 @@ Each answer is kept on this machine as it arrives, so it is not paid for again, 
 raise it; on an item with none kept, labels for both dimensions are its rating (two of one dimension:
 the higher). A rated item is not rated again but for the fast track's second rating or when you ask,
 and a new rating is the higher of the labels already there, the model's answer, the rating kept and
-the diff floor, a dimension at a time. One whose labels or fast-track label wait for a sync to read
-the item again holds a PR off the fast track, and an issue from its fix, until then, tried again 1, 2, 4 ... syncs later, unless
-a PR's diff at its head allows less: then it is dropped, and the PR is rated by its labels again, or
+the diff floor, a dimension at a time. One a sync could not apply holds a PR off the fast track,
+and an issue from its fix, until a later sync does, tried again 1, 2, 4 ... syncs later, unless a
+PR's diff at its head allows less: then it is dropped, and the PR is rated by its labels again, or
 rated anew without them.
 
 Where you [mirror](#settings) ratings, a finished one's labels are written at once, and a sync labels
@@ -484,7 +484,8 @@ trackers' labels, this is what a sync needs:
 - `rate/` - each rating asked for: the call its job makes, and the answer it leaves for the next
   sync, until the sync no longer asks for it.
 - `control.json` - the switches and **Mirror onto** as the app has them, and the revokes asked that
-  no sync has answered, rewritten whenever one changes, a takeover or revoke is asked, and before each sync.
+  no sync has answered, rewritten whenever one changes, a takeover or revoke is asked, and before
+  each sync.
 - `linear-login.json` - the [Linear login](#linear): its tokens, and who it is.
 
 The fix and review asks' attempt records are the app's own (`pipelineAttempts`): a run that reported

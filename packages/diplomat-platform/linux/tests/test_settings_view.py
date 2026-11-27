@@ -681,7 +681,6 @@ def test_mirror_onto_is_drawn_only_while_a_mirror_is_on(make_view, monkeypatch):
     assert row.isVisibleTo(view)
     view._sw_pipeline_mirror_github.setChecked(False)
     assert not row.isVisibleTo(view)
-    # A view opened on a mirror already on.
     again = make_view(pipeline_enabled=True, pipeline_mirror_github=True)
     assert again._pipeline_scope_row.isVisibleTo(again)
 
