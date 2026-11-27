@@ -21,7 +21,7 @@ threshold in one file and both platforms pick it up; the golden-prompt tests
 | `graphql/my-reviews.graphql` | my reviews on one PR (`$owner`/`$name`/`$number`/`$me`), PENDING ones included: what the check a retiring review run gets reads |
 | `graphql/closed-prs.graphql` | the PRs that have recently merged or closed (`$q`) — numbers only, which is all the Agent-tasks queue needs to drop a row whose PR has landed. The cheapest query here (1 point) and the only one whose cap makes it "closed lately" rather than "closed ever" |
 | `graphql/gitlab-*.graphql` | the GitLab twins of `viewer`, `prs`, `issues`, `monitor-prs`, `closed-prs` and `review-requests`, plus `gitlab-mr` (one merge request's state and author), run through `glab api --hostname <host> graphql` with the project's full path as `$path`. `../Sources/DiplomatCore/GitLab.swift` and `diplomat_runtime/gitlab.py` turn each answer into its GitHub twin's shape, so the same parsers read both; `../Tests/fixtures/gitlab/` holds the input/expected pairs both assert |
-| `catalog.json` | the six tools: id, title, subtitle, icon (`sfSymbol` for macOS, `emoji` for Linux), colour (`color` name for macOS, `colorHex` for Linux), in display order |
+| `catalog.json` | the six tools: `id`, `title`, `subtitle`, icon (`sfSymbol` for macOS, `linuxGlyph` for Linux; `emoji` is legacy but required), colour (`color` name for macOS, `colorHex` for Linux), in display order |
 | `filters.json` | filter constants: skill-file suffix, installer path prefixes, team/org/trusted associations, stale-ready day threshold, the `APPROVED` sentinel |
 | `review.json` | the Review-PRs prompt model: depth levels + scope/action text blocks the wizard assembles |
 | `conflicts.json` | the Resolve-conflicts prompt model: scope templates + the merge/resolve action blocks the wizard assembles |
@@ -44,7 +44,7 @@ threshold in one file and both platforms pick it up; the golden-prompt tests
   passes them via `gh api graphql -f …` so the query text stays repo-agnostic.
   Both applets run the monitors, so both execute all seven.
 - **Icons/colours are intentionally dual.** `sfSymbol`+`color` are the macOS
-  (SF Symbols + SwiftUI semantic colours) assets; `emoji`+`colorHex` are the
+  (SF Symbols + SwiftUI semantic colours) assets; `linuxGlyph`+`colorHex` are the
   Linux assets. These are rendering choices, not logic — both are kept here so
   the catalog stays a single list.
 - **`_comment` keys** are documentation only; loaders ignore unknown keys.

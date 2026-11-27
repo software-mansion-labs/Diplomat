@@ -61,7 +61,7 @@ public enum ToolKind: String, CaseIterable, Identifiable {
     public var subtitle: String { entry?.subtitle ?? "" }
     /// macOS SF Symbol name.
     public var systemImage: String { entry?.sfSymbol ?? "questionmark.circle" }
-    /// Linux emoji glyph.
+    /// Legacy Linux colour-emoji.
     public var emoji: String { entry?.emoji ?? "" }
     /// SwiftUI semantic colour name (purple / orange / …).
     public var colorName: String { entry?.color ?? "gray" }
