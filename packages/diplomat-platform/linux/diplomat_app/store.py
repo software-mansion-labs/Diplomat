@@ -403,8 +403,9 @@ class Store(QObject):
         # Live telemetry read from the shared ~/.diplomat files (activity feed + bans).
         self.audit_entries: list = []
         self.banned_authors: list = []
-        # banned.json is present but unreadable, as the last read found it: the Pipeline
-        # then acts on nothing, as its sync does (``PipelineTick.bannedLogins``).
+        # banned.json cannot be read, as the last read found it: work naming an author is
+        # held (``held_by_ban_list``), and the Pipeline acts on nothing, as its sync does
+        # (``PipelineTick.bannedLogins``).
         self.ban_list_unreadable = False
         # The (login, at) of every ban the last read held; None until the first read,
         # whose bans were there before this launch and are not news.
@@ -2022,13 +2023,13 @@ class Store(QObject):
         # Before dispatching, so the ledger has a queue instant to measure the
         # time-to-start against. A banned author's request is owed by GitHub's
         # reckoning but will never be dispatched, so it is left out — counting it
-        # would show a review pending forever that nothing is meant to pick up. So
-        # nothing is observed while the list cannot be read.
-        if not unreadable:
-            telemetry.observe_owed(autofix.WORK_REVIEW_REQ, "review", {
-                autofix.ledger_key(autofix.WORK_REVIEW_REQ, r.url, r.head_sha): r.number
-                for r in owed if not bans.is_banned(r.author, banned)
-            })
+        # would show a review pending forever that nothing is meant to pick up. While the
+        # list cannot be read, the last one read stands in for it.
+        standing = self.banned_authors if unreadable else banned
+        telemetry.observe_owed(autofix.WORK_REVIEW_REQ, "review", {
+            autofix.ledger_key(autofix.WORK_REVIEW_REQ, r.url, r.head_sha): r.number
+            for r in owed if not bans.is_banned(r.author, standing)
+        })
         dispatched: dict[str, autofix.ReviewAttempt] = {}
         concluded: set[str] = set()
         for r in owed:

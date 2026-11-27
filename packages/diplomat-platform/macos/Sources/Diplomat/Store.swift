@@ -778,8 +778,9 @@ final class Store: ObservableObject {
     /// banned.json). They receive no automated reviews, their Slack messages are not
     /// triaged, and they appear in the "Banned" list above the sessions.
     @Published var bannedAuthors: [BannedAuthor] = []
-    /// banned.json is present but unreadable, as `refreshBanList` last read it: the Pipeline
-    /// then acts on nothing, as its sync does (`PipelineTick.bannedLogins`).
+    /// banned.json cannot be read, as `refreshBanList` last found it: work naming an author
+    /// is held (`heldByBanList`), and the Pipeline acts on nothing, as its sync does
+    /// (`PipelineTick.bannedLogins`).
     @Published var banListUnreadable = false
 
     /// Each ban `refreshBanList` has seen, as login and `at`; nil until its first read,
@@ -3295,16 +3296,15 @@ final class Store: ObservableObject {
         // Before dispatching, so the ledger has a queue instant to measure the
         // time-to-start against. A banned author's request is owed by GitHub's
         // reckoning but will never be dispatched, so it is left out — counting it
-        // would show a review pending forever that nothing is meant to pick up. So
-        // nothing is observed while the list cannot be read.
-        if !bans.isUnreadable {
-            TelemetryLog.observeOwed(
-                kind: AutofixWork.kindReviewReq, duty: "review",
-                owed: Dictionary(owed.filter { !BanList.isBanned($0.author, in: banned) }.map {
-                    (AutofixWork.ledgerKey(kind: AutofixWork.kindReviewReq,
-                                           prURL: $0.url, headSha: $0.headSha), $0.number)
-                }, uniquingKeysWith: { first, _ in first }))
-        }
+        // would show a review pending forever that nothing is meant to pick up. While the
+        // list cannot be read, the last one read stands in for it.
+        let standing = bans.isUnreadable ? bannedAuthors : banned
+        TelemetryLog.observeOwed(
+            kind: AutofixWork.kindReviewReq, duty: "review",
+            owed: Dictionary(owed.filter { !BanList.isBanned($0.author, in: standing) }.map {
+                (AutofixWork.ledgerKey(kind: AutofixWork.kindReviewReq,
+                                       prURL: $0.url, headSha: $0.headSha), $0.number)
+            }, uniquingKeysWith: { first, _ in first }))
         var concluded: Set<String> = []
         var dispatched: [String: ReviewAttempt] = [:]
         for r in owed {

@@ -1683,6 +1683,7 @@ enum QueueTest {
                                                   prURL: "https://github.com/o2/beta/pull/90010",
                                                   headSha: "r90010")
         try? Data(#"{"banned":[{"login":"qt-outsider"}]}"#.utf8).write(to: BanList.fileURL)
+        store.refreshBanList()
         await store.runAutofixPollOnce()
         let owedBanned = store.unaddressedReviews
         try? Data("{".utf8).write(to: BanList.fileURL)
@@ -1693,6 +1694,15 @@ enum QueueTest {
         check("…and the ledger and owed count stand as a ban on its author left them",
               !TelemetryLog.load().tasks.contains { $0.key == heldReqLedger }
                   && store.unaddressedReviews == owedBanned)
+        heldAnswer("review-requested", "beta", requestedPR("o2/beta", 90010)
+            .replacingOccurrences(of: "]}}}", with: #",{"number":90011,"title":"t","url":"https://github.com/o2/beta/pull/90011","author":{"login":"qt-newcomer"},"authorAssociation":"NONE","headRefOid":"r90011"}]}}}"#))
+        await store.runAutofixPollOnce()
+        let newcomerLedger = AutofixWork.ledgerKey(kind: AutofixWork.kindReviewReq,
+                                                   prURL: "https://github.com/o2/beta/pull/90011",
+                                                   headSha: "r90011")
+        check("…while one first owed meanwhile, by an author the last list read leaves in, is queued in the ledger",
+              TelemetryLog.load().tasks.contains { $0.key == newcomerLedger && $0.queuedAt != nil })
+        heldAnswer("review-requested", "beta", requestedPR("o2/beta", 90010))
         try? Data(#"{"banned":[{"login":"qt-outsider"}]}"#.utf8).write(to: BanList.fileURL)
         chmod(BanList.dir.path, 0o600)
         let unsearchable = BanList.readFile().isUnreadable

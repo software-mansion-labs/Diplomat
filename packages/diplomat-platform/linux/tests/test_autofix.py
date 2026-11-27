@@ -706,6 +706,7 @@ def test_an_unreadable_ban_list_holds_each_review_request_in_the_queue(store, mo
     monkeypatch.setattr("diplomat_app.autofixmonitor.fetch_review_requests", lambda *a, **k: reqs)
     bans.banned_path().parent.mkdir(parents=True)
     bans.banned_path().write_text('{"banned":[{"login":"mallory"}]}')
+    store.refresh_activity()
 
     def cycle():
         store._staged_queue = []
@@ -723,13 +724,16 @@ def test_an_unreadable_ban_list_holds_each_review_request_in_the_queue(store, mo
     else:
         bans.banned_path().write_text(spoil)
     store.queue_auto_run = True
-    assert (cycle(), calls, store._load_attempts("reviewReqAttempts")) == ([4, 3, 5], [], {})
-    assert (telemetry.load().tasks, store.unaddressed_reviews) == (ledger, 2)
+    reqs.append(_req(number=6, requested_at="2026-01-02", author="carol"))
+    assert (cycle(), calls, store._load_attempts("reviewReqAttempts")) == ([4, 3, 5, 6], [], {})
+    # Only what the last list read leaves in: carol's, first owed meanwhile.
+    fresh = [(t.pr, t.duty) for t in telemetry.load().tasks if t not in ledger]
+    assert (fresh, store.unaddressed_reviews) == ([(6, "review")], 2)
     assert [e.detail for e in activity.read() if e.action == "ban-skip"] == []
     bans.banned_path().parent.chmod(0o700)
     bans.banned_path().unlink()
     assert cycle() == []
-    assert sorted(c["prompt"][-2:] for c in calls) == [":3", ":4", ":5"]
+    assert sorted(c["prompt"][-2:] for c in calls) == [":3", ":4", ":5", ":6"]
 
 
 def test_unaddressed_count_and_ban_skip(store, monkeypatch):
