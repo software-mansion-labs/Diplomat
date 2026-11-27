@@ -112,8 +112,6 @@ enum PipelineTest {
               SettingsView.pipelineMergeDetail.hasPrefix(
                   "A cleared PR is merged only when none of the holds in docs/pipeline.md applies "
                       + "to it, checked again right before the merge."))
-        // Settings' `.task` checks the self repo for an update and the allocator's install.
-        setenv("DIPLOMAT_SELF_REPO", scratch.appendingPathComponent("no-checkout").path, 1)
         let settingsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: MainRoot.width, height: 800),
                                       styleMask: [.titled], backing: .buffered, defer: true)
         settingsWindow.isReleasedWhenClosed = false
@@ -2158,7 +2156,6 @@ enum PipelineTest {
         _ = await signOut(revoke: 200)
     }
 
-    /// The segment labels of each segmented control under `view`.
     private static func segments(in view: NSView?) -> [[String]] {
         guard let view else { return [] }
         let own = (view as? NSSegmentedControl).map { c in (0..<c.segmentCount).compactMap(c.label(forSegment:)) }
