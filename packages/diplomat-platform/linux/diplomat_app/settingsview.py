@@ -1353,13 +1353,13 @@ class SettingsView(QWidget):
                    "by stage; what it may do about them is the switches under this one, "
                    "and with all of them off it only reads, but for Rate now, Fracture and "
                    "taking diplomat:fractured off an issue whose split filed nothing. Its "
-                   "state is the trackers' labels: risk:, complexity: and diplomat:. "
-                   "Diplomat writes labels, opens child issues or merges only on an issue "
-                   "unassigned or assigned to you, or your own PR from the repo itself into "
-                   "its default branch; everything else is read and shown. GitLab roots are "
-                   "not read. The agent work it asks for waits in the queue like any other, "
-                   "for the task cap, the ban list and the spending budget; while this is "
-                   "off it reads nothing and that work waits.",
+                   "ratings are kept on this machine, and the rest of its state is the "
+                   "trackers' diplomat: labels. Diplomat writes labels, opens child issues "
+                   "or merges only on an issue unassigned or assigned to you, or your own PR "
+                   "from the repo itself into its default branch; everything else is read "
+                   "and shown. GitLab roots are not read. The agent work it asks for waits "
+                   "in the queue like any other, for the task cap, the ban list and the "
+                   "spending budget; while this is off it reads nothing and that work waits.",
         ))
         body.addWidget(self._pipeline_row)
 
@@ -1372,14 +1372,39 @@ class SettingsView(QWidget):
         nest, inner = nested_settings(_INDIGO)
         self._sw_pipeline_rate = self._pipeline_switch(
             inner, "Rate issues and PRs", st.pipeline_rate, "pipeline_rate",
-            "Risk and complexity, by claude, as labels where Diplomat may write",
+            "Risk and complexity, by claude, kept on this machine",
             "A few unrated items a sync, each rated low, medium or high for risk and "
             "complexity by one claude call with read-only tools in its repo's checkout "
-            "and the item's text as data. A rating is labelled where Diplomat may write; "
-            "any other issue's rating is kept on this machine only, and someone else's "
-            "PR is not rated. A rating already on the tracker is the rating, raised by a "
-            "higher one kept here until its labels are written; a PR's diff can only raise "
-            "one.")
+            "and the item's text as data. Each rating is kept on this machine, and goes "
+            "on the tracker as labels only where Mirror ratings says; someone else's PR "
+            "is not rated. Labels already on an item rate it, or raise the rating kept "
+            "for it, never lower it; a PR's diff can only raise one.")
+        self._sw_pipeline_mirror_github = self._pipeline_switch(
+            inner, "Mirror ratings to GitHub", st.pipeline_mirror_github,
+            "pipeline_mirror_github",
+            "Writes each rating as risk: and complexity: labels on the GitHub items picked "
+            "below")
+        self._sw_pipeline_mirror_linear = self._pipeline_switch(
+            inner, "Mirror ratings to Linear", st.pipeline_mirror_linear,
+            "pipeline_mirror_linear",
+            "Writes each rating as risk: and complexity: labels on the Linear issues picked "
+            "below")
+        self._pipeline_scope = SegmentedControl(
+            [("My PRs", "prs"), ("My PRs and issues", "mine"), ("All rated items", "all")],
+            tint=_INDIGO)
+        self._pipeline_scope.set_value(st.pipeline_mirror_scope)
+        self._pipeline_scope.changed.connect(self._on_pipeline_scope)
+        self._pipeline_scope_row = self._track(SettingRow(
+            "Mirror onto", self._pipeline_scope, stacked=True,
+            summary="Which rated items get the labels",
+            detail="My PRs: your own PRs. My PRs and issues: also the issues you opened or "
+                   "are assigned. All rated items: every rated item Diplomat may write to. A "
+                   "sync labels a few ratings it has not labelled yet, your PRs first, then "
+                   "the newest. Higher labels a person put on stay, and raise the rating; a "
+                   "mirror switched off leaves the labels it wrote."))
+        inner.addWidget(self._pipeline_scope_row)
+        for sw in (self._sw_pipeline_mirror_github, self._sw_pipeline_mirror_linear):
+            sw.toggled.connect(lambda _on: self._refresh_pipeline_mirror())
         self._sw_pipeline_fix = self._pipeline_switch(
             inner, "Open fix PRs", st.pipeline_fix, "pipeline_fix",
             "Queues an agent that fixes each low-risk, low-complexity issue, and each you take over",
@@ -1455,7 +1480,7 @@ class SettingsView(QWidget):
         return card
 
     def _pipeline_switch(self, layout, title: str, on: bool, attr: str, summary: str,
-                         detail: str) -> SwitchToggle:
+                         detail: str | None = None) -> SwitchToggle:
         sw = SwitchToggle(_INDIGO)
         sw.setChecked(on)
         sw.toggled.connect(lambda v: self._on_pipeline_option(attr, v))
@@ -1474,6 +1499,14 @@ class SettingsView(QWidget):
         """A switch turned on acts at once, not a sync period later."""
         setattr(self.store, attr, on)
         if on:
+            self.store.run_pipeline_sync_async()
+
+    def _on_pipeline_scope(self, scope) -> None:
+        """A wider scope acts at once, as a switch turned on does."""
+        wider = (pipeline.MIRROR_SCOPES.index(str(scope))
+                 > pipeline.MIRROR_SCOPES.index(self.store.pipeline_mirror_scope))
+        self.store.pipeline_mirror_scope = str(scope)
+        if wider:
             self.store.run_pipeline_sync_async()
 
     def _on_pipeline_teams_changed(self, text: str) -> None:
@@ -1593,8 +1626,13 @@ class SettingsView(QWidget):
                 f"Every {Fmt.duration(pipeline.sync_secs())}, the open issues and PRs of "
                 "the GitHub repo roots and the Linear teams below")
         self._pipeline_options.setVisible(st.pipeline_enabled)
+        self._refresh_pipeline_mirror()
         self._refresh_pipeline_teams_summary()
         self._refresh_linear_login()
+
+    def _refresh_pipeline_mirror(self) -> None:
+        st = self.store
+        self._pipeline_scope_row.setVisible(st.pipeline_mirror_github or st.pipeline_mirror_linear)
 
     # MARK: tool colour & visibility
 

@@ -1373,7 +1373,7 @@ class Store(QObject):
 
     @property
     def pipeline_rate(self) -> bool:
-        """Rate unrated items, labelling the ones Diplomat may write."""
+        """Rate unrated items, each rating kept on this machine."""
         return self._settings.value("pipelineRate", False, bool)
 
     @pipeline_rate.setter
@@ -1384,6 +1384,37 @@ class Store(QObject):
         self._write_pipeline_control()
         if not value:
             self._withdraw_pipeline_asks(None)
+
+    @property
+    def pipeline_mirror_github(self) -> bool:
+        """Write each rating as labels on the GitHub items :attr:`pipeline_mirror_scope` takes in."""
+        return self._settings.value("pipelineMirrorGitHub", False, bool)
+
+    @pipeline_mirror_github.setter
+    def pipeline_mirror_github(self, value: bool) -> None:
+        self._settings.setValue("pipelineMirrorGitHub", bool(value))
+        self._write_pipeline_control()
+
+    @property
+    def pipeline_mirror_linear(self) -> bool:
+        """:attr:`pipeline_mirror_github` for Linear."""
+        return self._settings.value("pipelineMirrorLinear", False, bool)
+
+    @pipeline_mirror_linear.setter
+    def pipeline_mirror_linear(self, value: bool) -> None:
+        self._settings.setValue("pipelineMirrorLinear", bool(value))
+        self._write_pipeline_control()
+
+    @property
+    def pipeline_mirror_scope(self) -> str:
+        """One of :data:`pipeline.MIRROR_SCOPES`; any other value stored reads as ``prs``."""
+        value = self._settings.value("pipelineMirrorScope", "prs", str)
+        return value if value in pipeline.MIRROR_SCOPES else "prs"
+
+    @pipeline_mirror_scope.setter
+    def pipeline_mirror_scope(self, value: str) -> None:
+        self._settings.setValue("pipelineMirrorScope", str(value))
+        self._write_pipeline_control()
 
     @property
     def pipeline_fix(self) -> bool:
@@ -1443,6 +1474,9 @@ class Store(QObject):
     def pipeline_control(self) -> dict:
         """``control.json``'s switches and revokes as they stand (:func:`pipeline.write_control`)."""
         return {"enabled": self.pipeline_enabled, "rate": self.pipeline_rate,
+                "mirrorGitHub": self.pipeline_mirror_github,
+                "mirrorLinear": self.pipeline_mirror_linear,
+                "mirrorScope": self.pipeline_mirror_scope,
                 "fix": self.pipeline_fix, "fastTrack": self.pipeline_fast_track,
                 "merge": self.pipeline_merge, "fracture": self.pipeline_fracture,
                 "revoke": sorted(self.pipeline_forced("revoke"))}
@@ -5224,6 +5258,9 @@ class Store(QObject):
                       for r in review.repo_roots() if not r.is_gitlab],
             "linearTeams": teams,
             "rate": self.pipeline_rate,
+            "mirrorGitHub": self.pipeline_mirror_github,
+            "mirrorLinear": self.pipeline_mirror_linear,
+            "mirrorScope": self.pipeline_mirror_scope,
             "fix": self.pipeline_fix,
             "fastTrack": self.pipeline_fast_track,
             "merge": self.pipeline_merge,
