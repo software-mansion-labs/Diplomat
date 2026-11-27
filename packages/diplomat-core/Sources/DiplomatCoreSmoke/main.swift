@@ -2652,9 +2652,9 @@ section("telemetry")
 let tNow = 1_785_000_000.0
 let tLines = [
     // Two intervals price the window: 25% of it bought 2.5M tokens, so it is worth
-    // 10M. The third spans a RESET (more left than before), which prices nothing, and
-    // ends after every local task below has started, so the 5-hour readings cover
-    // them all.
+    // 10M. The third spans a RESET (more left than before), which prices only the
+    // week, and ends after every local task below has started, so the 5-hour
+    // readings cover them all.
     #"{"at": 1784900000, "ev": "sample", "sessionLeft": 1.0, "weekLeft": 1.0, "repoTokens": 0, "otherTokens": 0}"#,
     #"{"at": 1784903600, "ev": "sample", "sessionLeft": 0.85, "weekLeft": 0.99, "repoTokens": 1000000, "otherTokens": 500000}"#,
     #"{"at": 1784907200, "ev": "sample", "sessionLeft": 0.75, "weekLeft": 0.98, "repoTokens": 1600000, "otherTokens": 900000}"#,

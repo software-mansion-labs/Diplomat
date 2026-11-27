@@ -12,6 +12,7 @@ ledger nobody wrote to looks the same as a screen drawn from a quiet fortnight.
 
 from __future__ import annotations
 
+import inspect
 import json
 import math
 import os
@@ -23,6 +24,7 @@ import pytest
 
 from diplomat_runtime import core, quota, telemetry, usagescan
 from test_opencode_v2 import quiet_shell
+from test_telemetry_parity import _ledger_lines
 
 
 @pytest.fixture
@@ -1515,3 +1517,24 @@ def test_the_assets_readme_counts_every_metric():
     readme = (core.assets_dir() / "README.md").read_text(encoding="utf-8")
     row = next(r for r in readme.splitlines() if r.startswith("| `telemetry.json` |"))
     assert re.findall(r"the (\w+) metrics", row) == [str(len(core.telemetry()["metrics"]))]
+
+
+# MARK: - The parity ledger
+
+
+def test_the_parity_ledgers_quota_comment_maps_its_samples():
+    def state(left0, left1):
+        return "-" if None in (left0, left1) else "reset" if left1 > left0 else "burn"
+
+    samples = telemetry.fold(_ledger_lines()).samples
+    kinds = [(state(a.session_left, b.session_left), state(a.week_left, b.week_left))
+             for a, b in zip(samples, samples[1:])]
+    assert kinds == [("-", "-"), ("burn", "burn"), ("burn", "burn"), ("reset", "burn"),
+                     ("burn", "burn"), ("burn", "burn"), ("-", "burn"), ("-", "-")], (
+        "the quota samples moved: update the comment over them, then this map")
+    block = inspect.getsource(_ledger_lines).split("# --- quota samples")[1]
+    assert " ".join(re.findall(r"# (.+)", block.split("events +=")[0])) == (
+        "Nine samples, so eight intervals. The first and last each touch a sample with no "
+        "quota reading at all, which still carries token counters for the repo/other "
+        "split; the fourth (a 5-hour RESET: session left goes UP) and the seventh price "
+        "only the week; the rest are ordinary burn-downs of both windows.")
