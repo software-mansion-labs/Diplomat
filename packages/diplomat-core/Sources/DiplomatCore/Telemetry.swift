@@ -252,7 +252,7 @@ public enum Telemetry {
     /// the account spent `dUtil` of its window and this machine logged `dTokens`, so
     /// the whole window is worth `dTokens / dUtil`. Summing numerator and
     /// denominator across every usable interval weights long intervals more heavily,
-    /// which is what you want — a 30-second interval's rounding error should not
+    /// which is what you want — a 15-minute interval's rounding error should not
     /// count as much as an hour's.
     ///
     /// A flat interval (`dUtil == 0`) still counts its tokens: the reading moves in

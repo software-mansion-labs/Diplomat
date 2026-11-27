@@ -278,11 +278,15 @@ def test_sampling_is_paced_by_the_ledger_not_by_the_caller(ledger):
     assert telemetry.sample_due(time.time() + telemetry.SAMPLE_INTERVAL_SECS + 1)
 
 
-def test_the_swift_ledger_doc_gives_the_sample_cadence():
+def test_the_ledger_docs_give_the_sample_cadence():
     swift = (Path(__file__).resolve().parents[3] / "diplomat-core" / "Sources"
              / "DiplomatCore" / "Telemetry.swift").read_text(encoding="utf-8")
     assert swift.partition("/// plus ")[2].partition(" carrying")[0] == (
         "a `sample` every `sampleIntervalSecs`")
+    assert swift.partition("what you want — ")[2].partition(" interval's")[0] == (
+        f"a {telemetry.SAMPLE_INTERVAL_SECS / 60:g}-minute")
+    freshness = core.telemetry()["_quotaFreshnessComment"]
+    assert freshness.partition("ride out a few ")[2].partition(",")[0] == "missed samples"
 
 
 def _quota_headline(ledger, readings, *, now):
