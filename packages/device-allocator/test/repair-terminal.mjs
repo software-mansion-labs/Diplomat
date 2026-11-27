@@ -144,8 +144,8 @@ held.stdin.end('\n');
 await new Promise((res) => held.on('exit', res));
 console.log(`ok   ${MAC ? 'Ghostty' : 'konsole'} window runs the agent`);
 
-// No $SHELL (a Linux terminal inheriting the daemon's env) and no tmux: bash, with the
-// window's own PATH ahead of the daemon's. HOME keeps the real rc files out of it.
+// No $SHELL (a Linux terminal inheriting the daemon's env): bash, with the window's own
+// PATH ahead of the daemon's. HOME keeps the real rc files out of it.
 const runs = (file, env) => {
   const out = spawnSync('/bin/sh', [file], { input: '\n', encoding: 'utf8', env: { HOME: BASE, ...env } });
   assert.equal(out.status, 0, out.stderr);
@@ -167,6 +167,10 @@ fs.writeFileSync(path.join(BASE, '.bashrc'), `PATH='${RC_BIN}':$PATH\n`);
 runs(staged('/usr/bin:/bin'), { PATH: '/usr/bin:/bin' });
 fs.rmSync(path.join(BASE, '.bashrc'));
 runs(staged('/usr/bin:/bin'), { PATH: `${RC_BIN}:/usr/bin:/bin` });
+// A bash /bin/sh's $SHELL, on any /bin/sh: filled in from passwd, not exported.
+const FILLED = path.join(BASE, 'filled.sh');
+fs.writeFileSync(FILLED, `SHELL=/nonexistent-login-shell; . ${shq(staged('/usr/bin:/bin'))}\n`);
+runs(FILLED, { PATH: `${RC_BIN}:/usr/bin:/bin` });
 // BIN: a host's /usr/bin may hold a real `claude`.
 runs(staged(`${RC_BIN}:/usr/bin:/bin`), { PATH: BIN });
 const DAEMON_BIN = path.join(BASE, 'daemon-bin');
@@ -175,12 +179,12 @@ script(path.join(DAEMON_BIN, 'claude'), 'echo claude-ran daemon');
 const order = spawnSync('/bin/sh', [staged(`${DAEMON_BIN}:/usr/bin:/bin`)],
   { input: '\n', encoding: 'utf8', env: { HOME: BASE, PATH: `${RC_BIN}:/usr/bin:/bin` } });
 assert.match(order.stdout, /claude-ran x/, 'the daemon\'s PATH shadowed the window\'s');
-// tmux starts the session on the $SHELL it is handed, the passwd one if none.
+// By default tmux runs the session under the $SHELL it is handed, else the passwd one.
 const TMUX_SHELL = path.join(BASE, 'tmux-shell');
 script(path.join(BASE, 'env-tmux'), `printenv SHELL > '${TMUX_SHELL}'`);
 spawnSync('/bin/sh', [staged('/usr/bin:/bin', path.join(BASE, 'env-tmux'))], { env: { HOME: BASE, PATH: '/usr/bin:/bin' } });
 assert.equal(fs.readFileSync(TMUX_SHELL, 'utf8'), '/bin/bash\n', 'tmux was not handed the fallback $SHELL');
-console.log('ok   no $SHELL: window PATH, then the daemon\'s');
+console.log('ok   no $SHELL: bash, window PATH, then the daemon\'s');
 
 // tmux: Linux takes it from PATH, as review.terminal_argv does; macOS keeps
 // TerminalFocus.binary's fixed list, an app started by launchd or Finder having no shell PATH.
