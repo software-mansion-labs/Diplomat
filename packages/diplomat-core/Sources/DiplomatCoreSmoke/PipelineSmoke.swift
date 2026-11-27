@@ -1918,7 +1918,7 @@ private func pipelineMergeSync(base: URL, root: PipelineSettings.Root, team: Pip
                  PipelineEvent(at: before, item: prURL(31), kind: .rerated, detail: "", head: sha("d3"), rating: low))
         return (t, sync(t, PipelineSettings(roots: [root], merge: true), dir(name), t0))
     }
-    let notAFix = "cleared/fast (closes no issue, or one that is not a low-risk, low-complexity issue Diplomat may act on)"
+    let notAFix = "cleared/fast (closes no issue, or one that is not a candidate Diplomat may act on)"
     let (ut, unread) = try pair("unread") { t in
         var reads = 0
         t.onReread = { n in
@@ -1976,7 +1976,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
 
     // A hold on the first read, or on that last one.
     typealias Change = (inout Trackers.PR) -> Void
-    let notAFix = "closes no issue, or one that is not a low-risk, low-complexity issue Diplomat may act on"
+    let notAFix = "closes no issue, or one that is not a candidate Diplomat may act on"
     let holds: [(String, Change, String)] = [
         ("more comments than a read lists", { $0.moreComments = 1 }, "has more reviews or comments than one read lists"),
         ("an unresolved thread", { $0.threads = 1 }, "has 1 unresolved review thread"),
@@ -2164,11 +2164,11 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
         try seed(dir("proof-\(k)"), proof)
         let s = sync(t, mergeOnly, dir("proof-\(k)"), t0)
         let want = k == 0 ? "clean/fast"
-            : "human/human (off the fast track for good: re-rated medium risk, low complexity at this head)"
+            : "human/human (off the fast track until taken over: re-rated medium risk, low complexity at this head)"
         check(!merged(s) && stageOf(s.result, prURL(13)) == want, "\(what) at the head: \(stageOf(s.result, prURL(13)))")
     }
 
-    // A person taking `cleared` off takes the PR off the fast track for good: Diplomat
+    // A person taking `cleared` off takes the PR off the fast track: Diplomat
     // takes `fast-track` off too, so the labels say so though state.json is lost.
     let optDir = dir("opt-out")
     let optOut = only([13, 27])
@@ -2228,7 +2228,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     let r1 = sync(rr, rrSettings, dir("rerate-refused"), t0)
     check(r1.claude == ["opus Clear the cache on logout"] && r1.writes == ["label risk:medium exists"] && !merged(r1)
           && stageOf(r1.result, prURL(13))
-          == "human/human (off the fast track for good: re-rated medium risk, low complexity at this head)",
+          == "human/human (off the fast track until taken over: re-rated medium risk, low complexity at this head)",
           "a re-rate not written: \(r1.claude) \(r1.writes) \(stageOf(r1.result, prURL(13)))")
     rr.refuseLabels = []
     rr.ratings["Clear the cache on logout"] = ["risk": "low", "complexity": "low", "why": "one line"]
@@ -2719,6 +2719,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     try pipelinePins9(base: base, root: root, team: team, t0: t0)
     try pipelinePins10(base: base, root: root, team: team, t0: t0)
     try pipelineGatePass1(base: base, root: root, team: team, t0: t0)
+    try pipelineTakeover(base: base, root: root, team: team, t0: t0)
 }
 
 /// Each part a split files is one its own answer named, and a link to its parent makes a
@@ -3134,7 +3135,7 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
     let lowLow = ["risk:low", "complexity:low"]
     let watch = PipelineSettings(roots: [root])
     let fastTrack = PipelineSettings(roots: [root], rate: true, fastTrack: true, merge: true)
-    let notAFix = "closes no issue, or one that is not a low-risk, low-complexity issue Diplomat may act on"
+    let notAFix = "closes no issue, or one that is not a candidate Diplomat may act on"
     func cleared(_ name: String, settings: PipelineSettings = PipelineSettings(roots: [root], merge: true),
                  _ change: (Trackers) -> Void = { _ in }) throws -> (Trackers, Synced) {
         let t = only([13, 27])
@@ -3415,7 +3416,7 @@ private func pipelineFreshReads(base: URL, root: PipelineSettings.Root, team: Pi
     let mergeOnly = PipelineSettings(roots: [root], merge: true)
     let split = PipelineSettings(roots: [root], fracture: true)
     let rateTrack = PipelineSettings(roots: [root], rate: true, fastTrack: true)
-    let notAFix = "closes no issue, or one that is not a low-risk, low-complexity issue Diplomat may act on"
+    let notAFix = "closes no issue, or one that is not a candidate Diplomat may act on"
     func unread(_ what: String) -> String { "would close \(what), which Diplomat did not read or may not write to" }
     func cleared(_ name: String, _ change: (Trackers) -> Void) throws -> Synced {
         let t = only([13, 27])
@@ -3982,7 +3983,7 @@ private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: Pipeli
     let ps = sync(pushed, PipelineSettings(roots: [root], fastTrack: true), dir("pushed"), t0)
     check(ps.writes == ["-diplomat:cleared #13"] && stageOf(ps.result, prURL(13)) == "fast-track/fast",
           "pushed past its cleared head: \(ps.writes) \(stageOf(ps.result, prURL(13)))")
-    // Off the fast track for good: re-rated above low/low at an earlier head, or taken off before.
+    // Off the fast track: re-rated above low/low at an earlier head, or taken off before.
     let earlier = only([13, 27])
     try seed(dir("rerated-earlier"),
              PipelineEvent(at: later(-90), item: prURL(13), kind: .rerated, detail: "medium risk, low complexity",
@@ -3993,8 +3994,8 @@ private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: Pipeli
     let decided = try cleared("decided") { _ in _ = try? state("decided", #"{"decided":["\#(prURL(13))"]}"#) }
     check(!merged(re) && !merged(decided)
           && stageOf(re.result, prURL(13))
-            == "human/human (off the fast track for good: re-rated medium risk, low complexity at b2b2b2b)"
-          && stageOf(decided.result, prURL(13)) == "human/human (off the fast track for good: Diplomat took it off the fast track)",
+            == "human/human (off the fast track until taken over: re-rated medium risk, low complexity at b2b2b2b)"
+          && stageOf(decided.result, prURL(13)) == "human/human (off the fast track until taken over: Diplomat took it off the fast track)",
           "off the fast track before: \(stageOf(re.result, prURL(13))) \(stageOf(decided.result, prURL(13)))")
 
     // A PR of mine on the fast track that fixes no candidate, or whose diff allows more, is a person's.
@@ -4004,7 +4005,7 @@ private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: Pipeli
     floored.prs[0].files = [("src/a.swift", 1, 1, "MODIFIED")]
     let fl = sync(floored, watch, dir("floored"), t0)
     check(stageOf(nf.result, prURL(17)) == "human/human (off the fast track: it closes no issue, "
-            + "or one that is not a low-risk, low-complexity issue Diplomat may act on)"
+            + "or one that is not a candidate Diplomat may act on)"
           && stageOf(fl.result, prURL(17)) == "human/human (off the fast track: its diff allows no less than medium risk, low complexity)",
           "off the fast track: \(stageOf(nf.result, prURL(17))) \(stageOf(fl.result, prURL(17)))")
 
@@ -4507,7 +4508,7 @@ private func pipelineKept(base: URL, root: PipelineSettings.Root, team: Pipeline
     stopped.issues[0].labels.append("On Hold")
     try seedRerate(dir("stop-issue"), 13, sha("c3"), at: later(-60))
     let so = sync(stopped, PipelineSettings(roots: [root], merge: true), dir("stop-issue"), t0)
-    let notAFix = "closes no issue, or one that is not a low-risk, low-complexity issue Diplomat may act on"
+    let notAFix = "closes no issue, or one that is not a candidate Diplomat may act on"
     check(!merged(so) && stageOf(so.result, prURL(13)) == "cleared/fast (\(notAFix))",
           "a stop label on the issue a cleared PR closes: \(so.writes) \(stageOf(so.result, prURL(13)))")
     let blocked = only([3])
@@ -4983,7 +4984,7 @@ private func pipelineCoverage8(base: URL, root: PipelineSettings.Root, team: Pip
         try seed(dir(name), rerate(first), rerate(second))
         let s = sync(only([13, 27]), mergeOnly, dir(name), t0)
         check(s.writes.isEmpty && stageOf(s.result, prURL(13))
-              == "human/human (off the fast track for good: re-rated medium risk, low complexity at this head)",
+              == "human/human (off the fast track until taken over: re-rated medium risk, low complexity at this head)",
               "re-rated \(first.risk) then \(second.risk) risk at one head, read from the log: \(s.writes) "
               + stageOf(s.result, prURL(13)))
     }
@@ -5175,7 +5176,7 @@ private func pipelinePins9(base: URL, root: PipelineSettings.Root, team: Pipelin
     putBack.prs[0].labels.append("diplomat:cleared")
     let pb = sync(putBack, mergeOnly, dir("cleared-put-back"), later(5))
     check(!merged(pb) && stageOf(pb.result, prURL(13))
-          == "human/human (off the fast track for good: Diplomat took it off the fast track)",
+          == "human/human (off the fast track until taken over: Diplomat took it off the fast track)",
           "cleared put back on after Diplomat took it off: \(pb.writes) \(stageOf(pb.result, prURL(13)))")
 }
 
@@ -5229,6 +5230,426 @@ private func pipelinePins10(base: URL, root: PipelineSettings.Root, team: Pipeli
         check(!edges.contains { $0.kind == .stacked },
               "a PR based on the \(branch) branch: \(edges.map { "\($0.from) \($0.kind.rawValue) \($0.to)" })")
     }
+}
+
+/// The operator's takeover of an item the fast track leaves to a human: what it lifts, what
+/// still refuses or holds it, and each way it ends.
+private func pipelineTakeover(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
+                              t0: Date) throws {
+    section("pipeline takeover")
+    let fm = FileManager.default
+    func dir(_ name: String) -> URL { base.appendingPathComponent("takeover-" + name) }
+    func later(_ minutes: Double) -> Date { t0.addingTimeInterval(minutes * 60) }
+    func with(_ s: PipelineSettings, takeover: [String] = [], revoke: [String] = []) -> PipelineSettings {
+        var s = s
+        s.force = .init(takeover: takeover, revoke: revoke)
+        return s
+    }
+    func kept(_ d: URL) throws -> [String: String] {
+        let state = try JSONSerialization.jsonObject(with: Data(contentsOf: d.appendingPathComponent("state.json")))
+        return (state as? [String: Any])?["takenOver"] as? [String: String] ?? [:]
+    }
+    func said(_ s: Synced) -> [String] { s.events.filter { $0.kind == .takeover }.map(\.detail) }
+    func marker(_ t: Trackers, _ n: Int) {
+        let i = t.prs.firstIndex { $0.number == n }!
+        t.prs[i].reviews.append(.init(login: opLogin, body: "\(tag)Clean at \(t.prs[i].head)", oid: t.prs[i].head))
+    }
+    let (ft, cl) = ("diplomat:fast-track", "diplomat:cleared")
+    let taken = "taken over from the Pipeline screen, whatever its rating"
+    let revoked = "takeover revoked from the Pipeline screen"
+
+    // The settings and the item as the Linux front-end writes and reads them.
+    let forced = try CommsLog.decoder.decode(PipelineSettings.self, from: Data(
+        #"{"roots":[],"force":{"takeover":["a"],"revoke":["b"]}}"#.utf8))
+    let rateOnly = try CommsLog.decoder.decode(PipelineSettings.self, from: Data(#"{"roots":[],"force":{"rate":["a"]}}"#.utf8))
+    check(forced.force == .init(takeover: ["a"], revoke: ["b"]) && rateOnly.force == .init(rate: ["a"])
+          && PipelineSettings.Force().isEmpty && !PipelineSettings.Force(revoke: ["b"]).isEmpty,
+          "a force's takeovers and revokes: \(String(describing: forced.force)) \(String(describing: rateOnly.force))")
+
+    // ---- The merge gate: a takeover lifts the rating and the diff floor, nothing else ----
+    let gated = PipelineGate.Candidate(
+        state: "open", author: opLogin, isCrossRepository: false, baseRef: "main", defaultBranch: "main",
+        participants: [opLogin], reviewDecision: "", unresolvedThreads: 0, rating: rating(.high, .high),
+        floor: rating(.high, .medium), mergeable: "MERGEABLE", headSha: "abc", ciCommit: "abc", ciState: "SUCCESS",
+        takenOver: true)
+    func gate(_ change: (inout PipelineGate.Candidate) -> Void) -> String? {
+        var c = gated
+        change(&c)
+        return PipelineGate.hold(c, me: opLogin)?.code
+    }
+    check(gate { _ in } == nil && gate { $0.rating = nil } == nil && gate { $0.takenOver = false } == "rated"
+          && gate { $0.takenOver = false; $0.rating = low } == "floor" && gate { $0.ciState = "FAILURE" } == "ci-failing"
+          && gate { $0.fixesCandidate = false } == "not-a-fix" && gate { $0.trackLabels = false } == "off-track",
+          "a taken-over PR's holds")
+
+    // ---- An issue rated past the fast track: a candidate once taken over, until revoked ----
+    let fixOnly = PipelineSettings(roots: [root], fix: true)
+    let storage = only([3])
+    let i0 = sync(storage, fixOnly, dir("issue"), t0)
+    check(stageOf(i0.result, issueURL(3)) == "human/human" && i0.result.effects.isEmpty
+          && item(i0.result, issueURL(3))?.takenOver == nil && item(i0.result, issueURL(3))?.takeoverRefused == nil,
+          "#3, medium risk and high complexity: \(stageOf(i0.result, issueURL(3))) \(i0.result.effects)")
+    let i1 = sync(storage, with(fixOnly, takeover: [issueURL(3)]), dir("issue"), later(5))
+    let i1Kept = try kept(dir("issue"))
+    let i1JSON = String(decoding: try CommsLog.encoder.encode(item(i1.result, issueURL(3))!), as: UTF8.self)
+    check(stageOf(i1.result, issueURL(3)) == "candidate/fast" && i1.result.effects == [fixFX(3)] && i1.writes.isEmpty
+          && i1.result.fixable == [issueURL(3)] && said(i1) == [taken] && i1Kept == [issueURL(3): "issue"]
+          && i1JSON.contains(#""takenOver":true"#) && !i1JSON.contains("takeoverRefused"),
+          "#3 taken over: \(stageOf(i1.result, issueURL(3))) \(i1.result.effects) \(i1.writes) \(said(i1)) \(i1Kept) \(i1JSON)")
+    let i2 = sync(storage, fixOnly, dir("issue"), later(10))
+    check(stageOf(i2.result, issueURL(3)) == "candidate/fast" && i2.result.effects == [fixFX(3)] && said(i2).isEmpty,
+          "#3 at the next sync: \(stageOf(i2.result, issueURL(3))) \(i2.result.effects)")
+    let i3 = sync(storage, with(fixOnly, revoke: [issueURL(3)]), dir("issue"), later(15))
+    let i3Kept = try kept(dir("issue"))
+    check(stageOf(i3.result, issueURL(3)) == "human/human" && i3.result.effects.isEmpty && said(i3) == [revoked]
+          && item(i3.result, issueURL(3))?.takenOver == nil && i3Kept.isEmpty,
+          "#3 revoked: \(stageOf(i3.result, issueURL(3))) \(i3.result.effects) \(said(i3)) \(i3Kept)")
+    let i4 = sync(storage, with(fixOnly, revoke: [issueURL(3)]), dir("issue"), later(20))
+    check(said(i4).isEmpty, "a revoke of what is not taken over logs nothing: \(said(i4))")
+
+    // Closed, it ends: reopened, it is a person's again.
+    let reopened = only([3])
+    _ = sync(reopened, with(fixOnly, takeover: [issueURL(3)]), dir("reopened"), t0)
+    let gone = reopened.issues.removeFirst()
+    reopened.others[3] = (gone.title, "CLOSED", "acme/app")
+    _ = sync(reopened, fixOnly, dir("reopened"), later(5))
+    let closedKept = try kept(dir("reopened"))
+    reopened.others[3] = nil
+    reopened.issues = [gone]
+    let ro = sync(reopened, fixOnly, dir("reopened"), later(10))
+    check(closedKept.isEmpty && stageOf(ro.result, issueURL(3)) == "human/human" && ro.result.effects.isEmpty,
+          "#3 closed, then reopened: \(closedKept) \(stageOf(ro.result, issueURL(3)))")
+
+    // A sync that writes nothing says it took nothing over and revoked nothing.
+    _ = sync(only([3]), with(fixOnly, takeover: [issueURL(3)]), dir("blocked"), t0)
+    try Data(#"{"decided": 7}"#.utf8).write(to: dir("blocked").appendingPathComponent("state.json"))
+    let bl = sync(only([3, 24]), with(fixOnly, takeover: [issueURL(24)], revoke: [issueURL(3)]), dir("blocked"), later(5))
+    check(bl.result.notices.contains { $0.hasPrefix("\(issueURL(3))'s takeover was not revoked: ") }
+          && bl.result.notices.contains { $0.hasPrefix("\(issueURL(24)) was not taken over: ") } && said(bl).isEmpty,
+          "a blocked sync: \(bl.result.notices)")
+
+    // A revoke needs no read of its item.
+    _ = sync(only([3]), with(fixOnly, takeover: [issueURL(3)]), dir("revoke-unread"), t0)
+    let ru = sync(only([]), with(fixOnly, revoke: [issueURL(3)]), dir("revoke-unread"), later(5))
+    let ruKept = try kept(dir("revoke-unread"))
+    check(said(ru) == [revoked] && ruKept.isEmpty, "revoked unread: \(said(ru)) \(ruKept)")
+
+    // Its triage stands no more than its rating.
+    let feature = only([24])
+    feature.issues[0].labels.append("enhancement")
+    let f0 = sync(feature, fixOnly, dir("triaged"), t0)
+    let f1 = sync(feature, with(fixOnly, takeover: [issueURL(24)]), dir("triaged"), later(5))
+    check(stageOf(f0.result, issueURL(24)) == "human/human (triaged as enhancement)" && f0.result.effects.isEmpty
+          && stageOf(f1.result, issueURL(24)) == "candidate/fast" && f1.result.effects == [fixFX(24)],
+          "#24 triaged as enhancement: \(stageOf(f0.result, issueURL(24))), then \(stageOf(f1.result, issueURL(24)))")
+
+    // Nor does it hold the fix PR closing it.
+    let featureFix = only([24, 11])
+    featureFix.issues[0].labels.append("enhancement")
+    var featurePR = featureFix.prs.removeFirst()
+    _ = sync(featureFix, with(fixOnly, takeover: [issueURL(24)]), dir("triaged-fix"), t0)
+    featurePR.closes = [24]
+    featurePR.body = "Fixes #24."
+    featureFix.prs = [featurePR]
+    let tf = sync(featureFix, PipelineSettings(roots: [root], rate: true, fastTrack: true), dir("triaged-fix"), later(5))
+    check(stageOf(tf.result, prURL(11)) == "fast-track/fast" && tf.writes.contains("+diplomat:fast-track #11"),
+          "#11 fixing #24, triaged and taken over: \(stageOf(tf.result, prURL(11))) \(tf.writes)")
+
+    // Nor is it split unasked.
+    let splitting = PipelineSettings(roots: [root], fracture: true)
+    let sp0 = sync(only([3]), splitting, dir("split-control"), t0)
+    let sp1 = sync(only([3]), with(splitting, takeover: [issueURL(3)]), dir("split"), t0)
+    check(sp0.writes.contains("+diplomat:fractured #3") && sp1.writes.isEmpty && sp1.claude.isEmpty
+          && stageOf(sp1.result, issueURL(3)) == "candidate/fast",
+          "#3 with Split big issues on: \(sp0.writes), taken over \(sp1.writes) \(sp1.claude) \(stageOf(sp1.result, issueURL(3)))")
+
+    // A Linear issue: its fix is asked for as the read right before has it.
+    let ticket = only([])
+    ticket.tickets = [fixture().tickets[0]]
+    let linearFix = PipelineSettings(roots: [root], linearTeams: [team], fix: true)
+    let l0 = sync(ticket, linearFix, dir("linear"), t0)
+    let l1 = sync(ticket, with(linearFix, takeover: [linearURL("ENG-1")]), dir("linear"), later(5))
+    check(stageOf(l0.result, linearURL("ENG-1")) == "unrated/unrated" && l0.result.effects.isEmpty
+          && stageOf(l1.result, linearURL("ENG-1")) == "candidate/fast"
+          && l1.result.effects.map(\.key) == ["pipeline-fix:" + linearURL("ENG-1")] && ticket.linearOps.contains("Recheck"),
+          "ENG-1: \(stageOf(l0.result, linearURL("ENG-1"))), then \(stageOf(l1.result, linearURL("ENG-1"))) \(l1.result.effects)")
+
+    // ---- What refuses a takeover ----
+    let refusing = only([2, 15, 16, 18, 19, 24, 25])
+    refusing.issues[refusing.issues.firstIndex { $0.number == 24 }!].labels.append("WIP")
+    let reasons: [(String, String, String)] = [
+        (issueURL(2), "#2", "assigned to @alice"),
+        (issueURL(24), "#24", "it carries the label WIP"),
+        (issueURL(25), "#25", "an open PR fixes it"),
+        (prURL(16), "#16", "authored by @bob, not me"),
+        (prURL(18), "#18", "comes from a fork"),
+        (prURL(19), "#19", "targets feat-a, not the default branch"),
+    ]
+    let r0 = sync(refusing, with(PipelineSettings(roots: [root]), takeover: reasons.map(\.0) + [issueURL(99)]),
+                  dir("refused"), t0)
+    for (id, label, why) in reasons {
+        check(r0.result.notices.contains("\(label) was not taken over: \(why)")
+              && item(r0.result, id)?.takeoverRefused == why && item(r0.result, id)?.takenOver == nil,
+              "\(label): \(r0.result.notices) \(String(describing: item(r0.result, id)?.takeoverRefused))")
+    }
+    let r0Kept = try kept(dir("refused"))
+    check(r0.result.notices.contains("\(issueURL(99)) was not read, so it was not taken over") && r0Kept.isEmpty
+          && r0.writes.isEmpty, "refused: \(r0.result.notices) \(r0Kept) \(r0.writes)")
+    let split = only([6])
+    split.issues[0].labels.append("diplomat:fractured")
+    let sr = sync(split, with(fixOnly, takeover: [issueURL(6)]), dir("refused-split"), t0)
+    let partly = only([3])
+    partly.ghPartial = true
+    let pr0 = sync(partly, with(fixOnly, takeover: [issueURL(3)]), dir("refused-partial"), t0)
+    let twin = only([])
+    twin.tickets = [.init(id: "lin-9", identifier: "ENG-9", title: "Tracks #24", updated: at("10:00"),
+                          attachments: [issueURL(24)])]
+    let tw = sync(twin, with(linearFix, takeover: [linearURL("ENG-9")]), dir("refused-twin"), t0)
+    check(sr.result.notices.contains("#6 was not taken over: it is split already")
+          && pr0.result.notices.contains("#3 was not taken over: acme/app was read only in part")
+          && tw.result.notices.contains("ENG-9 was not taken over: it is tracked on GitHub as acme/app#24"),
+          "refused: \(sr.result.notices) \(pr0.result.notices) \(tw.result.notices)")
+    let offTrack = sync(only([4, 11]), with(PipelineSettings(roots: [root]), takeover: [prURL(11)]), dir("ft-off"), t0)
+    check(offTrack.result.notices.contains("#11 was not taken over: Fast-track my PRs is off") && offTrack.writes.isEmpty
+          && item(offTrack.result, prURL(11))?.takeoverRefused == "Fast-track my PRs is off",
+          "#11 with Fast-track my PRs off: \(offTrack.result.notices)")
+    // Judged as the read right before it has the item.
+    let claimed = only([3])
+    claimed.onItem = { n in if n == 3 { claimed.issues[0].assignees = ["alice"] } }
+    let cr = sync(claimed, with(fixOnly, takeover: [issueURL(3)]), dir("claimed"), t0)
+    let crKept = try kept(dir("claimed"))
+    check(crKept.isEmpty && cr.result.effects.isEmpty
+          && cr.result.notices.contains("#3 was not written to, as it changed since this sync read it: assigned to @alice"),
+          "#3 assigned to someone else right before its takeover: \(crKept) \(cr.result.notices)")
+    try fm.createDirectory(at: dir("switched-off"), withIntermediateDirectories: true)
+    PipelineControl(enabled: false, rate: false, fix: true, fastTrack: false, merge: false, fracture: false)
+        .save(in: dir("switched-off"))
+    _ = sync(only([3]), with(fixOnly, takeover: [issueURL(3)]), dir("switched-off"), t0)
+    let offKept = try kept(dir("switched-off"))
+    check(offKept.isEmpty, "the pipeline switched off takes nothing over: \(offKept)")
+    let banDir = dir("bans")
+    try fm.createDirectory(at: banDir, withIntermediateDirectories: true)
+    try json(["banned": [["login": "reporter"]]]).write(to: banDir.appendingPathComponent("banned.json"))
+    let banEnv = ProcessInfo.processInfo.environment["DA_BAN_DIR"]
+    setenv("DA_BAN_DIR", banDir.path, 1)
+    let banned = sync(only([3]), with(fixOnly, takeover: [issueURL(3)]), dir("banned"), t0)
+    if let banEnv { setenv("DA_BAN_DIR", banEnv, 1) } else { unsetenv("DA_BAN_DIR") }
+    check(banned.result.notices.contains("#3 was not taken over: @reporter is on the prompt-injection ban list")
+          && banned.result.effects.isEmpty, "#3 by a banned author: \(banned.result.notices)")
+
+    // ---- A PR of mine rated high risk, its diff floor high: merged once taken over and clean ----
+    let track = PipelineSettings(roots: [root], rate: true, fastTrack: true, merge: true)
+    let trackOnly = PipelineSettings(roots: [root], fastTrack: true)
+    func risky() -> Trackers {
+        let t = only([4, 11])
+        t.prs[0].labels = ["risk:high", "complexity:medium"]
+        t.prs[0].body = "Fixes #4."
+        t.prs[0].files = [("package.json", 1, 1, "MODIFIED"), ("tests/test_links.py", 5, 0, "MODIFIED")]
+        return t
+    }
+    let control = risky()
+    _ = sync(control, track, dir("pr-control"), t0)
+    marker(control, 11)
+    let c1 = sync(control, track, dir("pr-control"), later(10))
+    check(stageOf(c1.result, prURL(11)) == "human/human" && c1.writes.isEmpty && c1.result.effects.isEmpty,
+          "#11 not taken over, clean: \(stageOf(c1.result, prURL(11))) \(c1.writes)")
+    let pr = risky()
+    let p1 = sync(pr, with(track, takeover: [prURL(11)]), dir("pr"), t0)
+    check(p1.writes == ["label \(ft) exists", "+\(ft) #11"] && stageOf(p1.result, prURL(11)) == "fast-track/fast"
+          && p1.result.effects == [reviewFX(11, sha("a1"))] && p1.claude.isEmpty && said(p1) == [taken]
+          && item(p1.result, prURL(11))?.takenOver == true,
+          "#11 taken over: \(p1.writes) \(stageOf(p1.result, prURL(11))) \(p1.result.effects) \(p1.claude)")
+    marker(pr, 11)
+    let p2 = sync(pr, track, dir("pr"), later(10))
+    let p2Kept = try kept(dir("pr"))
+    check(p2.claude.isEmpty && p2.writes == ["label \(cl) exists", "+\(cl) #11", "merge #11 --squash \(sha("a1"))"]
+          && p2Kept.isEmpty && item(p2.result, prURL(11))?.takenOver == nil,
+          "#11 clean: \(p2.claude) \(p2.writes) \(p2Kept)")
+
+    // A revoke asked while a sync runs reaches it only through control.json: no merge.
+    let late = risky()
+    _ = sync(late, with(track, takeover: [prURL(11)]), dir("revoked-late"), t0)
+    marker(late, 11)
+    PipelineControl(enabled: true, rate: true, fix: false, fastTrack: true, merge: true, fracture: false,
+                    revoke: [prURL(11)]).save(in: dir("revoked-late"))
+    let lr = sync(late, track, dir("revoked-late"), later(10))
+    let lrKept = try kept(dir("revoked-late"))
+    check(!merged(lr) && said(lr) == [revoked] && lrKept.isEmpty
+          && item(lr.result, prURL(11))?.hold == "its takeover was revoked",
+          "#11 revoked mid-sync: \(lr.writes) \(said(lr)) \(lrKept) \(stageOf(lr.result, prURL(11)))")
+    // So does an issue's: no merge of the PR fixing it, nor a fix asked for it.
+    func lateIssue(_ name: String, revoked: Bool) throws -> Synced {
+        let t = only([3, 11])
+        var fix = t.prs.removeFirst()
+        _ = sync(t, with(PipelineSettings(roots: [root]), takeover: [issueURL(3)]), dir(name), t0)
+        fix.closes = [3]
+        fix.body = "Fixes #3."
+        t.prs = [fix]
+        _ = sync(t, track, dir(name), later(10))
+        marker(t, 11)
+        try fm.createDirectory(at: dir(name), withIntermediateDirectories: true)
+        PipelineControl(enabled: true, rate: true, fix: false, fastTrack: true, merge: true, fracture: false,
+                        revoke: revoked ? [issueURL(3)] : nil).save(in: dir(name))
+        return sync(t, track, dir(name), later(20))
+    }
+    let kept3 = try lateIssue("issue-kept", revoked: false)
+    let late3 = try lateIssue("issue-revoked", revoked: true)
+    check(merged(kept3) && !merged(late3) && said(late3) == [revoked]
+          && stageOf(late3.result, prURL(11)) == "cleared/fast (\(PipelineGate.Hold.notAFix.message))",
+          "#11 fixing #3, whose takeover is revoked mid-sync: \(kept3.writes) \(late3.writes) \(stageOf(late3.result, prURL(11)))")
+    _ = sync(only([3]), with(fixOnly, takeover: [issueURL(3)]), dir("issue-ask"), t0)
+    PipelineControl(enabled: true, rate: false, fix: true, fastTrack: false, merge: false, fracture: false,
+                    revoke: [issueURL(3)]).save(in: dir("issue-ask"))
+    let ask = sync(only([3]), fixOnly, dir("issue-ask"), later(5))
+    check(ask.result.effects.isEmpty && said(ask) == [revoked] && ask.result.fixable.isEmpty
+          && item(ask.result, issueURL(3))?.hold == "its takeover was revoked",
+          "#3 revoked mid-sync: \(ask.result.effects) \(said(ask)) \(stageOf(ask.result, issueURL(3)))")
+    // As the apps send it, forced and in control.json at once: applied once, at the start.
+    func revokedBoth(_ name: String, _ prepare: (URL) throws -> Void = { _ in }) throws -> Synced {
+        _ = sync(only([3]), with(fixOnly, takeover: [issueURL(3)]), dir(name), t0)
+        PipelineControl(enabled: true, rate: false, fix: true, fastTrack: false, merge: false, fracture: false,
+                        revoke: [issueURL(3)]).save(in: dir(name))
+        try prepare(dir(name))
+        return sync(only([3]), with(fixOnly, revoke: [issueURL(3)]), dir(name), later(5))
+    }
+    let both = try revokedBoth("revoke-both")
+    check(said(both) == [revoked] && stageOf(both.result, issueURL(3)) == "human/human",
+          "#3 revoked as the apps send it: \(said(both)) \(stageOf(both.result, issueURL(3)))")
+    let unsaved = try revokedBoth("revoke-blocked") {
+        try Data("not json".utf8).write(to: $0.appendingPathComponent("ratings.json"))
+    }
+    let unsavedKept = try kept(dir("revoke-blocked"))
+    check(said(unsaved).isEmpty && item(unsaved.result, issueURL(3))?.hold != "its takeover was revoked"
+          && unsavedKept == [issueURL(3): "issue"],
+          "#3 revoked while ratings.json cannot be read: \(said(unsaved)) \(stageOf(unsaved.result, issueURL(3))) \(unsavedKept)")
+    let revokeJSON = String(decoding: try JSONEncoder().encode(
+        PipelineControl(enabled: true, rate: false, fix: false, fastTrack: false, merge: false, fracture: false,
+                        revoke: ["a"])), as: UTF8.self)
+    check(revokeJSON.contains(#""revoke":["a"]"#), "control.json's revokes: \(revokeJSON)")
+
+    // Rated low/low but off the fast track: taken over, it is not rated again at its clean head.
+    let plain = only([4, 11])
+    plain.prs[0].labels = ["risk:low", "complexity:low"]
+    plain.prs[0].body = "Fixes #4."
+    _ = sync(plain, with(track, takeover: [prURL(11)]), dir("no-rerate"), t0)
+    marker(plain, 11)
+    let nr = sync(plain, track, dir("no-rerate"), later(10))
+    check(nr.claude.isEmpty && merged(nr), "#11 low/low, taken over and clean: \(nr.claude) \(nr.writes)")
+
+    // The fix of an issue taken over goes down the fast track if it is low/low itself.
+    let fixing = only([3, 11])
+    var fix = fixing.prs.removeFirst()
+    _ = sync(fixing, with(PipelineSettings(roots: [root]), takeover: [issueURL(3)]), dir("fix-of-taken"), t0)
+    fix.closes = [3]
+    fix.body = "Fixes #3."
+    fixing.prs.append(fix)
+    let fx1 = sync(fixing, track, dir("fix-of-taken"), later(10))
+    check(fx1.claude == ["opus Fix the docs link"] && fx1.writes.contains("+\(ft) #11")
+          && stageOf(fx1.result, prURL(11)) == "fast-track/fast" && stageOf(fx1.result, issueURL(3)) == "fixing/fast",
+          "#11 fixing #3, taken over: \(fx1.claude) \(fx1.writes) \(stageOf(fx1.result, prURL(11)))")
+
+    // What took it off the fast track before stands no more.
+    for (name, event) in [("rerated", PipelineEvent(at: later(-60), item: prURL(11), kind: .rerated, detail: "",
+                                                     head: sha("a1"), rating: rating(.medium, .low))),
+                          ("cleared-off", PipelineEvent(at: later(-60), item: prURL(11), kind: .cleared, detail: "",
+                                                        head: sha("a1")))] {
+        let t = only([4, 11])
+        t.prs[0].labels = ["risk:low", "complexity:low"]
+        t.prs[0].body = "Fixes #4."
+        marker(t, 11)
+        try seed(dir(name), event)
+        let before = sync(t, trackOnly, dir(name), t0)
+        let after = sync(t, with(trackOnly, takeover: [prURL(11)]), dir(name), later(10))
+        check(stageOf(before.result, prURL(11)) == "human/human"
+              && after.writes.filter { !$0.hasPrefix("label ") } == ["+\(ft) #11", "+\(cl) #11"]
+              && stageOf(after.result, prURL(11)) == "cleared/fast",
+              "#11 \(name) at a1, then taken over: \(stageOf(before.result, prURL(11))) \(after.writes) \(stageOf(after.result, prURL(11)))")
+    }
+
+    // A PR taken over needs to close no issue; one it closes counts as taken over too, but
+    // must be an issue Diplomat may fix.
+    let bump = only([12])
+    let fastMerge = PipelineSettings(roots: [root], fastTrack: true, merge: true)
+    _ = sync(bump, with(fastMerge, takeover: [prURL(12)]), dir("closes-none"), t0)
+    marker(bump, 12)
+    let b1 = sync(bump, fastMerge, dir("closes-none"), later(10))
+    check(merged(b1), "#12, unrated and closing no issue, taken over: \(b1.writes) \(stageOf(b1.result, prURL(12)))")
+    func closing(_ n: Int) -> Trackers {
+        let t = only([n, 11])
+        t.prs[0].closes = [n]
+        t.prs[0].body = "Fixes #\(n)."
+        return t
+    }
+    let mine = closing(3)
+    let m0 = sync(mine, with(fastMerge, takeover: [prURL(11)]), dir("closes-mine"), t0)
+    marker(mine, 11)
+    let m1 = sync(mine, fastMerge, dir("closes-mine"), later(10))
+    check(stageOf(m0.result, prURL(11)) == "fast-track/fast" && stageOf(m0.result, issueURL(3)) == "fixing/fast"
+          && merged(m1) && !mine.issues.contains { $0.number == 3 },
+          "#11 closing #3, medium risk and high complexity: \(stageOf(m0.result, prURL(11))) \(m1.writes)")
+    let claimedLater = closing(3)
+    _ = sync(claimedLater, with(fastMerge, takeover: [prURL(11)]), dir("closes-claimed"), t0)
+    claimedLater.issues[0].assignees = ["alice"]
+    marker(claimedLater, 11)
+    let cl1 = sync(claimedLater, fastMerge, dir("closes-claimed"), later(10))
+    check(stageOf(cl1.result, prURL(11)) == "human/human (off the fast track: it \(PipelineGate.Hold.notAFix.message))"
+          && cl1.writes.isEmpty && cl1.result.effects.isEmpty,
+          "#3 assigned to someone else after #11's takeover: \(stageOf(cl1.result, prURL(11))) \(cl1.writes)")
+    let theirs = closing(2)
+    let th = sync(theirs, with(fastMerge, takeover: [prURL(11)]), dir("closes-theirs"), t0)
+    let thKept = try kept(dir("closes-theirs"))
+    let theirsWhy = "it closes #2, which Diplomat may not fix: assigned to @alice"
+    check(th.result.notices.contains("#11 was not taken over: \(theirsWhy)")
+          && item(th.result, prURL(11))?.takeoverRefused == theirsWhy
+          && th.writes.isEmpty && thKept.isEmpty,
+          "#11 closing #2, someone else's: \(th.result.notices) \(th.writes) \(thKept)")
+
+    // ---- Each way a PR's takeover ends ----
+    func cleared(_ name: String) -> Trackers {
+        let t = risky()
+        _ = sync(t, with(trackOnly, takeover: [prURL(11)]), dir(name), t0)
+        marker(t, 11)
+        let s = sync(t, trackOnly, dir(name), later(10))
+        check(stageOf(s.result, prURL(11)) == "cleared/fast", "\(name): #11 cleared: \(stageOf(s.result, prURL(11)))")
+        return t
+    }
+    let unlabelled = risky()
+    _ = sync(unlabelled, with(trackOnly, takeover: [prURL(11)]), dir("ft-removed"), t0)
+    unlabelled.prs[0].labels.removeAll { $0 == ft }
+    let u1 = sync(unlabelled, trackOnly, dir("ft-removed"), later(10))
+    check(said(u1) == ["takeover ended: \(ft) came off it"] && item(u1.result, prURL(11))?.takenOver == nil
+          && stageOf(u1.result, prURL(11)) == "human/human" && u1.result.effects.isEmpty && u1.writes.isEmpty,
+          "\(ft) taken off: \(said(u1)) \(stageOf(u1.result, prURL(11))) \(u1.writes)")
+    // Its takeover put on the label once refused: that refusal says nothing of it after.
+    let refusedOnce = only([4, 11])
+    refusedOnce.prs[0].labels = ["risk:low", "complexity:low"]
+    refusedOnce.prs[0].body = "Fixes #4."
+    try fm.createDirectory(at: dir("untracked"), withIntermediateDirectories: true)
+    try json(["untracked": [prURL(11)]]).write(to: dir("untracked").appendingPathComponent("state.json"))
+    let ut0 = sync(refusedOnce, with(trackOnly, takeover: [prURL(11)]), dir("untracked"), t0)
+    refusedOnce.prs[0].labels.removeAll { $0 == ft }
+    let ut1 = sync(refusedOnce, trackOnly, dir("untracked"), later(10))
+    check(said(ut0) == [taken] && stageOf(ut1.result, prURL(11)) == "human/human",
+          "#11, once refused \(ft), taken over and then unlabelled: \(said(ut0)) \(stageOf(ut1.result, prURL(11)))")
+    let back = cleared("revoked")
+    let v1 = sync(back, with(trackOnly, revoke: [prURL(11)]), dir("revoked"), later(20))
+    check(v1.writes == ["-\(ft) #11", "-\(cl) #11"] && said(v1) == [revoked] && stageOf(v1.result, prURL(11)) == "human/human",
+          "#11 revoked: \(v1.writes) \(said(v1)) \(stageOf(v1.result, prURL(11)))")
+    let v2 = sync(back, with(trackOnly, takeover: [prURL(11)]), dir("revoked"), later(30))
+    check(v2.writes == ["+\(ft) #11", "+\(cl) #11"] && stageOf(v2.result, prURL(11)) == "cleared/fast",
+          "#11 taken over again: \(v2.writes) \(stageOf(v2.result, prURL(11)))")
+    let uncleared = cleared("cl-removed")
+    uncleared.prs[0].labels.removeAll { $0 == cl }
+    let x1 = sync(uncleared, trackOnly, dir("cl-removed"), later(20))
+    check(x1.writes == ["-\(ft) #11"] && said(x1) == ["takeover ended: \(cl) came off it at \(sha("a1").prefix(7))"]
+          && stageOf(x1.result, prURL(11)) == "human/human" && item(x1.result, prURL(11))?.takenOver == nil,
+          "\(cl) taken off: \(x1.writes) \(said(x1)) \(stageOf(x1.result, prURL(11)))")
+    let pushed = cleared("pushed")
+    pushed.prs[0].head = sha("a2")
+    let h1 = sync(pushed, trackOnly, dir("pushed"), later(20))
+    check(h1.writes == ["-\(cl) #11"] && h1.result.effects == [reviewFX(11, sha("a2"))]
+          && stageOf(h1.result, prURL(11)) == "fast-track/fast" && said(h1).isEmpty,
+          "#11 pushed past its clean marker: \(h1.writes) \(h1.result.effects) \(stageOf(h1.result, prURL(11)))")
 }
 
 /// A first rating's labels against a push meanwhile and a write lost part-way, `cleared`

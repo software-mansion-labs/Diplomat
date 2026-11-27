@@ -1086,7 +1086,7 @@ struct SettingsView: View {
                 switchControl("Rate issues and PRs", $store.pipelineRate)
             }
             SettingRow(title: "Open fix PRs",
-                       summary: "Queues an agent that fixes each low-risk, low-complexity issue",
+                       summary: "Queues an agent that fixes each low-risk, low-complexity issue, and each you take over",
                        detail: "Only an issue unassigned or assigned to you that no open PR fixes, "
                              + "in its repo root; a Linear issue is fixed in the root its team "
                              + "names below.") {
@@ -1233,13 +1233,14 @@ struct SettingsView: View {
         """
 
     static let pipelineFastTrackSummary = "Labels diplomat:fast-track each low/low PR of yours that closes "
-        + "a candidate issue, and reviews it until clean"
+        + "a candidate issue, or that you take over, and reviews it until clean"
 
     static let pipelineFastTrackDetail = """
         Only your own PRs from the repo itself into its default branch that close only \
         candidate issues: the fixes the pipeline asks for. Reviews of it are queued until one \
         finds nothing at its head; at that clean head it is rated again: still low/low, it is \
-        labelled diplomat:cleared, else it leaves the fast track. A PR rated while this is \
+        labelled diplomat:cleared, else it leaves the fast track; one you took over is labelled \
+        so with no second rating. A PR rated while this is \
         off stays a person's.
         """
 

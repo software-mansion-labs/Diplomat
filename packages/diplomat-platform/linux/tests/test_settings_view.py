@@ -596,10 +596,10 @@ def test_the_pipeline_rows_read_as_their_macos_twins_do(make_view, monkeypatch):
     assert [(r._control.accessibleName(), r.summary()) for r in rows] == [
         ("Rate issues and PRs",
          "Risk and complexity, by claude, as labels where Diplomat may write"),
-        ("Open fix PRs", "Queues an agent that fixes each low-risk, low-complexity issue"),
+        ("Open fix PRs", "Queues an agent that fixes each low-risk, low-complexity issue, and each you take over"),
         ("Fast-track my PRs",
          "Labels diplomat:fast-track each low/low PR of yours that closes a candidate issue, "
-         "and reviews it until clean"),
+         "or that you take over, and reviews it until clean"),
         ("Merge cleared PRs",
          "Merges past the review requirement with admin rights (gh pr merge --admin): "
          "no person approves the PR first"),

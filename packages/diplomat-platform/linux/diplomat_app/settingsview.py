@@ -1383,18 +1383,19 @@ class SettingsView(QWidget):
             "one.")
         self._sw_pipeline_fix = self._pipeline_switch(
             inner, "Open fix PRs", st.pipeline_fix, "pipeline_fix",
-            "Queues an agent that fixes each low-risk, low-complexity issue",
+            "Queues an agent that fixes each low-risk, low-complexity issue, and each you take over",
             "Only an issue unassigned or assigned to you that no open PR fixes, in its "
             "repo root; a Linear issue is fixed in the root its team names below.")
         self._sw_pipeline_fast = self._pipeline_switch(
             inner, "Fast-track my PRs", st.pipeline_fast_track, "pipeline_fast_track",
             "Labels diplomat:fast-track each low/low PR of yours that closes a candidate "
-            "issue, and reviews it until clean",
+            "issue, or that you take over, and reviews it until clean",
             "Only your own PRs from the repo itself into its default branch that close only "
             "candidate issues: the fixes the pipeline asks for. Reviews of it are queued "
             "until one finds nothing at its head; at that clean head it is rated again: "
-            "still low/low, it is labelled diplomat:cleared, else it leaves the fast track. "
-            "A PR rated while this is off stays a person's.")
+            "still low/low, it is labelled diplomat:cleared, else it leaves the fast track; "
+            "one you took over is labelled so with no second rating. A PR rated while this "
+            "is off stays a person's.")
         self._sw_pipeline_merge = self._pipeline_switch(
             inner, "Merge cleared PRs", st.pipeline_merge, "pipeline_merge",
             "Merges past the review requirement with admin rights (gh pr merge --admin): "
