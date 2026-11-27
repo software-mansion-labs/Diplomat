@@ -335,8 +335,9 @@ its commits, its base branch and the checks it requires read only for a PR nothi
 
 A hold shows on the card and is logged each time it changes. A merge `gh` refuses (no admin rights, a
 head that moved) is a notice, and the next sync tries again. The PR is read again after every merge,
-as `gh` exits 0 on one merged already: it counts as Diplomat's merge only if GitHub then shows it
-merged at that head by you, and merged by anyone else or at another head, it is a notice.
+by a later sync if that read fails or the sync ends first, as `gh` exits 0 on one merged already:
+it counts as Diplomat's merge only if GitHub then shows it merged at that head by you, and merged
+by anyone else or at another head, it is a notice.
 
 ## The Pipeline screen
 

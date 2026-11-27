@@ -236,6 +236,7 @@ final class PipelineSync {
         fracture()
         settle()
         if settings.merge { merge() }
+        confirmMerges()
         let effects = owed()
         for i in entries.indices {
             entries[i].item.rateRefused = rateRefusal(entries[i])
@@ -2090,21 +2091,15 @@ final class PipelineSync {
                 persist()
                 continue
             }
+            state.merging[e.id] = "\(head) \(flag)"
+            persist()
             let out = io.gh(["pr", "merge", "\(n)", "-R", root.name, "--admin", flag,
                              "--match-head-commit", head])
             closedHere.formUnion((fresh.closing + judged.closing).map { PipelineRead.norm($0.id) })
             // gh exits 0 on a PR merged already, at any head and by anyone, and GitHub may merge
             // one all the same when gh fails: only a read after tells this merge's.
             let after = reread(e, out.ok ? "may have been merged" : "was not merged (\(out.why))")
-            guard let after, after.item.state == "merged" else {
-                if let after { notice("\(e.item.label) was not merged: " + (out.ok ? "it is still \(after.item.state)" : out.why)) }
-                continue
-            }
-            if after.item.headSha == head, after.mergedBy?.lowercased() == root.me.lowercased() {
-                log(e.id, .merged, "merged \(head.prefix(7)) with --admin \(flag)")
-            } else {
-                notice("\(e.item.label) was merged, but not by this sync at \(head.prefix(7))")
-            }
+            guard let after, ended(e, after, head: head, flag: flag, why: out.ok ? nil : out.why) else { continue }
             entries[i].item.state = "merged"
             entries[i].item.writable = false
             entries[i].unwritable = "merged"
@@ -2121,6 +2116,37 @@ final class PipelineSync {
             }
             persist()
         }
+    }
+
+    /// `ended` for each merge asked of gh that no read after it saw, as its PR reads now.
+    func confirmMerges() {
+        for (id, asked) in state.merging.sorted(by: { $0.key < $1.key }) {
+            let parts = asked.split(separator: " ").map(String.init)
+            guard let i = pos[id], let head = parts.first, let flag = parts.last else { continue }
+            var e = entries[i]
+            // `reread` needs a head, and a merged PR's read names none.
+            e.item.headSha = head
+            guard let after = reread(e, "may have been merged") else { continue }
+            ended(e, after, head: head, flag: flag, why: nil)
+            persist()
+        }
+    }
+
+    /// Logs how the merge of `e` at `head` with `flag` ended, as `after` reads, and forgets
+    /// it; `why` gh failed. True when `after` is merged.
+    @discardableResult
+    func ended(_ e: PipelineEntry, _ after: PipelineEntry, head: String, flag: String, why: String?) -> Bool {
+        state.merging[e.id] = nil
+        guard after.item.state == "merged" else {
+            notice("\(e.item.label) was not merged: " + (why ?? "it is still \(after.item.state)"))
+            return false
+        }
+        if after.item.headSha == head, after.mergedBy?.lowercased() == e.root?.me.lowercased() {
+            log(e.id, .merged, "merged \(head.prefix(7)) with --admin \(flag)")
+        } else {
+            notice("\(e.item.label) was merged, but not by this sync at \(head.prefix(7))")
+        }
+        return true
     }
 
     // MARK: - Effects

@@ -2790,7 +2790,7 @@ private func pipelineJudged(base: URL, root: PipelineSettings.Root, team: Pipeli
     check(cs.writes == ["+Risk:Low ENG-1", "+Complexity:Low ENG-1"], "Linear labels in another case: \(cs.writes)")
 }
 
-/// A stale `cleared` the sync left on.
+/// A stale `cleared` the sync left on, and a merge whose sync died once gh was asked.
 private func pipelineClearsAndMerges(base: URL, root: PipelineSettings.Root, t0: Date) throws {
     section("pipeline clears and merges")
     let fm = FileManager.default
@@ -2824,6 +2824,55 @@ private func pipelineClearsAndMerges(base: URL, root: PipelineSettings.Root, t0:
               "cleared \(kept), then taken off by a person: \(s1.writes) \(items) reads, then \(s2.writes) "
                 + "\(stageOf(s2.result, prURL(15)))")
     }
+
+    // A merge whose sync died once gh was asked is told by a later sync that reads it, once.
+    let unread = "#13 may have been merged: it could not be read again: gh: Bad Gateway (HTTP 502)"
+    let merges: [(String, (Trackers) -> Void, [String])] = [
+        ("mine", { _ in }, []),
+        ("theirs", { $0.mergedAt = sha("c4") }, ["#13 was merged, but not by this sync at c3c3c3c"]),
+        ("open", { $0.mergeIgnored = true }, ["#13 was not merged: it is still open"]),
+    ]
+    for (name, change, told) in merges {
+        let t = only([13, 27])
+        change(t)
+        let died = dir("died-" + name), disk = dir("disk-" + name)
+        try seedRerate(died, 13, sha("c3"), at: later(-60))
+        var rereadFails = false
+        var io = t.io()
+        io.gh = { args in
+            // What the sync had saved as it died.
+            if args.starts(with: ["pr", "merge"]) { try? fm.copyItem(at: died, to: disk) }
+            if args.contains("operationName=PullRequest") {
+                // As GitHub answers a read naming no head.
+                if args.contains("head=") { return .init(status: 1, stderr: "gh: Could not resolve head ref ''.\n") }
+                if rereadFails { return .init(status: 1, stderr: "gh: Bad Gateway (HTTP 502)\n") }
+            }
+            return t.gh(args)
+        }
+        func run(_ settings: PipelineSettings, _ d: URL, _ now: Date) -> PipelineTickResult {
+            PipelineTick.run(settings: settings, now: now, dir: d, io: io)
+        }
+        _ = run(PipelineSettings(roots: [root], merge: true), died, t0)
+        rereadFails = true
+        let d1 = run(PipelineSettings(roots: [root]), disk, later(5))
+        rereadFails = false
+        let d2 = run(PipelineSettings(roots: [root]), disk, later(10))
+        let d3 = run(PipelineSettings(roots: [root]), disk, later(15))
+        let logged = d2.events.filter { $0.at == later(10) && $0.kind == .merged }.map(\.detail)
+        check(d1.notices == [unread] && d2.notices == told && d3.notices.isEmpty
+              && logged == (name == "mine" ? ["merged c3c3c3c with --admin --squash"] : [])
+              && !d3.events.contains { $0.at == later(15) },
+              "a merge whose sync died, \(name): \(d1.notices) then \(logged) \(d2.notices) then \(d3.notices)")
+    }
+    // One of a PR still cleared is asked again, and only the new one told.
+    let again = only([13, 27])
+    try seedRerate(dir("again"), 13, sha("c3"), at: later(-60))
+    try Data(#"{"merging": {"\#(prURL(13))": "\#(sha("c3")) --squash"}}"#.utf8)
+        .write(to: dir("again").appendingPathComponent("state.json"))
+    let ag = sync(again, PipelineSettings(roots: [root], merge: true), dir("again"), t0)
+    check(ag.writes == ["merge #13 --squash \(sha("c3"))"] && ag.result.notices.isEmpty
+          && ag.events.filter { $0.kind == .merged }.count == 1,
+          "a merge asked again: \(ag.writes) \(ag.result.notices) \(trail(ag.events, ag.result))")
 }
 
 /// A banned Linear author, a PR behind its base, a Linear recheck that failed, and failures
