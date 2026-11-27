@@ -740,8 +740,10 @@ def test_both_scanners_credit_the_transcripts_to_the_runners_not_the_agents():
     """Every Claude Code turn is summed, the operator's own included."""
     swift = (Path(__file__).resolve().parents[2] / "macos" / "Sources" / "Diplomat"
              / "UsageScan.swift").read_text(encoding="utf-8")
-    for doc in (swift, usagescan.__doc__):
-        source = re.search(r"telemetry comes from: the (\w+)' own transcripts", doc)
+    swift_doc = swift.partition("\nenum UsageScan")[0].replace("///", "")
+    for doc in (swift_doc, usagescan.__doc__):
+        source = re.search(r"telemetry comes from: the (\w+)' own transcripts",
+                           " ".join(doc.split()))
         assert source and source[1] == "runners", doc[:200]
 
 
