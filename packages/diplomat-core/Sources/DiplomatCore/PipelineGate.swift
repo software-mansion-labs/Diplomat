@@ -72,8 +72,9 @@ public enum PipelineGate {
         if changedFiles > f.maxFiles {
             raise(&complexity, to: .medium, "changes \(changedFiles) files (limit \(f.maxFiles))")
         }
+        // High risk, as what the read did not list could be a denied path.
         if files.count < changedFiles {
-            raise(&complexity, to: .medium, "changes files the read did not list")
+            raise(&risk, to: .high, "changes files the read did not list")
         }
         for file in files {
             if isDenied(file.path, f) {
@@ -108,12 +109,12 @@ public enum PipelineGate {
     }
 
     /// What the diff's text adds to `floor`. A moved submodule is high risk: GitHub lists it
-    /// as one modified line whatever it pulls in.
+    /// as one modified line whatever it pulls in. So is a diff the rater cannot read whole.
     static func diffFloor(_ diff: String, diffChars: Int) -> (rating: PipelineRating, reasons: [String]) {
         var rating = PipelineRating(risk: .low, complexity: .low)
         var reasons: [String] = []
         if diff.count > diffChars {
-            rating.complexity = .medium
+            rating.risk = .high
             reasons.append("its diff is longer than the \(diffChars) characters the rater reads")
         }
         let moved = diff.split(separator: "\n").contains {

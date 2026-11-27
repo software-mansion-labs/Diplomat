@@ -193,6 +193,7 @@ An open PR's files, as GitHub lists them, put a floor under its rating in code (
 | The diff | Floor |
 |---|---|
 | a denied path: a directory such as `.github`, `.claude`, `fastlane`, `vendor` or `node_modules` anywhere in it, or a file such as `package.json`, a lockfile, `Dockerfile*`, `Makefile`, a CI or release config, a toolchain pin, `AndroidManifest.xml`, `*.plist`, `.env*`, `*.pem`, `CODEOWNERS` or `CLAUDE.md` | risk high |
+| a changed file the read did not list (it lists 20) | risk high |
 | no test file changed | risk medium |
 | a file added outside a test directory, deleted, renamed or copied (anything but modified) | risk medium |
 | a file with no changed lines (binary, or a mode change) | risk medium |
@@ -202,8 +203,8 @@ An open PR's files, as GitHub lists them, put a floor under its rating in code (
 
 A test file is one under a `test`, `tests`, `__tests__` or `testdata` directory, or named like
 `test_*`, `*_test.*`, `*.test.*`, `*_spec.*` or `*.spec.*`. Rating a PR also floors it by its diff:
-a moved submodule makes risk high, and a diff longer than the 20,000 characters the rater reads
-makes complexity medium. The model can rate above the floor, never below it, and Diplomat neither
+a moved submodule, or a diff longer than the 20,000 characters the rater reads, makes risk
+high. The model can rate above the floor, never below it, and Diplomat neither
 puts a PR whose floor is past its limit on the fast track nor merges it, whatever its labels say,
 unless you [take it over](#takeover).
 

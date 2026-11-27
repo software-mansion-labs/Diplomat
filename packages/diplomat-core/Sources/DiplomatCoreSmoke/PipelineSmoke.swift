@@ -992,7 +992,7 @@ func pipelineSmoke() throws {
          nil, low),
         ("7 files", [("src/a.swift", 1, 0, "MODIFIED")] + (1...6).map { ("tests/t\($0)_test.py", 1, 0, "MODIFIED") },
          nil, rating(.low, .medium)),
-        ("files the read did not list", [("src/a.swift", 1, 0, "MODIFIED"), test], 3, rating(.low, .medium)),
+        ("files the read did not list", [("src/a.swift", 1, 0, "MODIFIED"), test], 3, rating(.high, .low)),
         ("package.json", [("package.json", 1, 1, "MODIFIED"), test], nil, rating(.high, .low)),
         ("a workflow", [(".github/workflows/ci.yml", 1, 1, "MODIFIED"), test], nil, rating(.high, .low)),
         ("a vendored file, any case", [("Vendor/lib.c", 1, 1, "MODIFIED"), test], nil, rating(.high, .low)),
@@ -2335,7 +2335,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     let long = only([4, 11])
     long.diffs[11] = "diff --git a/src/a.swift b/src/a.swift\n" + String(repeating: "+x\n", count: model.rater.diffChars / 3 + 1)
     let lg = sync(long, rateOwn, dir("long-diff"), t0)
-    check(item(lg.result, prURL(11))?.rating == rating(.low, .medium) && lg.events.contains {
+    check(item(lg.result, prURL(11))?.rating == rating(.high, .low) && lg.events.contains {
         $0.detail.contains("its diff is longer than the \(model.rater.diffChars) characters the rater reads")
     }, "a diff past the rater's cut: \(lg.events.map(\.detail))")
 
@@ -3852,7 +3852,7 @@ private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: Pipeli
     let unlisted = only([4, 11])
     unlisted.prs[0].moreFiles = 5
     let ul = sync(unlisted, PipelineSettings(roots: [root], rate: true), dir("files-unlisted"), t0)
-    check(item(ul.result, prURL(11))?.rating == rating(.low, .medium), "7 files, 2 listed: \(ul.writes)")
+    check(item(ul.result, prURL(11))?.rating == rating(.high, .medium), "7 files, 2 listed: \(ul.writes)")
     // The read before a write must be whole, and the item still writable.
     let takenOff = #"{"decided": ["\#(prURL(13))"]}"#
     try state("refresh-errors", takenOff)
@@ -4760,7 +4760,7 @@ private func pipelineCoverage8(base: URL, root: PipelineSettings.Root, team: Pip
     check(cut.stdin == ["BEGIN UNTRUSTED TRACKER TEXT", "| Fix the docs link", "|", body, "| [cut at 6000 characters]", "|"]
             + diff + ["| [cut at 20000 characters]", "END UNTRUSTED TRACKER TEXT"],
           "the rater's stdin, a 20001-character diff and a 6001-character body: \(cut.stdin.map(\.count))")
-    check(cut.details == ["low risk, medium complexity, floored by its diff (its diff is longer than the 20000 characters "
+    check(cut.details == ["high risk, low complexity, floored by its diff (its diff is longer than the 20000 characters "
                           + "the rater reads): a link and its test"],
           "a 20001-character diff's rating: \(cut.details)")
 }
@@ -5914,6 +5914,18 @@ private func pipelineLimits(base: URL, root: PipelineSettings.Root, team: Pipeli
           && stageOf(past.result, prURL(13)) == "human/human",
           "re-rated past its limit: \(past.writes) \(stageOf(past.result, prURL(13)))")
     check(within.writes == ["merge #13 --squash \(sha("c3"))"], "re-rated within it: \(within.writes)")
+    // At the widest limit, a file the read did not list still holds the merge.
+    let widest = limited(PipelineRating.maxLimit)
+    let listed = try cleared(widest, "listed"), unlisted = try cleared(widest, "unlisted") { $0.prs[0].moreFiles = 1 }
+    check(merged(listed) && !merged(unlisted), "a file unlisted: \(listed.writes) \(unlisted.writes)")
+    // A fast-track PR within it is rated again at its clean head, then merges.
+    let again = only([13, 27])
+    again.prs[0].labels = ["risk:medium", "complexity:low", "diplomat:fast-track"]
+    again.ratings["Clear the cache on logout"] = ["risk": "medium", "complexity": "low", "why": "cache eviction"]
+    let rerated = sync(again, PipelineSettings(roots: [riskier], rate: true, fastTrack: true, merge: true),
+                       dir("rerate"), t0)
+    check(rerated.claude == ["opus Clear the cache on logout"] && merged(rerated),
+          "rated again within it: \(rerated.claude) \(rerated.writes)")
     let clears = try cleared(riskier, "clears") { $0.prs[0].labels.removeAll { $0 == "diplomat:cleared" } }
     check(clears.writes == ["label diplomat:cleared exists", "+diplomat:cleared #13", "merge #13 --squash \(sha("c3"))"],
           "cleared at a re-rate within it: \(clears.writes)")
