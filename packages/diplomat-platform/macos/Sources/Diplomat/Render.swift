@@ -563,6 +563,9 @@ enum Render {
         store.me = "latekvo"
         store.pipelineEnabled = !empty
         store.pipelineRate = true
+        store.pipelineMirrorGitHub = true
+        store.pipelineMirrorLinear = false
+        store.pipelineMirrorScope = .prs
         store.pipelineFix = true
         store.pipelineFastTrack = true
         store.pipelineMerge = false
@@ -1053,6 +1056,9 @@ enum Render {
         store.autoReviewOverrides = AutoReviewDepth.seed + [AutoReviewOverride(login: "t0tl", depth: "deep")]
         store.communityIssuesEnabled = true
         store.pipelineEnabled = true   // the pipeline's switches and Linear rows, merge's warning
+        store.pipelineMirrorGitHub = true   // and Mirror onto
+        store.pipelineMirrorLinear = false
+        store.pipelineMirrorScope = .mine
         store.pipelineLinearTeamsRaw = "ENG=software-mansion/argent"
         store.settingsExplain = explain
     }
