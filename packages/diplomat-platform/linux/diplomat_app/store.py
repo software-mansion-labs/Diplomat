@@ -581,8 +581,9 @@ class Store(QObject):
         # Why the last sync could not run; None once one did.
         self.pipeline_error: str | None = None
         self.pipeline_syncing = False
-        # Over the flags and the force sets below, never over a CLI call. Reentrant: a
-        # signal handler (:meth:`stop_pipeline_sync`) may land inside a block holding it.
+        # Over the flags and the force sets below, never over a CLI call. Reentrant:
+        # :meth:`stop_pipeline_sync` runs from signal handlers, which may land inside a
+        # block holding it.
         self._pipeline_lock = threading.RLock()
         # Over a control.json write and the switches it reads: the Qt thread's switches and
         # a sync's worker both write it, so the last write has the latest.
