@@ -141,6 +141,8 @@ public enum PipelineGate {
         public var unresolvedThreads: Int
         public var rating: PipelineRating?
         public var floor: PipelineRating
+        /// Its root's: the highest rating and floor it may merge at.
+        public var limit: PipelineRating
         public var mergeable: String
         public var headSha: String
         /// The commit `ciState` was read for, which a lagging index can leave behind
@@ -156,8 +158,8 @@ public enum PipelineGate {
         public var foreignCommits: [String]
         /// Both of Diplomat's fast-track labels are on it.
         public var trackLabels: Bool
-        /// It closes an issue, and every one it closes is low risk, low complexity and one
-        /// Diplomat may act on.
+        /// It closes an issue, and every one it closes is a candidate: within its root's limit
+        /// and one Diplomat may act on.
         public var fixesCandidate: Bool
         /// The issues it would close that Diplomat did not read.
         public var closesUnwritable: [String]
@@ -194,7 +196,7 @@ public enum PipelineGate {
                     closesUnwritable: [String] = [], ciRan: Bool = true, wasReady: Bool = false,
                     mergeState: String = "CLEAN", behindBy: Int? = 0, mergeQueue: Bool = false, stopLabels: [String] = [],
                     requiredChecks: [String]? = [], passedChecks: Set<String> = [], baseRules: [String]? = [],
-                    unsignedCommits: Bool = false, mergeFlag: String = "--squash") {
+                    unsignedCommits: Bool = false, mergeFlag: String = "--squash", limit: PipelineRating = .low) {
             self.state = state
             self.author = author
             self.isCrossRepository = isCrossRepository
@@ -206,6 +208,7 @@ public enum PipelineGate {
             self.unresolvedThreads = unresolvedThreads
             self.rating = rating
             self.floor = floor
+            self.limit = limit
             self.mergeable = mergeable
             self.headSha = headSha
             self.ciCommit = ciCommit
@@ -332,7 +335,7 @@ public enum PipelineGate {
             case .threads(let n): return "has \(n) unresolved review thread\(n == 1 ? "" : "s")"
             case .stopLabel(let label): return "carries the label \(label)"
             case .offTrack: return "lacks a fast-track label"
-            case .notAFix: return "closes no issue, or one that is not a low-risk, low-complexity issue Diplomat may act on"
+            case .notAFix: return "closes no issue, or one that is not a candidate issue Diplomat may act on"
             case .closesUnwritable(let what): return "would close \(what), which Diplomat did not read or may not write to"
             case .rated(let r): return "rated \(pair(r)) on the tracker"
             case .floor(let r): return "its diff allows no less than \(pair(r))"
@@ -381,8 +384,8 @@ public enum PipelineGate {
         if let label = c.stopLabels.first { return .stopLabel(label) }
         if !c.trackLabels { return .offTrack }
         if let held = closes(c.fixesCandidate, c.closesUnwritable) { return held }
-        if c.rating?.isFastTrack != true { return .rated(c.rating) }
-        if !c.floor.isFastTrack { return .floor(c.floor) }
+        if c.rating?.fits(c.limit) != true { return .rated(c.rating) }
+        if !c.floor.fits(c.limit) { return .floor(c.floor) }
         if c.mergeable == "CONFLICTING" { return .conflicting }
         if c.mergeable != "MERGEABLE" || ["", "UNKNOWN"].contains(c.mergeState) { return .mergeabilityUnknown }
         // `--admin` merges a PR behind its base without testing it against the base; GitHub

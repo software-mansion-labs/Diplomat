@@ -303,6 +303,11 @@ final class PipelineSync {
             notice("\(name) is switched off, so this sync took no \(name.lowercased()) step past that")
             return false
         }
+        if [.fix, .fastTrack, .merge].contains(step),
+           let root = settings.roots.first(where: { c.limit($0.slug).map($0.limit.fits) == false }) {
+            notice("\(root.slug)'s fast-track limit was lowered, so this sync took no \(name.lowercased()) step past that")
+            return false
+        }
         return true
     }
 
@@ -856,10 +861,13 @@ final class PipelineSync {
 
     func isCandidate(_ x: PipelineEntry) -> Bool {
         x.item.kind == .issue && x.item.writable
-            && labelRating(x.labels).map { raised($0, x.id).isFastTrack } == true && triaged(x) == nil
+            && labelRating(x.labels).map { raised($0, x.id).fits(limit(x)) } == true && triaged(x) == nil
             && stops(x).isEmpty && onGitHub(x) == nil && twinHold(x) == nil && twinsUnread(x) == nil
             && !has(x, model.labels.fractured) && x.children.isEmpty && banHold(x) == nil && x.root != nil
     }
+
+    /// The highest rating `e`'s fast track takes.
+    func limit(_ e: PipelineEntry) -> PipelineRating { e.root?.limit ?? .low }
 
     func isCandidate(_ x: PipelineEntry, for pr: PipelineEntry) -> Bool {
         isCandidate(x) && (x.item.source == .github || x.root?.slug.lowercased() == pr.item.repo.lowercased())
@@ -1014,18 +1022,18 @@ final class PipelineSync {
     func awaitingRerate(_ e: PipelineEntry) -> Bool {
         guard own(e), open(e), e.item.writable, has(e, model.labels.fastTrack),
               let head = e.item.headSha, !head.isEmpty, e.item.cleanAt == head, rerates[e.id]?[head] == nil,
-              e.item.ratedBy == "label", let r = e.item.rating, r.atLeast(e.item.floor ?? r).isFastTrack,
+              e.item.ratedBy == "label", let r = e.item.rating, r.atLeast(e.item.floor ?? r).fits(limit(e)),
               offTrack(e) == nil else { return false }
         return closesHold(e) == nil
     }
 
-    /// `cleared`, with a clean marker at its head, at which this Diplomat rated it low/low
-    /// again. The label alone is no proof of that re-rate: anyone with triage rights can
+    /// `cleared`, with a clean marker at its head, at which this Diplomat rated it within its
+    /// limit again. The label alone is no proof of that re-rate: anyone with triage rights can
     /// add it.
     func clearedByMe(_ e: PipelineEntry) -> Bool {
         guard has(e, model.labels.cleared), let head = e.item.headSha, !head.isEmpty,
               e.item.cleanAt == head else { return false }
-        return rerates[e.id]?[head]?.isFastTrack == true
+        return rerates[e.id]?[head]?.fits(limit(e)) == true
     }
 
     func newer(_ a: Int, _ b: Int) -> Bool {
@@ -1227,12 +1235,12 @@ final class PipelineSync {
         return labeled?.isDisjoint(with: history.map { $0.lowercased() }) == true
     }
 
-    /// Puts `fastTrack` on a PR rated low/low that closes only candidates, at its first rating
+    /// Puts `fastTrack` on a PR rated within its limit that closes only candidates, at its first rating
     /// only: one that wore a rating or fast-track label before (no `first` kept) is a person's.
     /// One it could not be put on is recorded.
     func trackFirst(_ i: Int, _ rating: PipelineRating) {
         let e = entries[i]
-        guard e.item.kind == .pr, settings.fastTrack, rating.isFastTrack, cache[e.id]?.first == true,
+        guard e.item.kind == .pr, settings.fastTrack, rating.fits(limit(e)), cache[e.id]?.first == true,
               closesHold(e) == nil else { return }
         if add(i, model.labels.fastTrack, .fastTrack) {
             log(e.id, .fastTrack, "+\(model.labels.fastTrack): rated \(describe(rating))")
@@ -1262,7 +1270,7 @@ final class PipelineSync {
     /// Why my fast-track PR is off the fast track for good.
     func offTrack(_ e: PipelineEntry) -> String? {
         let head = e.item.headSha ?? ""
-        let above = (rerates[e.id] ?? [:]).filter { !$0.value.isFastTrack }
+        let above = (rerates[e.id] ?? [:]).filter { !$0.value.fits(limit(e)) }
         if let h = above[head] != nil ? head : above.keys.sorted().first, let r = above[h] {
             return "re-rated \(describe(r)) at " + (h == head ? "this head" : String(h.prefix(7)))
         }
@@ -1283,7 +1291,7 @@ final class PipelineSync {
             if !state.decided.contains(e.id) { state.decided.append(e.id) }
             return persist()
         }
-        guard has(e, ft), let head = e.item.headSha, e.item.cleanAt == head, rerates[e.id]?[head]?.isFastTrack == true,
+        guard has(e, ft), let head = e.item.headSha, e.item.cleanAt == head, rerates[e.id]?[head]?.fits(limit(e)) == true,
               !has(e, cl) || state.cleared[e.id] != head else { return }
         if !has(e, cl) {
             guard recheck(i), entries[i].item.headSha == head, has(entries[i], ft), add(i, cl, .fastTrack) else { return }
@@ -1337,7 +1345,7 @@ final class PipelineSync {
                 let e = entries[i]
                 guard !picks.contains(i), fractureRefusal(e) == nil, state.unsplit[e.id] == nil, !backingOff(e.id),
                       let r = e.item.rating else { return false }
-                return r.complexity >= .medium && r.risk != .high
+                return r.complexity > limit(e).complexity && r.risk != .high
             }.sorted(by: newer)
             picks += auto.prefix(1)
         }
@@ -1619,7 +1627,7 @@ final class PipelineSync {
             let floor = e.item.floor ?? PipelineRating(risk: .low, complexity: .low)
             if !own(e) || !has(e, model.labels.fastTrack) {
                 stage = e.item.rating == nil ? .unrated : .human
-                if own(e), let r = e.item.rating, r.atLeast(floor).isFastTrack {
+                if own(e), let r = e.item.rating, r.atLeast(floor).fits(limit(e)) {
                     hold = e.unwritable.map { "off the fast track: \($0)" }
                         ?? (e.item.ratedBy != "label" ? "off the fast track: its rating labels could not be written"
                             : !state.untracked.contains(e.id) ? nil
@@ -1636,10 +1644,10 @@ final class PipelineSync {
             } else if labelled == nil {
                 stage = e.item.rating == nil ? .unrated : .human
                 if e.item.rating != nil { hold = "off the fast track: its rating labels could not be written" }
-            } else if let r = labelled, !r.isFastTrack {
+            } else if let r = labelled, !r.fits(limit(e)) {
                 stage = .human
                 hold = "off the fast track: it is " + PipelineGate.Hold.rated(r).message
-            } else if !floor.isFastTrack {
+            } else if !floor.fits(limit(e)) {
                 stage = .human
                 hold = "off the fast track: " + PipelineGate.Hold.floor(floor).message
             } else if clearedByMe(e) {
@@ -1686,7 +1694,7 @@ final class PipelineSync {
             } else if has(e, model.labels.fractured) || !e.children.isEmpty {
                 (stage, lane) = (.fractured, .fractured)
             } else if let r = e.item.rating {
-                if r.isFastTrack && e.item.writable && triaged(e) == nil && onGitHub(e) == nil && twinHold(e) == nil {
+                if r.fits(limit(e)) && e.item.writable && triaged(e) == nil && onGitHub(e) == nil && twinHold(e) == nil {
                     (stage, lane) = (.candidate, .fast)
                     hold = candidateHold(e)
                 } else {
@@ -1782,7 +1790,7 @@ final class PipelineSync {
             stopLabels: stops(e),
             requiredChecks: e.gate.map(\.requiredChecks) ?? [], passedChecks: e.gate?.passedChecks ?? [],
             baseRules: e.gate.map(\.baseRules) ?? [], unsignedCommits: e.gate?.unsignedCommits ?? false,
-            mergeFlag: mergeFlag(e) ?? ""),
+            mergeFlag: mergeFlag(e) ?? "", limit: limit(e)),
             me: e.root?.me ?? "")
     }
 

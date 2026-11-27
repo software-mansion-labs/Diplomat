@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Pipeline: the model
 //
 // Every open issue of every source (the GitHub roots, Linear teams), and the operator's
-// open PRs, is rated for risk and complexity, and a low/low one goes down the fast track:
+// open PRs, is rated for risk and complexity, and one within its root's limit goes down the fast track:
 // issue -> fix PR -> the PR rated on its own -> reviewed until clean -> rated again at that
 // head -> merged with no human review. Anything else is left to a human. The state is the
 // trackers' labels, Diplomat's clean-marker reviews, and in `PipelineLog.dir` what the
@@ -27,7 +27,11 @@ public struct PipelineRating: Codable, Equatable, Sendable {
         self.complexity = complexity
     }
 
-    public var isFastTrack: Bool { risk == .low && complexity == .low }
+    public static let low = PipelineRating(risk: .low, complexity: .low)
+    /// The highest limit a root may set: high risk is the ground the fast track never takes.
+    public static let maxLimit = PipelineRating(risk: .medium, complexity: .high)
+
+    public func fits(_ limit: PipelineRating) -> Bool { risk <= limit.risk && complexity <= limit.complexity }
 
     public func atLeast(_ floor: PipelineRating) -> PipelineRating {
         PipelineRating(risk: max(risk, floor.risk), complexity: max(complexity, floor.complexity))
@@ -38,10 +42,10 @@ public enum PipelineSource: String, Codable, Sendable { case github, linear }
 
 public enum PipelineKind: String, Codable, Sendable { case issue, pr }
 
-/// Where an item stands. An issue: `unrated`, then `human` or `candidate` (low/low), or
+/// Where an item stands. An issue: `unrated`, then `human` or `candidate` (within its limit), or
 /// `fractured` into children; `fixing` once an open PR fixes it; `closed`. A PR:
 /// `unrated`, then `human` or `fast-track`; `clean` once a Diplomat clean marker names its
-/// head; `cleared` once this Diplomat rated it low/low again at that head (its log says so:
+/// head; `cleared` once this Diplomat rated it within its limit again at that head (its log says so:
 /// the `cleared` label alone, which anyone with triage rights can add, does not); `merged`
 /// or `closed`.
 public enum PipelineStage: String, Codable, CaseIterable, Sendable {
@@ -309,18 +313,30 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
         public var repo: String
         public var path: String
         public var me: String
+        /// The highest rating its fast track takes, at most `PipelineRating.maxLimit`.
+        public var limit: PipelineRating
         /// GitHub's `owner/repo` for it as a sync read it, which a rename or transfer makes
         /// differ from `slug`; never encoded.
         var nameWithOwner: String?
 
-        public init(owner: String, repo: String, path: String, me: String) {
+        public init(owner: String, repo: String, path: String, me: String, limit: PipelineRating = .low) {
             self.owner = owner
             self.repo = repo
             self.path = path
             self.me = me
+            self.limit = PipelineRating(risk: min(limit.risk, PipelineRating.maxLimit.risk),
+                                        complexity: min(limit.complexity, PipelineRating.maxLimit.complexity))
         }
 
-        private enum CodingKeys: String, CodingKey { case owner, repo, path, me }
+        private enum CodingKeys: String, CodingKey { case owner, repo, path, me, limit }
+
+        /// A missing `limit` reads as low/low.
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(owner: try c.decode(String.self, forKey: .owner), repo: try c.decode(String.self, forKey: .repo),
+                      path: try c.decode(String.self, forKey: .path), me: try c.decode(String.self, forKey: .me),
+                      limit: try c.decodeIfPresent(PipelineRating.self, forKey: .limit) ?? .low)
+        }
 
         /// The root as configured, which the settings, `unread` and effects name it by.
         public var slug: String { "\(owner)/\(repo)" }
@@ -365,11 +381,11 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
     public var rate: Bool
     /// Ask for a fix PR for each candidate issue.
     public var fix: Bool
-    /// Label low/low PRs `fastTrack` and ask for their reviews.
+    /// Label PRs within their root's limit `fastTrack` and ask for their reviews.
     public var fastTrack: Bool
     /// Merge cleared PRs past the review requirement.
     public var merge: Bool
-    /// Split writable medium/high-complexity issues into low-complexity children.
+    /// Split writable issues more complex than their root's limit into low-complexity children.
     public var fracture: Bool
     public var force: Force?
     /// The ids of the items the front-end holds a pipeline ask or attempt record for, which a
@@ -412,8 +428,9 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
 /// `PipelineLog.dir`, which it rewrites whole whenever one changes and before each sync. A
 /// sync reads it right before every outward step and rating call, and skips a step whose
 /// switch, or `enabled`, is off; a forced step needs `enabled` alone, and taking back the
-/// sync's own split claim needs neither. It can only stop what the settings allow. A
-/// missing or incomplete file leaves the settings as they were.
+/// sync's own split claim needs neither. It can only stop what the settings allow: a root's
+/// limit below the sync's stops its fix, fast-track and merge steps. A missing or
+/// incomplete file leaves the settings as they were.
 public struct PipelineControl: Codable, Equatable, Sendable {
     public var enabled: Bool
     public var rate: Bool
@@ -421,19 +438,29 @@ public struct PipelineControl: Codable, Equatable, Sendable {
     public var fastTrack: Bool
     public var merge: Bool
     public var fracture: Bool
+    /// Each root's limit by its `owner/repo`, lowercased, a root missing from it at low/low;
+    /// nil stops nothing.
+    public var limits: [String: PipelineRating]?
 
-    public init(enabled: Bool, rate: Bool, fix: Bool, fastTrack: Bool, merge: Bool, fracture: Bool) {
+    public init(enabled: Bool, rate: Bool, fix: Bool, fastTrack: Bool, merge: Bool, fracture: Bool,
+                limits: [String: PipelineRating]? = nil) {
         self.enabled = enabled
         self.rate = rate
         self.fix = fix
         self.fastTrack = fastTrack
         self.merge = merge
         self.fracture = fracture
+        self.limits = limits
     }
 
     public init(settings: PipelineSettings) {
         self.init(enabled: true, rate: settings.rate, fix: settings.fix, fastTrack: settings.fastTrack,
-                  merge: settings.merge, fracture: settings.fracture)
+                  merge: settings.merge, fracture: settings.fracture,
+                  limits: Dictionary(settings.roots.map { ($0.slug.lowercased(), $0.limit) }) { a, _ in a })
+    }
+
+    public func limit(_ slug: String) -> PipelineRating? {
+        limits.map { $0[slug.lowercased()] ?? .low }
     }
 }
 
