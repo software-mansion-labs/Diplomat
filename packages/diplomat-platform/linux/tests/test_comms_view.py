@@ -404,6 +404,28 @@ def test_opening_the_screen_marks_everything_seen_but_still_draws_it_new(store):
     assert [p.unread for p in _rows(view, PingRow)] == [False]
 
 
+def test_opening_the_screen_opens_no_window_of_its_own(store):
+    """Opening rebuilds twice in one turn: on the ``comms_changed`` of the seen mark,
+    then itself."""
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    store.comms_identity = {"handle": "operator", "teamID": "Ours"}
+    store.comms_items = [_item(1, "2026-10-27T10:10:00Z", queue_key="review:1")]
+    view = CommsView(store)
+    try:
+        view.show()
+        view.activateWindow()
+        assert QTest.qWaitForWindowActive(view)
+        view.open()
+        QApplication.processEvents()
+        assert [w for w in QApplication.topLevelWidgets()
+                if w.isVisible() and w is not view] == []
+        assert QApplication.activeWindow() is view
+    finally:
+        view.close()
+
+
 def test_a_failing_tick_is_a_banner(store):
     store.comms_enabled = True
     store.comms_identity = {"handle": "operator", "teamID": "Ours"}

@@ -77,6 +77,8 @@ def _clear(layout) -> None:
         item = layout.takeAt(0)
         w = item.widget()
         if w is not None:
+            # Hidden first: a show its layout queued this turn would open it as a window of its own.
+            w.hide()
             w.setParent(None)
             w.deleteLater()
         elif item.layout() is not None:

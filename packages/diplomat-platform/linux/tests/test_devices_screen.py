@@ -964,6 +964,37 @@ def test_the_panel_opens_the_screen_from_its_header_and_the_device_section(app, 
     panel.deleteLater()
 
 
+def test_a_tick_that_reads_a_new_pool_and_feed_line_opens_no_window_of_its_own(
+        app, monkeypatch):
+    """The panel's tick publishes the snapshot, which rebuilds the screen, then the feed,
+    which rebuilds its Recent card again, in one turn."""
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+    from diplomat_app.panel import Panel
+    from diplomat_app.store import Store
+
+    monkeypatch.delenv("DIPLOMAT_RENDER", raising=False)
+    monkeypatch.setattr(Store, "refresh_allocator_install_async", lambda self: None)
+    monkeypatch.setattr(Store, "refresh_update_status_async", lambda self: None)
+    monkeypatch.setattr(Store, "refresh_auto_task_count_async", lambda self: None)
+    panel = Panel(Store())
+    try:
+        panel.show()
+        panel.devices_btn.click()
+        panel.activateWindow()
+        assert QTest.qWaitForWindowActive(panel)
+        da.state_path().parent.mkdir(parents=True, exist_ok=True)
+        da.state_path().write_text(json.dumps({"devices": [ROW]}))
+        activity.log("auto", "release-device", "Released ios:A")
+        panel._device_timer.timeout.emit()
+        QApplication.processEvents()
+        assert [w for w in QApplication.topLevelWidgets()
+                if w.isVisible() and w is not panel] == []
+        assert QApplication.activeWindow() is panel
+    finally:
+        panel.close()
+
+
 @pytest.mark.parametrize("mode", ["devices-screen", "devices-screen-remote",
                                   "devices-screen-remote-away", "devices-screen-off"])
 def test_each_mode_renders_through_the_real_entry(app, monkeypatch, tmp_path, mode):

@@ -1969,12 +1969,13 @@ check(AgentTaskQueue.reorder(["a", "b"], moving: "z", onto: "a") == ["a", "b"]
 // PARITY: diplomat-platform/linux/tests/test_autofix.py asserts the same arrangements —
 // the band is the one rule that outranks the operator's, so the two front-ends must
 // not disagree about where a conflict fix waits.
-check(AgentTaskQueue.band("conflicts:1") == 4 && AgentTaskQueue.band("investigate:9") == 3
-      && AgentTaskQueue.band("review:2") == 1 && AgentTaskQueue.band("issues:3") == 2
+check(AgentTaskQueue.band("conflicts:1") == 5 && AgentTaskQueue.band("investigate:9") == 4
+      && AgentTaskQueue.band("review:2") == 1 && AgentTaskQueue.band("rate:7") == 2
+      && AgentTaskQueue.band("issues:3") == 3
       && AgentTaskQueue.band("review-req:4") == 0 && AgentTaskQueue.band("a") == 0,
       "a conflict fix bands last, behind an investigation, which waits behind a requested "
-      + "issue fix, which waits behind a requested review, all behind the monitors' own "
-      + "finds; everything else — including a verbless key — first")
+      + "issue fix, which waits behind a rating, which waits behind a requested review, all "
+      + "behind the monitors' own finds; everything else — including a verbless key — first")
 check(AgentTaskQueue.order(offered: ["conflicts:1", "investigate:6", "review:2", "review-req:3",
                                      "review-reply:4", "issues:5"], saved: [])
       == ["review-req:3", "review-reply:4", "review:2", "issues:5", "investigate:6", "conflicts:1"],
@@ -1988,8 +1989,8 @@ check(AgentTaskQueue.order(offered: ["investigate:6", "issues:5", "conflicts:1"]
 check(AgentTaskQueue.reorder(["issues:5", "investigate:6"], moving: "investigate:6",
                              onto: "issues:5") == ["issues:5", "investigate:6"],
       "an investigation cannot be dragged out of its band")
-check(AgentTaskQueue.requestedActions == ["review", "issues", "investigate"],
-      "an investigation is asked-for work, cancellable like the sweeps'")
+check(AgentTaskQueue.requestedActions == ["review", "issues", "investigate", "rate"],
+      "an investigation and a rating are asked-for work, cancellable like the sweeps'")
 check(AgentTaskQueue.order(offered: ["review:1", "issues:2"], saved: ["issues:2"])
       == ["review:1", "issues:2"],
       "a requested review is its own band ahead of issues, so it drains first however "

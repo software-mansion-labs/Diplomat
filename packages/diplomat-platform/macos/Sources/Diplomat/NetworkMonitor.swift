@@ -194,7 +194,7 @@ extension Store {
     }
 
     private func postNetworkAdmit(_ snapshot: NetworkSnapshot, now: TimeInterval) async {
-        let (limit, load, autoRun) = (autoTaskLimit, autoTasksMeasured, queueAutoRun)
+        let (limit, load, autoRun) = (autoTaskLimit, autoTasksMeasured + pipelineRateRuns.count, queueAutoRun)
         let answer = await Task.detached(priority: .utility) {
             NetworkAdmit.slots(
                 limit: limit, running: NetworkAdmit.running(snapshot) + load,
