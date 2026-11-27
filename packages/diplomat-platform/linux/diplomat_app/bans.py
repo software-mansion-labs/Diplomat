@@ -143,8 +143,8 @@ def _listed() -> dict | None:
 
 
 def _left_unread() -> str:
-    """Why a ban or un-ban left an :func:`unreadable` file alone, before any daemon is
-    asked: one older than its own refusal writes over it."""
+    """Why a ban or un-ban left an :func:`unreadable` file alone, without asking the
+    daemon: an older one writes over it."""
     return f"{banned_path()} is unreadable, so it was left as it is"
 
 

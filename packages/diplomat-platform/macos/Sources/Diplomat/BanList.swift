@@ -137,8 +137,8 @@ enum BanList {
         var isUnreadable: Bool { if case .unreadable = self { true } else { false } }
     }
 
-    /// Why a ban or un-ban left a `.unreadable` file alone, before any daemon is asked: one
-    /// older than its own refusal writes over it.
+    /// Why a ban or un-ban left a `.unreadable` file alone, without asking the daemon: an
+    /// older one writes over it.
     private static var leftUnread: String { "\(fileURL.path) is unreadable, so it was left as it is" }
 
     /// Why a gate refused work while the file is `.unreadable`.

@@ -1197,7 +1197,7 @@ enum CommsTest {
         } else {
             check("a stale socket is left", false)
         }
-        // One older than its own refusal would write over an unreadable list.
+        // An older daemon writes over an unreadable list.
         if let eager = FakeDaemon(path: sock, answering: true, respond: { _, _ in (200, #"{"banned":true}"#) }) {
             let torn = Data("{".utf8)
             try? torn.write(to: BanList.fileURL)

@@ -2683,7 +2683,7 @@ private func pipelineJudged(base: URL, root: PipelineSettings.Root, team: Pipeli
           "a PR closing a Linear issue synced with #27: \(closesSynced.writes) \(stageOf(closesSynced.result, prURL(13)))")
 
     // A ban list that cannot be read holds every item, and the sync takes no step.
-    // nil: one listing mallory in a directory that cannot be searched, which root (CI's Linux container) still can.
+    // nil: mallory listed in a directory that cannot be searched, except by root (CI's Linux container).
     let unreadLists: [String?] = [#"{"banned": [{"login": "mallory"}"#, #"{"banned": {"login": "mallory"}}"#]
         + (geteuid() == 0 ? [] : [nil])
     for (k, text) in unreadLists.enumerated() {

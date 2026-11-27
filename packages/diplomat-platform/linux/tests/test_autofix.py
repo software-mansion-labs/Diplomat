@@ -691,8 +691,8 @@ def test_a_review_request_runs_at_the_default_depth_unless_its_author_has_a_row(
 
 @pytest.mark.parametrize("spoil", ["{", '{"banned": 5}', None], ids=["torn", "scalar", "unsearchable"])
 def test_an_unreadable_ban_list_holds_each_review_request_in_the_queue(store, monkeypatch, spoil):
-    """Held where it stands, with no attempt record, and nothing that leaves a banned
-    author out (the ledger, the owed count) is changed until the list reads. ``None``
+    """Held where it stands, with no attempt record; until the list reads, the ledger
+    leaves out whom the last list read banned, and the owed count stands. ``None``
     leaves the list readable in a directory that cannot be searched."""
     from diplomat_app import bans
     from diplomat_runtime import activity

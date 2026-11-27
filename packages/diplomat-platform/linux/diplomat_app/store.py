@@ -4567,7 +4567,7 @@ class Store(QObject):
         result = comms.tick(settings)
         toggles = self.comms_toggles()
         fresh = list(result.get("items") or [])
-        # Nor is anything logged replayed if the list stopped reading during the tick.
+        # Re-checked: the list may have stopped reading during the tick.
         stranded = [] if bans.unreadable() else self._comms_stranded(fresh)
         items = []
         for it in stranded + fresh:

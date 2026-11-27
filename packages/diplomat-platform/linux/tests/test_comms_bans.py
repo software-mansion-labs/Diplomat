@@ -163,7 +163,7 @@ def test_an_unreadable_list_is_never_written_over(audit, text):
 
 
 def test_an_unreadable_list_is_never_handed_to_a_daemon(audit, daemon):
-    """One older than its own refusal would write over it."""
+    """An older one writes over it."""
     asked, _ = daemon
     bans.banned_path().parent.mkdir(parents=True)
     bans.banned_path().write_text("{")
