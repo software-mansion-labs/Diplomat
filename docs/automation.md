@@ -249,12 +249,12 @@ limit gone the next time you sit down to work.
 What a task costs is measured, not guessed. The Telemetry ledger already prices
 every finished agent as a share of the 7-day window (*Limit per task*),
 so the question has a statistical answer - and the one worth asking is about the
-**next** task, not the average one. Half of all tasks cost more than the mean, and
-the distribution is right-skewed (most small, a few enormous), so a gate set at the
-mean would wave the expensive tail through every time. Diplomat therefore computes a
-one-sided upper **prediction bound**, `mean + z·sd·√(1 + 1/n)`: the cost one more
-task will come in under, at the confidence you pick. At the default 95%, roughly one
-auto-task in twenty may still overrun what it was gated on.
+**next** task, not the average one. The distribution is right-skewed (most small, a
+few enormous), so a gate set at the mean would wave the expensive tail through every
+time. Diplomat therefore computes a one-sided upper **prediction bound**,
+`mean + z·sd·√(1 + 1/n)`: the cost one more task will come in under, at the
+confidence you pick. At the default 95%, roughly one auto-task in twenty may still
+overrun what it was gated on.
 
 **Two currencies, because there are two ways an agent is paid for.** Which one
 applies follows from the [runner](settings.md#agent-runner) a spawn uses (a

@@ -284,10 +284,9 @@ public enum AgentDispatchGate {
     // (`Telemetry.summarize` → `perTaskWeek`), or, for a runner billed in money, at what
     // the provider charged for the model it ran on (`perTaskUsd`). So the question
     // "can we afford one more" has a statistical answer — and the one worth asking is
-    // about the NEXT task, not about the average one. Half of all tasks cost more
-    // than the mean, and the distribution is right-skewed (most small, a few
-    // enormous), so a gate set at the mean would wave through the expensive tail
-    // every time.
+    // about the NEXT task, not about the average one. The distribution is
+    // right-skewed (most small, a few enormous), so a gate set at the mean would
+    // wave through the expensive tail every time.
     //
     // Hence a one-sided upper PREDICTION bound: the cost that one more task will
     // come in under, with the configured confidence. That is what `autoBudgetConfidence`

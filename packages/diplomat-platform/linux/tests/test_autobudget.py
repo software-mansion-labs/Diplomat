@@ -158,8 +158,8 @@ def test_a_priced_ledger_refuses_a_window_that_cannot_cover_a_task(monkeypatch):
     assert budget.window == autofix.WINDOW_WEEK
     assert budget.measured, "the ledger priced this — it is not the standing floor"
     assert budget.left == pytest.approx(0.5)
-    # The mean task is 1% of the window (100k of 10M); what is REQUIRED is above
-    # that, because half of all tasks cost more than the mean.
+    # The mean task is 1% of the window (100k of 10M); what is REQUIRED is the
+    # prediction bound above that.
     assert budget.needed > 1.0
 
 
