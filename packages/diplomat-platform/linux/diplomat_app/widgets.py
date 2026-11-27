@@ -657,6 +657,10 @@ class RunningTaskRow(QFrame):
         "An automatic agent running on this machine. It holds a slot of the "
         "automatic-task cap while it works."
     )
+    _RATING_HELP = (
+        "A Pipeline rating running on this machine, with no window. It holds a slot of "
+        "the automatic-task cap while it works."
+    )
     _UNTRACKED_HELP = (
         "A Claude agent running on this machine that no task holds, found by scanning "
         "processes: this applet has no record of starting it (a restart loses the "
@@ -671,10 +675,12 @@ class RunningTaskRow(QFrame):
     )
 
     def __init__(self, *, label: str, detail: str, glyph: str, hex_color: str,
-                 tracked: bool, awaiting_input: bool = False) -> None:
+                 tracked: bool, awaiting_input: bool = False, rating: bool = False) -> None:
         super().__init__()
         if awaiting_input:
             self.setToolTip(self._AWAITING_HELP)
+        elif rating:
+            self.setToolTip(self._RATING_HELP)
         else:
             self.setToolTip(self._HELP if tracked else self._UNTRACKED_HELP)
         self.setStyleSheet(

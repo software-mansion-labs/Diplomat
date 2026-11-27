@@ -751,7 +751,7 @@ struct PipelineDetail: View {
     }
 
     var rateEnabled: Bool { enabled && !forcedRate && banUnread == nil && item.rateRefused == nil }
-    var rateTip: String { banUnread ?? item.rateRefused ?? "Rate it in a sync started now, ahead of every limit" }
+    var rateTip: String { banUnread ?? item.rateRefused ?? "Queue its rating from a sync started now, past the ones a sync asks for itself" }
     var fractureEnabled: Bool {
         enabled && !forcedFracture && badge == nil && banUnread == nil && item.fractureRefused == nil
     }

@@ -1132,7 +1132,7 @@ class PipelineView(QWidget):
             btn = _small_button("Rate asked" if asked else "Rate now",
                                 lambda: st.pipeline_force_now("rate", item_id))
             btn.setToolTip(plain_tooltip(
-                refused or "Rate it in a sync started now, ahead of every limit"))
+                refused or "Queue its rating from a sync started now, past the ones a sync asks for itself"))
             btn.setEnabled(on and not asked and not refused)
             self.buttons["rate"] = btn
         if can_fracture(item, edges, rooted):

@@ -201,8 +201,8 @@ private final class Trackers {
     /// Creates GitHub, then Linear, makes all the same though the call fails.
     var createsLost = 0
     var linearCreatesLost = 0
-    /// Run before an `Item` read of an issue or PR answers, as a `claude` call starts, and
-    /// before a PR's diff is read.
+    /// Run before an `Item` read of an issue or PR answers (which `ghFails` set there fails),
+    /// as a `claude` call starts, and before a PR's diff is read.
     var onItem: ((Int) -> Void)?
     var onClaude: ((String) -> Void)?
     var onDiff: ((Int) -> Void)?
@@ -343,6 +343,7 @@ private final class Trackers {
                 guard let n = args.first(where: { $0.hasPrefix("number=") }).flatMap({ Int($0.dropFirst(7)) }),
                       args.contains("-F") else { return failed("Variable $number was not provided") }
                 onItem?(n)
+                if ghFails { return failed("Bad Gateway (HTTP 502)") }
                 var node: [String: Any]
                 if let i = issues.first(where: { $0.number == n }) {
                     node = issueNode(i)
@@ -890,10 +891,25 @@ private func fixture() -> Trackers {
 private typealias Synced = (result: PipelineTickResult, writes: [String], claude: [String], events: [PipelineEvent])
 
 /// One sync and what it did; its events are those at `now`, so give each sync its own.
+/// With `drain`, a front-end's part too: each rating it asked for is run as its queued job
+/// would be, and a second sync, forcing nothing, applies the answers; the result is the
+/// second's, with the first's notices ahead of its own, as a front-end logs both.
 private func sync(_ t: Trackers, _ settings: PipelineSettings, _ dir: URL, _ now: Date,
-                  key: String? = smokeKey) -> Synced {
+                  key: String? = smokeKey, drain: Bool = true) -> Synced {
     let w = t.writes.count, c = t.claudeCalls.count
-    let r = PipelineTick.run(settings: settings, now: now, dir: dir, io: t.io(key: key))
+    var r = PipelineTick.run(settings: settings, now: now, dir: dir, io: t.io(key: key))
+    let asked = r.effects.compactMap { e -> (String, String)? in
+        if case .rate(_, _, let url, let stamp, _, _) = e { return (url, stamp) }
+        return nil
+    }
+    if drain && !asked.isEmpty {
+        for (url, stamp) in asked { _ = PipelineRateJob.run(item: url, stamp: stamp, dir: dir, io: t.io(key: key)) }
+        var again = settings
+        again.force = nil
+        let first = r.notices
+        r = PipelineTick.run(settings: again, now: now, dir: dir, io: t.io(key: key))
+        r.notices = first + r.notices.filter { !first.contains($0) }
+    }
     return (r, Array(t.writes[w...]), Array(t.claudeCalls[c...]), r.events.filter { $0.at == now })
 }
 
@@ -936,6 +952,10 @@ private func trail(_ events: [PipelineEvent], _ r: PipelineTickResult) -> [Strin
     events.map { e in "\(r.items.first { $0.id == e.item }?.label ?? e.item) \(e.kind.rawValue)" }
 }
 
+private func rateFX(_ url: String, _ n: Int, _ stamp: String, forced: Bool = false,
+                    author: String = "reporter") -> PipelineEffect {
+    .rate(repo: "acme/app", number: n, url: url, stamp: stamp, forced: forced, author: author)
+}
 private func reviewFX(_ n: Int, _ head: String) -> PipelineEffect {
     .review(repo: "acme/app", number: n, url: prURL(n), headSha: head, author: "")
 }
@@ -946,7 +966,7 @@ private func fixFX(_ n: Int, author: String = "reporter") -> PipelineEffect {
 func pipelineSmoke() throws {
     section("pipeline")
     let model = try CoreAssets.pipeline()
-    check(model.rater.model == "sonnet" && model.rater.prModel == "opus" && model.rater.perSync == 4)
+    check(model.rater.model == "sonnet" && model.rater.prModel == "opus" && model.rater.asks == 4)
     check(model.raterSchema.contains("\"risk\"") && model.fractureSchema.contains("\"parts\""))
 
     // ---- The floor a diff puts under a PR's rating ----
@@ -1177,7 +1197,11 @@ func pipelineSmoke() throws {
     check(fix == #"{"author":"reporter","key":"pipeline-fix:https://github.com/acme/app/issues/1","kind":"fixIssue","#
           + #""number":1,"repo":"acme/app","stamp":"fix","url":"https://github.com/acme/app/issues/1"}"#,
           "fix effect JSON: \(fix)")
-    for effect in [reviewFX(15, sha("e5")), fixFX(1),
+    let rateJSON = String(decoding: try CommsLog.encoder.encode(rateFX(issueURL(1), 1, "3", forced: true)), as: UTF8.self)
+    check(rateJSON == #"{"author":"reporter","forced":true,"key":"pipeline-rate:https://github.com/acme/app/issues/1","#
+          + #""kind":"rate","number":1,"repo":"acme/app","stamp":"3","url":"https://github.com/acme/app/issues/1"}"#,
+          "rate effect JSON: \(rateJSON)")
+    for effect in [reviewFX(15, sha("e5")), fixFX(1), rateFX(prURL(11), 11, "2", author: "op"),
                    .fixLinear(repo: "acme/app", identifier: "ENG-1", url: linearURL("ENG-1"), text: "a\nb",
                               author: "Reporter")] {
         check(try CommsLog.decoder.decode(PipelineEffect.self, from: CommsLog.encoder.encode(effect)) == effect)
@@ -1232,33 +1256,38 @@ func pipelineSmoke() throws {
     // #13's `cleared` is this Diplomat's: an earlier sync rated it low/low again at c3.
     try seedRerate(dir, 13, sha("c3"), at: t0.addingTimeInterval(-3600))
 
-    // Sync 1: four ratings (the budget), clean PRs re-rated first.
+    // Sync 1: four ratings (the budget) asked for, clean PRs' second ratings first, run as
+    // queued jobs, and applied by the sync after, which asks for the next four.
     let s1 = sync(t, every, dir, t0)
     check(s1.result.notices.isEmpty, "sync 1 notices: \(s1.result.notices)")
-    check(s1.claude == ["opus Cache avatars", "opus Trim whitespace in names", "opus Fix the docs link",
-                        "opus Bump deps (not ENG-30)", "sonnet fracture Split the storage layer"],
+    check(s1.claude == ["sonnet fracture Split the storage layer", "opus Cache avatars", "opus Trim whitespace in names",
+                        "opus Fix the docs link", "opus Bump deps (not ENG-30)"],
           "sync 1 claude calls: \(s1.claude)")
     check(s1.writes == [
         "-diplomat:cleared #15",
-        "+risk:medium #17", "-risk:low #17",
-        // Its first rating puts it on the fast track.
-        "+risk:low #11", "+complexity:low #11", "+diplomat:fast-track #11",
-        "+risk:high #12", "+complexity:low #12",
-        "+diplomat:cleared #14", "-diplomat:fast-track #17",
         // Claimed before the split, so no other sync splits it meanwhile.
         "label diplomat:fractured exists", "+diplomat:fractured #3",
         "issue #101 Extract the storage protocol", "sub #3 #101",
         "issue #102 Move SQLite behind it", "sub #3 #102",
         "merge #13 --squash \(sha("c3"))",
+        "+risk:medium #17", "-risk:low #17",
+        // Its first rating puts it on the fast track.
+        "+risk:low #11", "+complexity:low #11", "+diplomat:fast-track #11",
+        "+risk:high #12", "+complexity:low #12",
+        "+diplomat:cleared #14", "-diplomat:fast-track #17",
     ], "sync 1 writes: \(s1.writes)")
-    check(s1.result.effects == [reviewFX(15, sha("e5")), reviewFX(11, sha("a1"))],
+    check(s1.result.effects == [rateFX(linearURL("ENG-1"), 0, "5", author: "Reporter"), rateFX(issueURL(1), 1, "6"),
+                                rateFX(issueURL(6), 6, "7"), rateFX(issueURL(101), 101, "8"),
+                                reviewFX(15, sha("e5")), reviewFX(11, sha("a1"))],
           "sync 1 effects: \(s1.result.effects)")
     check(trail(s1.events, s1.result) == [
-        "#15 labelled", "#17 rerated", "#17 labelled", "#14 rerated",
+        "#15 labelled", "#13 cleared",
+        "#3 child", "#3 child", "#3 fractured", "#13 clean", "#14 clean", "#17 clean", "#13 merged",
+        "#17 asked", "#14 asked", "#11 asked", "#12 asked", "#15 asked",
+        "#17 rerated", "#17 labelled", "#14 rerated",
         "#11 rated", "#11 labelled", "#11 fast-track", "#12 rated", "#12 labelled",
-        "#13 cleared", "#14 cleared", "#17 labelled",
-        "#3 child", "#3 child", "#3 fractured", "#13 clean", "#14 held", "#14 clean", "#13 merged",
-        "#15 asked", "#11 asked",
+        "#14 cleared", "#17 labelled", "#14 held",
+        "ENG-1 asked", "#1 asked", "#6 asked", "#101 asked", "#11 asked",
     ], "sync 1 events: \(trail(s1.events, s1.result))")
     check(s1.result.unread.isEmpty, "sync 1 unread: \(s1.result.unread)")
     check(s1.events.contains { $0.kind == .rated && $0.detail.hasPrefix("high risk, low complexity, floored by its diff (touches package.json") },
@@ -1298,7 +1327,7 @@ func pipelineSmoke() throws {
     check(item(s1.result, prURL(12))?.floor == rating(.high, .low))
     check(item(s1.result, prURL(15))?.cleanAt == sha("e0"))
     let writable = s1.result.items.filter(\.writable).map(\.label).sorted()
-    check(writable == ["#1", "#11", "#12", "#14", "#15", "#17", "#24", "#25", "#26", "#3", "#4", "#6",
+    check(writable == ["#1", "#101", "#102", "#11", "#12", "#14", "#15", "#17", "#24", "#25", "#26", "#3", "#4", "#6",
                       "ENG-1", "ENG-3"],
           "writable: \(writable)")
     let edges1 = Set(s1.result.graph.edges.map { "\($0.from) \($0.kind.rawValue) \($0.to)" })
@@ -1306,22 +1335,24 @@ func pipelineSmoke() throws {
                      "\(prURL(17)) stacked \(prURL(19))", "\(issueURL(20)) fixes \(prURL(10))",
                      "\(issueURL(1)) fixes \(prURL(10))", "\(issueURL(24)) fixes \(prURL(14))",
                      "\(issueURL(25)) fixes \(prURL(15))", "\(issueURL(26)) fixes \(prURL(17))",
-                     "\(issueURL(27)) fixes \(prURL(13))"], "sync 1 edges: \(edges1)")
+                     "\(issueURL(27)) fixes \(prURL(13))", "\(issueURL(3)) child \(issueURL(101))",
+                     "\(issueURL(3)) child \(issueURL(102))"], "sync 1 edges: \(edges1)")
     check(item(s1.result, issueURL(20)).map { "\($0.label) \($0.title) \($0.state) \($0.writable)" }
           == "#20 Logout keeps the cache closed false", "a closed issue a merged PR closed")
     check(item(s1.result, issueURL(1))?.state == "open", "an issue read open keeps its open entry")
     check(s1.result.graph.nodes.count == s1.result.items.count)
     check(PipelineLog.last(in: dir) == s1.result, "last.json holds the sync's result")
 
-    // Sync 2: forced ratings first and outside the budget; then the writable issues.
+    // Sync 2: forced ratings first and outside the budget, #101's asked already; then the
+    // writable issues sync 1 asked for.
     every.force = PipelineSettings.Force(rate: [issueURL(2), linearURL("ENG-2"), issueURL(101), issueURL(102),
                                                 prURL(16), issueURL(20)])
     let s2 = sync(t, every, dir, t0.addingTimeInterval(300))
     every.force = nil
     check(s2.result.notices == ["#16 was not rated: only my own open PRs are", "#20 was not rated: it is closed"],
           "sync 2 notices: \(s2.result.notices)")
-    check(s2.claude == ["sonnet Upload crashes on big files", "sonnet Payment flow redesign",
-                        "sonnet Extract the storage protocol", "sonnet Move SQLite behind it",
+    check(s2.claude == ["sonnet Extract the storage protocol", "sonnet Upload crashes on big files",
+                        "sonnet Payment flow redesign", "sonnet Move SQLite behind it",
                         "sonnet Wrong color in the header", "sonnet Typo on the login button",
                         "sonnet Flaky retry logic"], "sync 2 claude calls: \(s2.claude)")
     check(s2.writes == [
@@ -1364,7 +1395,7 @@ func pipelineSmoke() throws {
     let s4 = sync(t, every, dir, t0.addingTimeInterval(900))
     check(s4.claude == ["opus Guard nil avatar"], "sync 4 claude calls: \(s4.claude)")
     check(s4.writes == ["+diplomat:cleared #15", "merge #15 --squash \(sha("e5"))"], "sync 4 writes: \(s4.writes)")
-    check(trail(s4.events, s4.result) == ["#15 rerated", "#15 cleared", "#14 held", "#15 clean", "#15 merged"],
+    check(trail(s4.events, s4.result) == ["#14 held", "#15 clean", "#15 asked", "#15 rerated", "#15 cleared", "#15 merged"],
           "sync 4 events: \(trail(s4.events, s4.result))")
     check(stage(s4.result, prURL(14)) == "cleared/fast (@bob has commented or reviewed)")
     check(s4.result.effects == Array(effects2.dropFirst()), "sync 4 effects: \(s4.result.effects)")
@@ -1450,7 +1481,7 @@ func pipelineSmoke() throws {
     check(medium.writes == ["label risk:medium exists", "+risk:medium #13", "-risk:low #13",
                             "-diplomat:fast-track #13", "-diplomat:cleared #13"],
           "rated medium, both fast-track labels come off: \(medium.writes)")
-    check(trail(medium.events, medium.result) == ["#13 rerated", "#13 labelled", "#13 labelled"],
+    check(trail(medium.events, medium.result) == ["#13 clean", "#13 asked", "#13 rerated", "#13 labelled", "#13 labelled"],
           "hand-cleared, medium: \(trail(medium.events, medium.result))")
     check(stage(medium.result, prURL(13)) == "human/human", "hand-cleared, medium: \(stage(medium.result, prURL(13)))")
     let (hl, lowAgain) = handCleared(["risk": "low", "complexity": "low", "why": "one line"], "hand-low")
@@ -1458,7 +1489,7 @@ func pipelineSmoke() throws {
     check(lowAgain.claude == ["opus Clear the cache on logout"] && rated != nil && merged != nil && rated! < merged!,
           "rated again before the merge: \(hl.sequence)")
     check(lowAgain.writes == ["merge #13 --squash \(sha("c3"))"], "hand-cleared, low: \(lowAgain.writes)")
-    check(trail(lowAgain.events, lowAgain.result) == ["#13 rerated", "#13 cleared", "#13 clean", "#13 merged"],
+    check(trail(lowAgain.events, lowAgain.result) == ["#13 clean", "#13 asked", "#13 rerated", "#13 cleared", "#13 merged"],
           "hand-cleared, low: \(trail(lowAgain.events, lowAgain.result))")
     check(lowAgain.events.first { $0.kind == .rerated }.map { "\($0.head ?? "") \($0.rating == low)" }
           == "\(sha("c3")) true", "the re-rate that cleared it names its head and rating")
@@ -1548,6 +1579,7 @@ func pipelineSmoke() throws {
     try pipelineGuards(base: base, root: root, team: team, t0: t0)
     try pipelineMergeSync(base: base, root: root, team: team, t0: t0)
     try pipelineRatingPass1(base: base, root: root, team: team, t0: t0)
+    try pipelineRateJobs(base: base, root: root, t0: t0)
 
     // The real gh and claude get neither token, and claude runs in the checkout.
     let stubs = base.appendingPathComponent("live-checkout")
@@ -2031,7 +2063,8 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     check(sh.result.effects.isEmpty && stageOf(sh.result, issueURL(1))
           == "candidate/fast (@MALLORY is on the prompt-injection ban list)", "a ban in another case: \(sh.result.effects)")
 
-    // A ban written mid-sync stops that sync's next rating, label, split, ask and merge.
+    // A ban written mid-sync stops that sync's next label, split, ask and merge; one written
+    // while a rating job runs keeps its answer, and every other, off the item.
     let mallory = "@mallory is on the prompt-injection ban list"
     try ban([])
     let midRating = only([1, 6])
@@ -2041,9 +2074,20 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     }
     midRating.onClaude = { _ in try? ban(["mallory"]) }
     let mr = sync(midRating, PipelineSettings(roots: [root], rate: true), dir("ban-mid-rating"), t0)
-    check(mr.claude == ["sonnet Typo on the login button"] && mr.writes.isEmpty
-          && mr.result.notices == ["#6 was not rated: \(mallory)"],
-          "banned during a rating: \(mr.claude) \(mr.writes) \(mr.result.notices)")
+    check(mr.claude == ["sonnet Typo on the login button", "sonnet Flaky retry logic"] && mr.writes.isEmpty
+          && item(mr.result, issueURL(1))?.rating == nil && item(mr.result, issueURL(6))?.rating == nil
+          && mr.result.effects.isEmpty,
+          "banned during a rating: \(mr.claude) \(mr.writes) \(mr.result.effects)")
+    try ban([])
+    let lateBan = only([1])
+    lateBan.issues[0].author = "mallory"
+    var forceOne = PipelineSettings(roots: [root], rate: true)
+    forceOne.force = .init(rate: [issueURL(1)])
+    let lb1 = sync(lateBan, forceOne, dir("ban-after-ask"), t0, drain: false)
+    try ban(["mallory"])
+    let lb2 = sync(lateBan, PipelineSettings(roots: [root], rate: true), dir("ban-after-ask"), later(5), drain: false)
+    check(lb1.result.effects == [rateFX(issueURL(1), 1, "1", forced: true, author: "mallory")] && lb2.result.effects.isEmpty,
+          "banned after Rate now asked: \(lb1.result.effects) \(lb2.result.effects)")
     try ban([])
     let midAsks = only([1, 13, 14, 24, 27])
     midAsks.issues[issue(midAsks, 1)].labels = lowLow
@@ -2145,13 +2189,13 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
           "an issue rated medium by hand, its labels refused: \(ri2.result.effects) \(stageOf(ri2.result, issueURL(24)))")
     // ...and one whose read before the write failed once is written at the next sync.
     let flaky = only([1])
-    flaky.onClaude = { _ in flaky.ghFails = true }
+    flaky.onItem = { _ in flaky.ghFails = true }
     let fl1 = sync(flaky, rateFix, dir("recheck-failed-once"), t0)
     let flState = try JSONSerialization.jsonObject(with: Data(contentsOf: dir("recheck-failed-once")
         .appendingPathComponent("state.json"))) as? [String: Any]
     let flRetry = (flState?["retry"] as? [String: Any])?[issueURL(1)] as? [String: Any]
     check(flRetry?["failures"] as? Int == 1, "a failed read before the write backs off: \(String(describing: flRetry))")
-    flaky.onClaude = nil
+    flaky.onItem = nil
     flaky.ghFails = false
     let fl2 = sync(flaky, rateFix, dir("recheck-failed-once"), later(5))
     check(!fl1.writes.contains("+risk:low #1") && fl2.claude.isEmpty
@@ -2997,7 +3041,7 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
     let rateOnly = PipelineSettings(roots: [root], rate: true)
     let tries = [0.0, 5, 10, 15, Double(15 + 24 * 60)].map { sync(flaky, rateOnly, dir("backoff"), later($0)).claude }
     check(tries == [["sonnet Flaky 1", "sonnet Flaky 2", "sonnet Flaky 3", "sonnet Flaky 4"],
-                    ["sonnet Flaky 1", "sonnet Flaky 5"], [], ["sonnet Flaky 1"], ["sonnet Flaky 1"]],
+                    ["sonnet Flaky 5", "sonnet Flaky 1"], [], ["sonnet Flaky 1"], ["sonnet Flaky 1"]],
           "a failing rating's tries: \(tries)")
     let flakySplit = only([3])
     flakySplit.fractures["Split the storage layer"] = ["parts": "none"]
@@ -3170,7 +3214,7 @@ private func pipelineFreshReads(base: URL, root: PipelineSettings.Root, team: Pi
 
     // Each write waits on a read of its item made right before it.
     let taken = only([1])
-    taken.onClaude = { _ in
+    taken.onItem = { _ in
         taken.issues[0].assignees = ["bob"]
         taken.issues[0].updated = at("11:58")
     }
@@ -3182,7 +3226,7 @@ private func pipelineFreshReads(base: URL, root: PipelineSettings.Root, team: Pi
           "assigned while rated: \(a1.writes) \(a1.result.notices) \(a2.claude)")
     let linTaken = only([])
     linTaken.tickets = [fixture().tickets[0]]
-    linTaken.onClaude = { _ in linTaken.tickets[0].assignee = ("U_ALICE", "Alice") }
+    linTaken.onLinear = { if $0 == "Issue" { linTaken.tickets[0].assignee = ("U_ALICE", "Alice") } }
     let la = sync(linTaken, PipelineSettings(roots: [root], linearTeams: [team], rate: true),
                   dir("linear-assigned-while-rated"), t0)
     check(la.claude == ["sonnet Wrong color in the header"] && la.writes.isEmpty
@@ -3643,6 +3687,8 @@ private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: Pipeli
             return .fixLinear(repo: "acme/app-old", identifier: id, url: url, text: text, author: author)
         case .review(_, let n, let url, let head, let author):
             return .review(repo: "acme/app-old", number: n, url: url, headSha: head, author: author)
+        case .rate(_, let n, let url, let stamp, let forced, let author):
+            return .rate(repo: "acme/app-old", number: n, url: url, stamp: stamp, forced: forced, author: author)
         }
     }
     check(old.writes == named.writes && old.claude == named.claude && old.result.notices == named.result.notices
@@ -4064,10 +4110,11 @@ private func pipelineKept(base: URL, root: PipelineSettings.Root, team: Pipeline
     let fixLinear = PipelineSettings(roots: [root], linearTeams: [team], rate: true, fix: true)
     func racing(_ name: String, _ meanwhile: @escaping (Trackers) -> Void) -> (Trackers, Synced) {
         let t = only([1])
+        t.issues[0].labels = lowLow
         t.labelBook.append(("lab-rm", "risk:medium", nil))
         t.tickets = [.init(id: "lin-9", identifier: "ENG-9", title: "Wrong margin", labels: ["lab-rl", "lab-cl"],
                            updated: at("10:00"))]
-        t.onClaude = { _ in meanwhile(t) }
+        t.onLinear = { if $0 == "Recheck" { meanwhile(t) } }
         return (t, sync(t, fixLinear, dir(name), t0))
     }
     func asksLinear(_ s: Synced) -> Bool { s.result.effects.contains { $0.key == "pipeline-fix:" + linearURL("ENG-9") } }
@@ -4092,7 +4139,7 @@ private func pipelineKept(base: URL, root: PipelineSettings.Root, team: Pipeline
         ("linked", { $0.tickets[0].attachments = [prURL(40)] }, "it changed since this sync read it: its links changed"),
         ("linked past a read", { $0.tickets[0].moreAttachments = [prURL(40)] },
          "it changed since this sync read it: its links changed"),
-        ("unreadable", { t in t.onLinear = { if $0 == "Recheck" { t.linearDown = true } } },
+        ("unreadable", { $0.linearDown = true },
          "it could not be read again right before its fix was asked for"),
     ]
     for (what, meanwhile, hold) in changed {
@@ -4507,15 +4554,24 @@ private func pipelineCoverage9(base: URL, root: PipelineSettings.Root, team: Pip
               + "<!-- Diplomat: part 1 of \(issueURL(3)) by reporter at 2026-11-20T12:00:00Z -->",
           "a part whose model text forges markers, as filed: \(String(reflecting: filed?.title)) \(String(reflecting: filed?.body)) \(logged)")
 
-    // A rating is of the diff at the head it is saved under.
+    // A rating is of the diff at the head it is saved under: one of a head the PR has left is
+    // dropped, and the PR asked about at its new head.
     let pushed = only([4, 11])
     pushed.headDiffs[sha("a1")] = "diff --git a/deps/lib b/deps/lib\nindex 1..2 160000\n--- a/deps/lib\n+++ b/deps/lib\n"
         + "@@ -1 +1 @@\n-Subproject commit \(sha("aa"))\n+Subproject commit \(sha("bb"))\n"
-    pushed.onDiff = { _ in pushed.prs[0].head = sha("a2") }
+    pushed.onDiff = { _ in
+        pushed.onDiff = nil
+        pushed.prs[0].head = sha("a2")
+    }
+    func ratedAt(_ s: Synced) -> [String] {
+        s.events.filter { $0.kind == .rated && $0.item == prURL(11) }
+            .map { "\($0.head.map { String($0.prefix(2)) } ?? "-") \($0.rating.map { "\($0.risk)/\($0.complexity)" } ?? "-")" }
+    }
     let pd = sync(pushed, PipelineSettings(roots: [root], rate: true), dir("diff-pinned"), t0)
-    let ratedAt = pd.events.filter { $0.kind == .rated && $0.item == prURL(11) }
-        .map { "\($0.head == sha("a1") ? "a1" : $0.head ?? "-") \($0.rating.map { "\($0.risk)/\($0.complexity)" } ?? "-")" }
-    check(ratedAt == ["a1 high/low"], "a PR pushed to as its diff is read: \(ratedAt)")
+    let pd2 = sync(pushed, PipelineSettings(roots: [root], rate: true), dir("diff-pinned"), t0.addingTimeInterval(300))
+    check(ratedAt(pd).isEmpty && pd.result.effects.map(\.key) == ["pipeline-rate:" + prURL(11)]
+          && ratedAt(pd2) == ["a2 low/low"],
+          "a PR pushed to as its diff is read: \(ratedAt(pd)) \(pd.result.effects) then \(ratedAt(pd2))")
 
     // Each item's refusals are the forced Rate now's and Fracture's.
     func table(_ s: Synced, _ ids: [String], split: Bool) -> [String] {
@@ -4840,7 +4896,8 @@ private func pipelinePins9(base: URL, root: PipelineSettings.Root, team: Pipelin
 
     let moving = only([])
     moving.tickets = [fixture().tickets[0]]
-    moving.onClaude = { _ in
+    moving.onLinear = {
+        guard $0 == "Issue" else { return }
         moving.tickets[0].identifier = "OPS-1"
         moving.tickets[0].team = "OPS"
     }
@@ -4922,6 +4979,320 @@ private func pipelinePins10(base: URL, root: PipelineSettings.Root, team: Pipeli
         check(!edges.contains { $0.kind == .stacked },
               "a PR based on the \(branch) branch: \(edges.map { "\($0.from) \($0.kind.rawValue) \($0.to)" })")
     }
+}
+
+/// A rating's queued job, from the ask a sync makes to the answer the sync after applies.
+private func pipelineRateJobs(base: URL, root: PipelineSettings.Root, t0: Date) throws {
+    section("pipeline rate jobs")
+    func dir(_ name: String) -> URL { base.appendingPathComponent("rate-jobs-" + name) }
+    func later(_ minutes: Double) -> Date { t0.addingTimeInterval(minutes * 60) }
+    /// The files in `rate/`, by stamp: `<stamp>.job.json`, `<stamp>.answer.json`.
+    func files(_ d: URL) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: d.appendingPathComponent("rate").path)) ?? [])
+            .map { String($0.split(separator: "-").last ?? "") }.sorted()
+    }
+    func asks(_ s: Synced) -> [PipelineEffect] { s.result.effects.filter { $0.key.hasPrefix("pipeline-rate:") } }
+    func state(_ d: URL) -> [String: Any] {
+        (try? JSONSerialization.jsonObject(with: Data(contentsOf: d.appendingPathComponent("state.json")))) as? [String: Any] ?? [:]
+    }
+    let rateFix = PipelineSettings(roots: [root], rate: true, fix: true)
+    let lowOn1 = ["label risk:low exists", "+risk:low #1", "label complexity:low exists", "+complexity:low #1"]
+
+    // A sync asks and runs nothing; the job runs once; the sync after applies its answer.
+    let t = only([1])
+    let d = dir("lifecycle")
+    let a1 = sync(t, rateFix, d, t0, drain: false)
+    let a2 = sync(t, rateFix, d, later(5), drain: false)
+    check(a1.claude.isEmpty && a1.writes.isEmpty && a1.result.effects == [rateFX(issueURL(1), 1, "1")]
+          && files(d) == ["1.job.json"] && item(a1.result, issueURL(1))?.rating == nil
+          && trail(a1.events, a1.result) == ["#1 asked"],
+          "a rating asked for: \(a1.claude) \(a1.result.effects) \(files(d))")
+    check(a2.claude.isEmpty && a2.result.effects == a1.result.effects && a2.events.isEmpty,
+          "asked for once: \(a2.claude) \(a2.result.effects) \(trail(a2.events, a2.result))")
+    let ran = PipelineRateJob.run(item: issueURL(1), stamp: "1", dir: d, io: t.io())
+    let calls = t.claudeCalls.count
+    let again = PipelineRateJob.run(item: issueURL(1), stamp: "1", dir: d, io: t.io())
+    let gone = PipelineRateJob.run(item: issueURL(1), stamp: "2", dir: d, io: t.io())
+    check(ran == .rated("low risk, low complexity") && again == .answered && gone == .superseded
+          && t.claudeCalls.count == calls && files(d) == ["1.answer.json", "1.job.json"],
+          "the job: \(ran) \(again) \(gone) \(files(d))")
+    let a3 = sync(t, rateFix, d, later(10), drain: false)
+    check(a3.claude.isEmpty && a3.writes == lowOn1 && asks(a3).isEmpty
+          && a3.result.effects == [fixFX(1)] && files(d).isEmpty && trail(a3.events, a3.result) == ["#1 rated", "#1 labelled", "#1 asked"],
+          "its answer applied: \(a3.writes) \(a3.result.effects) \(files(d)) \(trail(a3.events, a3.result))")
+    let a4 = sync(t, rateFix, d, later(15), drain: false)
+    check(asks(a4).isEmpty && a4.claude.isEmpty && (state(d)["rateSeq"] as? Int) == 1, "rated once: \(a4.result.effects)")
+
+    // A candidate Rate now asked about is not fixed before the rating is in.
+    var rateNow = rateFix
+    rateNow.force = .init(rate: [issueURL(1)])
+    let held = only([1])
+    held.issues[0].labels = ["risk:low", "complexity:low"]
+    held.ratings["Typo on the login button"] = ["risk": "medium", "complexity": "low", "why": "x"]
+    let h1 = sync(held, rateNow, dir("held"), t0, drain: false)
+    let h2 = sync(held, rateFix, dir("held"), later(5))
+    check(h1.result.effects == [rateFX(issueURL(1), 1, "1", forced: true)]
+          && stageOf(h1.result, issueURL(1)) == "candidate/fast (a rating asked for it is not in yet)"
+          && h2.result.effects.isEmpty && stageOf(h2.result, issueURL(1)) == "human/human",
+          "asked for, not fixed: \(h1.result.effects) \(stageOf(h1.result, issueURL(1))) then \(h2.result.effects)")
+
+    // Cancelled from the queue: not asked again until Rate now.
+    let c = only([1])
+    let cd = dir("cancel")
+    _ = sync(c, rateFix, cd, t0, drain: false)
+    let cancelled = PipelineRateJob.cancel(item: issueURL(1), stamp: "1", dir: cd)
+    let twice = PipelineRateJob.cancel(item: issueURL(1), stamp: "1", dir: cd)
+    let missing = PipelineRateJob.cancel(item: issueURL(1), stamp: "7", dir: cd)
+    let c2 = sync(c, rateFix, cd, later(5), drain: false)
+    let c3 = sync(c, rateFix, cd, later(10), drain: false)
+    check(cancelled && !twice && !missing && c.claudeCalls.isEmpty && asks(c2).isEmpty && asks(c3).isEmpty
+          && c2.writes.isEmpty && (state(cd)["declined"] as? [String]) == [issueURL(1)] && files(cd).isEmpty,
+          "cancelled: \(cancelled) \(twice) \(missing) \(c2.result.effects) \(c3.result.effects) \(files(cd))")
+    let c4 = sync(c, rateNow, cd, later(15), drain: false)
+    let c5 = sync(c, rateFix, cd, later(20), drain: false)
+    check(asks(c4) == [rateFX(issueURL(1), 1, "2", forced: true)] && asks(c5) == asks(c4)
+          && (state(cd)["declined"] as? [String]) == [],
+          "Rate now after a cancel: \(c4.result.effects) \(c5.result.effects)")
+
+    // Rate now on a rating already asked for marks that ask forced, and asks nothing new.
+    let f = only([1])
+    let fd = dir("forced-ask")
+    _ = sync(f, rateFix, fd, t0, drain: false)
+    let f2 = sync(f, rateNow, fd, later(5), drain: false)
+    check(asks(f2) == [rateFX(issueURL(1), 1, "1", forced: true)] && files(fd) == ["1.job.json"],
+          "Rate now on an ask: \(f2.result.effects) \(files(fd))")
+    var forcedOnly = PipelineSettings(roots: [root], fix: true)
+    forcedOnly.force = rateNow.force
+    let f3 = sync(only([1]), forcedOnly, dir("forced-rate-off"), t0, drain: false)
+    check(asks(f3) == [rateFX(issueURL(1), 1, "1", forced: true)], "Rate now with Rate off: \(f3.result.effects)")
+
+    // A PR pushed to before its answer is applied: the answer is dropped, swept, and the PR
+    // asked about at its new head.
+    let p = only([11])
+    let pd = dir("pushed")
+    let p1 = sync(p, PipelineSettings(roots: [root], rate: true), pd, t0, drain: false)
+    _ = PipelineRateJob.run(item: prURL(11), stamp: "1", dir: pd, io: p.io())
+    p.prs[0].head = sha("a2")
+    let p2 = sync(p, PipelineSettings(roots: [root], rate: true), pd, later(5), drain: false)
+    check(asks(p1) == [rateFX(prURL(11), 11, "1", author: "op")] && asks(p2) == [rateFX(prURL(11), 11, "2", author: "op")]
+          && p2.writes.isEmpty && !p2.events.contains { $0.kind == .rated }
+          && files(pd) == ["2.job.json"],
+          "pushed to as rated: \(p1.result.effects) \(p2.result.effects) \(p2.writes) \(files(pd))")
+    let q = only([11])
+    let qd = dir("pushed-queued")
+    _ = sync(q, PipelineSettings(roots: [root], rate: true), qd, t0, drain: false)
+    q.prs[0].head = sha("a2")
+    let q2 = sync(q, PipelineSettings(roots: [root], rate: true), qd, later(5), drain: false)
+    check(asks(q2) == [rateFX(prURL(11), 11, "2", author: "op")] && files(qd) == ["2.job.json"],
+          "pushed to while queued: \(q2.result.effects) \(files(qd))")
+
+    // A second rating's answer is no second rating once a person took the first one's labels
+    // off: the PR is asked about again, for a first rating.
+    let relabelled = only([14, 24])
+    let rd = dir("relabelled")
+    let track = PipelineSettings(roots: [root], rate: true, fastTrack: true)
+    let r1 = sync(relabelled, track, rd, t0, drain: false)
+    _ = PipelineRateJob.run(item: prURL(14), stamp: "1", dir: rd, io: relabelled.io())
+    relabelled.prs[0].labels = ["diplomat:fast-track"]
+    let r2 = sync(relabelled, track, rd, later(5), drain: false)
+    check(asks(r1) == [rateFX(prURL(14), 14, "1", author: "op")] && !r2.events.contains { $0.kind == .rerated }
+          && asks(r2) == [rateFX(prURL(14), 14, "2", author: "op")],
+          "rating labels taken off before the second rating: \(r1.result.effects) \(trail(r2.events, r2.result)) "
+          + "\(r2.result.effects)")
+
+    // A job that answers while a sync runs is not handed to the queue again.
+    let midway = only([1, 13, 27])
+    let wd = dir("answered-midway")
+    try seedRerate(wd, 13, sha("c3"), at: later(-60))
+    let rateMerge = PipelineSettings(roots: [root], rate: true, merge: true)
+    midway.onReread = { _ in _ = PipelineRateJob.run(item: issueURL(1), stamp: "1", dir: wd, io: midway.io()) }
+    let w1 = sync(midway, rateMerge, wd, t0, drain: false)
+    let answered = files(wd)
+    let w2 = sync(midway, rateMerge, wd, later(5), drain: false)
+    check(merged(w1) && answered == ["1.answer.json", "1.job.json"] && asks(w1).isEmpty
+          && w2.writes == ["+risk:low #1", "+complexity:low #1"],
+          "answered during the sync that asked: \(w1.writes) \(answered) \(w1.result.effects) \(w2.writes)")
+
+    // At most `asks` unforced ratings wait at once; one answered makes room for one more.
+    let many = only([])
+    many.issues = (1...6).map { .init(number: 40 + $0, title: "Item \($0)", updated: at(String(format: "10:%02d", 10 - $0))) }
+    for n in 1...6 { many.ratings["Item \(n)"] = ["risk": "high", "complexity": "high", "why": "x"] }
+    let md = dir("cap")
+    let rateOnly = PipelineSettings(roots: [root], rate: true)
+    let m1 = sync(many, rateOnly, md, t0, drain: false)
+    let m2 = sync(many, rateOnly, md, later(5), drain: false)
+    _ = PipelineRateJob.run(item: issueURL(41), stamp: "1", dir: md, io: many.io())
+    let m3 = sync(many, rateOnly, md, later(10), drain: false)
+    func numbers(_ s: Synced) -> [String] {
+        asks(s).compactMap { if case .rate(_, let n, _, let stamp, _, _) = $0 { return "\(n)@\(stamp)" }; return nil }
+    }
+    check(numbers(m1) == ["41@1", "42@2", "43@3", "44@4"] && numbers(m2) == numbers(m1)
+          && numbers(m3) == ["42@2", "43@3", "44@4", "45@5"] && m3.writes == ["label risk:high exists", "+risk:high #41", "label complexity:high exists", "+complexity:high #41"],
+          "the cap on asks: \(numbers(m1)) \(numbers(m2)) \(numbers(m3)) \(m3.writes)")
+
+    // Rate switched off drops the asks it did not force, so none holds a fix; on again, asked anew.
+    let off = only([1])
+    let od = dir("switched-off")
+    _ = sync(off, rateFix, od, t0, drain: false)
+    _ = PipelineRateJob.run(item: issueURL(1), stamp: "1", dir: od, io: off.io())
+    let o2 = sync(off, PipelineSettings(roots: [root], fix: true), od, later(5), drain: false)
+    let dropped = files(od), offAsks = (state(od)["rateAsks"] as? [String: Any])?.count ?? 0
+    let o3 = sync(off, rateFix, od, later(10), drain: false)
+    check(o2.writes.isEmpty && asks(o2).isEmpty && dropped.isEmpty && offAsks == 0
+          && o3.writes.isEmpty && asks(o3) == [rateFX(issueURL(1), 1, "2")],
+          "Rate off, then on: \(o2.writes) \(o2.result.effects) \(dropped) \(o3.writes) \(o3.result.effects)")
+    let live = only([1])
+    let ld0 = dir("answer-switched-off")
+    _ = sync(live, rateFix, ld0, t0, drain: false)
+    _ = PipelineRateJob.run(item: issueURL(1), stamp: "1", dir: ld0, io: live.io())
+    PipelineControl(enabled: true, rate: false, fix: true, fastTrack: true, merge: true, fracture: true).save(in: ld0)
+    let lv2 = sync(live, rateFix, ld0, later(5), drain: false)
+    PipelineControl(enabled: true, rate: true, fix: true, fastTrack: true, merge: true, fracture: true).save(in: ld0)
+    let lv3 = sync(live, rateFix, ld0, later(10), drain: false)
+    check(lv2.writes.isEmpty && lv3.writes == lowOn1 && live.claudeCalls.count == 1,
+          "an answer the live Rate switch holds waits: \(lv2.writes) \(lv3.writes) \(live.claudeCalls)")
+    let byHand = only([1])
+    let bd = dir("switched-off-labelled")
+    _ = sync(byHand, rateFix, bd, t0, drain: false)
+    byHand.issues[0].labels = ["risk:low", "complexity:low"]
+    let b2 = sync(byHand, PipelineSettings(roots: [root], fix: true), bd, later(5), drain: false)
+    check(b2.result.effects == [fixFX(1)] && stageOf(b2.result, issueURL(1)) == "candidate/fast",
+          "labelled by hand with Rate off: \(b2.result.effects) \(stageOf(b2.result, issueURL(1)))")
+
+    // Rate now's ask is checked again each sync: at a PR's new head asked anew, its job lost
+    // asked anew, refused dropped.
+    var rateNowPR = PipelineSettings(roots: [root])
+    rateNowPR.force = .init(rate: [prURL(11)])
+    let fp = only([11])
+    let fpd = dir("forced-pushed")
+    let fp1 = sync(fp, rateNowPR, fpd, t0, drain: false)
+    fp.prs[0].head = sha("a2")
+    let fp2 = sync(fp, PipelineSettings(roots: [root]), fpd, later(5), drain: false)
+    let fpFiles = files(fpd)
+    for f in (try? FileManager.default.contentsOfDirectory(at: fpd.appendingPathComponent("rate"), includingPropertiesForKeys: nil)) ?? [] {
+        try? FileManager.default.removeItem(at: f)
+    }
+    let fp3 = sync(fp, PipelineSettings(roots: [root]), fpd, later(10), drain: false)
+    fp.prs[0].labels = ["WIP"]
+    let fp4 = sync(fp, PipelineSettings(roots: [root]), fpd, later(15), drain: false)
+    check(asks(fp1) == [rateFX(prURL(11), 11, "1", forced: true, author: "op")]
+          && asks(fp2) == [rateFX(prURL(11), 11, "2", forced: true, author: "op")] && fpFiles == ["2.job.json"]
+          && asks(fp3) == [rateFX(prURL(11), 11, "3", forced: true, author: "op")]
+          && asks(fp4).isEmpty && fp4.result.notices.contains("#11 was not rated: it carries the label WIP") && files(fpd).isEmpty,
+          "Rate now queued, pushed, lost, then stopped: \(fp2.result.effects) \(fpFiles) \(fp3.result.effects) "
+          + "\(fp4.result.effects) \(fp4.result.notices)")
+
+    let paused = only([11])
+    let hd = dir("forced-switched-off")
+    _ = sync(paused, rateNowPR, hd, t0, drain: false)
+    paused.prs[0].head = sha("a2")
+    PipelineControl(enabled: false, rate: true, fix: true, fastTrack: true, merge: true, fracture: true).save(in: hd)
+    _ = sync(paused, PipelineSettings(roots: [root]), hd, later(5), drain: false)
+    PipelineControl(enabled: true, rate: true, fix: true, fastTrack: true, merge: true, fracture: true).save(in: hd)
+    let hd3 = sync(paused, PipelineSettings(roots: [root]), hd, later(10), drain: false)
+    check(asks(hd3) == [rateFX(prURL(11), 11, "2", forced: true, author: "op")],
+          "Rate now kept through a switched-off sync: \(hd3.result.effects)")
+    var rateNowOn = PipelineSettings(roots: [root], rate: true)
+    rateNowOn.force = rateNowPR.force
+    let diffless = only([11])
+    diffless.diffFails = true
+    _ = sync(diffless, rateNowOn, dir("forced-diffless"), t0, drain: false)
+    let retry = (state(dir("forced-diffless"))["retry"] as? [String: Any])?[prURL(11)] as? [String: Any]
+    check(retry?["failures"] as? Int == 1, "a Rate now whose diff could not be read, tried once: \(retry ?? [:])")
+    let lostJob = only([1])
+    let ld = dir("job-lost")
+    _ = sync(lostJob, rateFix, ld, t0, drain: false)
+    for f in (try? FileManager.default.contentsOfDirectory(at: ld.appendingPathComponent("rate"), includingPropertiesForKeys: nil)) ?? [] {
+        try? FileManager.default.removeItem(at: f)
+    }
+    let lj2 = sync(lostJob, rateFix, ld, later(5), drain: false)
+    check(asks(lj2) == [rateFX(issueURL(1), 1, "2")], "an ask whose job was lost: \(lj2.result.effects)")
+
+    // A root read in part, or a ban list unread, keeps the asks and their answers for a sync
+    // that reads them whole.
+    let banDir = dir("bans")
+    try FileManager.default.createDirectory(at: banDir, withIntermediateDirectories: true)
+    let banEnv = ProcessInfo.processInfo.environment["DA_BAN_DIR"]
+    setenv("DA_BAN_DIR", banDir.path, 1)
+    defer { if let banEnv { setenv("DA_BAN_DIR", banEnv, 1) } else { unsetenv("DA_BAN_DIR") } }
+    for spoil in ["partial", "ban"] {
+        try Data(#"{"banned": []}"#.utf8).write(to: banDir.appendingPathComponent("banned.json"))
+        let t = only([1])
+        let kd = dir("kept-" + spoil)
+        _ = sync(t, rateFix, kd, t0, drain: false)
+        _ = PipelineRateJob.run(item: issueURL(1), stamp: "1", dir: kd, io: t.io())
+        if spoil == "partial" { t.ghPartial = true } else {
+            try Data("{".utf8).write(to: banDir.appendingPathComponent("banned.json"))
+        }
+        let k2 = sync(t, rateFix, kd, later(5), drain: false)
+        let kept = files(kd)
+        t.ghPartial = false
+        try Data(#"{"banned": []}"#.utf8).write(to: banDir.appendingPathComponent("banned.json"))
+        let k3 = sync(t, rateFix, kd, later(10), drain: false)
+        check(k2.writes.isEmpty && kept == ["1.answer.json", "1.job.json"] && k3.writes == lowOn1
+              && t.claudeCalls.count == 1,
+              "\(spoil), then read whole: \(k2.writes) \(kept) \(k3.writes) \(t.claudeCalls)")
+    }
+
+    // Its author banned later in the sync that asked: no job is handed out.
+    let banLater = only([1, 13, 27])
+    let bld = dir("ban-after-rate")
+    try seedRerate(bld, 13, sha("c3"), at: later(-60))
+    banLater.onReread = { _ in try? Data(#"{"banned": [{"login": "reporter"}]}"#.utf8).write(to: banDir.appendingPathComponent("banned.json")) }
+    let bl = sync(banLater, PipelineSettings(roots: [root], rate: true, merge: true), bld, t0, drain: false)
+    try Data(#"{"banned": []}"#.utf8).write(to: banDir.appendingPathComponent("banned.json"))
+    check((state(bld)["rateAsks"] as? [String: Any])?[issueURL(1)] != nil
+          && !bl.result.effects.contains { $0.key == "pipeline-rate:" + issueURL(1) },
+          "banned after its rating was asked for: \(bl.result.effects)")
+
+    // Rate now's ask of an item gone from a whole read is dropped.
+    let goneF = only([1])
+    let gfd = dir("forced-gone")
+    _ = sync(goneF, rateNow, gfd, t0, drain: false)
+    goneF.issues = []
+    _ = sync(goneF, PipelineSettings(roots: [root]), gfd, later(5), drain: false)
+    check(((state(gfd)["rateAsks"] as? [String: Any]) ?? [:]).isEmpty && files(gfd).isEmpty,
+          "Rate now of an item gone: \(state(gfd)["rateAsks"] ?? [:]) \(files(gfd))")
+
+    // An ask whose item a sync did not read still takes one of the four.
+    let lib = PipelineSettings.Root(owner: "acme", repo: "lib", path: libCheckout, me: opLogin)
+    let ops = PipelineSettings(roots: [root, lib], linearTeams: [.init(key: "OPS", repo: "acme/lib")], rate: true)
+    let split = only([])
+    split.tickets = (1...4).map { .init(id: "lin-ops-\($0)", identifier: "OPS-\($0)", title: "Ops \($0)",
+                                        updated: at("10:0\($0)"), team: "OPS") }
+    let sd = dir("cap-unread")
+    let s1 = sync(split, ops, sd, t0, drain: false)
+    split.linearDown = true
+    split.issues = [.init(number: 41, title: "Item 1", updated: at("10:10"))]
+    let s2 = sync(split, ops, sd, later(5), drain: false)
+    check(asks(s1).count == 4 && (state(sd)["rateAsks"] as? [String: Any])?.count == 4
+          && !asks(s2).contains { $0.key == "pipeline-rate:" + issueURL(41) },
+          "four asks of unread items wait: \(asks(s1)) \(asks(s2))")
+
+    // An ask whose item the reads missed is judged by a read of that item: closed, dropped.
+    let closed = only([1])
+    let cld = dir("closed-unlisted")
+    _ = sync(closed, ops, cld, t0, drain: false)
+    _ = PipelineRateJob.run(item: issueURL(1), stamp: "1", dir: cld, io: closed.io())
+    closed.linearDown = true
+    closed.others[1] = ("Typo on the login button", "CLOSED", "acme/app")
+    closed.issues = []
+    let cl2 = sync(closed, ops, cld, later(5), drain: false)
+    check(((state(cld)["rateAsks"] as? [String: Any]) ?? [:]).isEmpty && files(cld).isEmpty && cl2.writes.isEmpty,
+          "an answered ask of an item closed while a source is unread: \(state(cld)["rateAsks"] ?? [:]) \(files(cld))")
+
+    // An item the sync could not read keeps its ask and answer for the sync that can.
+    let unread = only([1])
+    let ud = dir("unread")
+    _ = sync(unread, rateFix, ud, t0, drain: false)
+    _ = PipelineRateJob.run(item: issueURL(1), stamp: "1", dir: ud, io: unread.io())
+    unread.ghFails = true
+    let u2 = sync(unread, rateFix, ud, later(5), drain: false)
+    let kept = files(ud)
+    unread.ghFails = false
+    let u3 = sync(unread, rateFix, ud, later(10), drain: false)
+    check(u2.writes.isEmpty && kept == ["1.answer.json", "1.job.json"] && u3.writes == lowOn1,
+          "unread, then read: \(u2.writes) \(kept) \(u3.writes)")
 }
 
 /// The operator's takeover of an item the fast track leaves to a human: what it lifts, what
@@ -5179,10 +5550,14 @@ private func pipelineTakeover(base: URL, root: PipelineSettings.Root, team: Pipe
         t.prs = [fix]
         _ = sync(t, track, dir(name), later(10))
         marker(t, 11)
-        try fm.createDirectory(at: dir(name), withIntermediateDirectories: true)
+        // The revoke lands after the re-rate's job: the sync applying it would merge.
+        let asked = sync(t, track, dir(name), later(20), drain: false)
+        for case .rate(_, _, let url, let stamp, _, _) in asked.result.effects {
+            _ = PipelineRateJob.run(item: url, stamp: stamp, dir: dir(name), io: t.io())
+        }
         PipelineControl(enabled: true, rate: true, fix: false, fastTrack: true, merge: true, fracture: false,
                         revoke: revoked ? [issueURL(3)] : nil).save(in: dir(name))
-        return sync(t, track, dir(name), later(20))
+        return sync(t, track, dir(name), later(30), drain: false)
     }
     let kept3 = try lateIssue("issue-kept", revoked: false)
     let late3 = try lateIssue("issue-revoked", revoked: true)
@@ -5358,10 +5733,11 @@ private func pipelineRatingPass1(base: URL, root: PipelineSettings.Root, team: P
         return t
     }
 
-    // Pushed to, past its floor, as it is rated: no label at a head whose diff was not rated.
+    // Pushed to, past its floor, as its rating is applied: no label at a head whose diff was
+    // not rated.
     let pushed = fix()
-    pushed.onClaude = { _ in
-        pushed.onClaude = nil
+    pushed.onItem = { _ in
+        pushed.onItem = nil
         pushed.prs[0].head = sha("a2")
         pushed.prs[0].files.append(("package.json", 1, 1, "MODIFIED"))
     }

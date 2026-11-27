@@ -248,6 +248,7 @@ final class PipelineSync {
             state.prune(read: Set(entries.map(\.id)), done: Set(entries.filter { !open($0) }.map(\.id)),
                         readAll: readAll, now: now)
             cache = cache.filter { state.seen[$0.key] != nil }
+            PipelineRateJob.sweep(keeping: state.rateAsks.mapValues(\.stamp), in: dir)
         }
         persist()
         let laid = PipelineGraph.layout(items: entries.map(\.item), edges: edges, maxItems: model.maxItems)
@@ -330,6 +331,8 @@ final class PipelineSync {
     }
 
     static let banNotice = "the prompt-injection ban list could not be read, so this sync took no step past that"
+    /// Why an item a rating was asked for is neither merged nor fixed until it is in.
+    static let ratingAsked = "a rating asked for it is not in yet"
     static let banUnread = "the prompt-injection ban list could not be read"
 
     /// Whose text a part Diplomat split off carries: its marker's, else the one recorded
@@ -473,11 +476,14 @@ final class PipelineSync {
         }
     }
 
-    /// The ids of `settings.queued` no read so far listed: a front-end takes an ask or record
-    /// back only once a read of its item judged it.
+    /// The ids of `settings.queued`, and of the ratings asked for, no read so far listed: a
+    /// front-end takes an ask or record back, and a sync drops a rating ask, only once a read
+    /// of its item judged it.
     func unlisted() -> [String] {
         let listed = Set(entries.map { PipelineRead.norm($0.id) })
-        return settings.queued.filter { !listed.contains(PipelineRead.norm($0)) }
+        let queued = Set(settings.queued.map(PipelineRead.norm))
+        let asked = state.rateAsks.keys.sorted().filter { !queued.contains(PipelineRead.norm($0)) }
+        return (settings.queued + asked).filter { !listed.contains(PipelineRead.norm($0)) }
     }
 
     func readQueued(_ n: Int) {
@@ -1064,39 +1070,106 @@ final class PipelineSync {
                 forced.append(i)
             }
         }
-        var bands: [[Int]] = []
-        var kept: [Int] = []
-        if settings.rate {
-            let idx = entries.indices.filter {
-                let e = entries[$0]
-                return banHold(e) == nil && stops(e).isEmpty && !backingOff(e.id)
-                    && e.root.map { partial[$0.slug] == nil } ?? true
+        answers()
+        // A Rate now ask refused now, or of an item gone from a whole read, is dropped; one
+        // whose PR was pushed to, or whose job is gone, is asked again.
+        for (id, a) in state.rateAsks.sorted(by: { $0.key < $1.key }) where a.forced {
+            guard let i = pos[id], !waits(entries[i]) else {
+                if pos[id] == nil && readAll { state.rateAsks[id] = nil }
+                continue
             }
-            kept = idx.filter {
-                cache[entries[$0].id]?.unwritten == true && entries[$0].item.writable && open(entries[$0])
+            guard may(.forced) else { break }
+            if let why = rateRefusal(entries[i]) {
+                notice("\(entries[i].item.label) was not rated: \(why)")
+                state.rateAsks[id] = nil
+            } else if a.head != head(entries[i]) || !queued(id, a) {
+                state.rateAsks[id] = nil
+                if !forced.contains(i) { forced.append(i) }
             }
-            bands = [
-                settings.fastTrack ? idx.filter { awaitingRerate(entries[$0]) } : [],
-                idx.filter { own(entries[$0]) && open(entries[$0]) && entries[$0].item.rating == nil },
-                idx.filter {
-                    let e = entries[$0]
-                    return e.item.kind == .issue && e.item.writable && e.item.rating == nil
-                        && e.root != nil && !settled(e)
-                },
-                idx.filter {
-                    let e = entries[$0]
-                    return e.item.kind == .issue && open(e) && !e.item.writable && e.item.rating == nil
-                        && e.root != nil && !settled(e)
-                },
-            ].map { $0.sorted(by: newer) }
         }
-        var rest: [Int] = []
-        for i in bands.joined() where !forced.contains(i) && !rest.contains(i) && rest.count < model.rater.perSync {
-            rest.append(i)
+        let idx = settings.rate ? entries.indices.filter { eligible(entries[$0]) && !backingOff(entries[$0].id) } : []
+        let kept = idx.filter {
+            cache[entries[$0].id]?.unwritten == true && entries[$0].item.writable && open(entries[$0])
         }
-        for i in forced { rateOne(i, .forced) }
+        let bands = [0, 1, 2, 3].map { band in
+            idx.filter { self.band(entries[$0]) == band && !state.declined.contains(entries[$0].id) }.sorted(by: newer)
+        }
+        for i in forced { ask(i, forced: true) }
         for i in kept where !forced.contains(i) { rewrite(i) }
-        for i in rest { rateOne(i, .rate) }
+        // With Rate off nothing is wanted: each ask of an item read whole is dropped.
+        let wanted = Set(bands.joined())
+        var waiting = 0
+        for (id, a) in state.rateAsks.sorted(by: { $0.key < $1.key }) where !a.forced {
+            guard let i = pos[id], !waits(entries[i]) else {
+                if pos[id] == nil && readAll { state.rateAsks[id] = nil } else { waiting += 1 }
+                continue
+            }
+            if wanted.contains(i) && a.head == head(entries[i]) && a.again == awaitingRerate(entries[i]) && queued(id, a) {
+                waiting += 1
+            } else {
+                state.rateAsks[id] = nil
+            }
+        }
+        guard settings.rate else { return persist() }
+        for i in bands.joined() where waiting < model.rater.asks && !forced.contains(i)
+            && state.rateAsks[entries[i].id] == nil {
+            if ask(i, forced: false) { waiting += 1 }
+        }
+        persist()
+    }
+
+    /// Whether this sync's read of `e` is too partial to judge its ask by: the ban list
+    /// unread, or its root read in part.
+    func waits(_ e: PipelineEntry) -> Bool {
+        banned == nil || e.root.map { partial[$0.slug] != nil } ?? false
+    }
+
+    /// Whether the job of ask `a` is still there to run, or has answered.
+    func queued(_ id: String, _ a: PipelineRateAsk) -> Bool {
+        PipelineRateJob.load(id, a.stamp, in: dir) != nil || PipelineRateJob.answered(id, a.stamp, in: dir)
+    }
+
+    /// Not held from a rating by its author, a stop label or a root read with errors.
+    func eligible(_ e: PipelineEntry) -> Bool {
+        banHold(e) == nil && stops(e).isEmpty && e.root.map { partial[$0.slug] == nil } ?? true
+    }
+
+    /// Where `e` stands in the order a sync asks for ratings, nil for none: a fast-track PR
+    /// at its clean head, an unrated PR of mine, an unrated issue Diplomat may write to,
+    /// another unrated issue.
+    func band(_ e: PipelineEntry) -> Int? {
+        if settings.fastTrack && awaitingRerate(e) { return 0 }
+        guard e.item.rating == nil, open(e) else { return nil }
+        if e.item.kind == .pr { return own(e) ? 1 : nil }
+        guard e.root != nil, !settled(e) else { return nil }
+        return e.item.writable ? 2 : 3
+    }
+
+    /// The head a rating of `e` reads the diff at; nil for an issue.
+    func head(_ e: PipelineEntry) -> String? { e.item.kind == .pr ? e.item.headSha : nil }
+
+    /// Applies each answer a rating job left for a current ask, in the order they were
+    /// asked for, and drops each ask an answer shows is no longer worth applying. An answer
+    /// for an item this sync did not read in full, or that a switch keeps from applying
+    /// now, waits; one at a head the item has left is `rate`'s to drop.
+    func answers() {
+        let current = PipelineRateJob.answers(in: dir).filter { state.rateAsks[$0.item]?.stamp == $0.stamp }
+        for answer in current.sorted(by: { asked(state.rateAsks[$0.item]!, before: state.rateAsks[$1.item]!) }) {
+            guard let a = state.rateAsks[answer.item], let i = pos[answer.item], !waits(entries[i]) else { continue }
+            let id = answer.item
+            if answer.cancelled == true {
+                state.rateAsks[id] = nil
+                if !state.declined.contains(id) { state.declined.append(id) }
+                persist()
+                continue
+            }
+            guard a.head == head(entries[i]), may(a.forced ? .forced : .rate) else { continue }
+            state.rateAsks[id] = nil
+            persist()
+            let current = a.forced ? rateRefusal(entries[i]) == nil
+                : eligible(entries[i]) && band(entries[i]) != nil && a.again == awaitingRerate(entries[i])
+            if current { rated(i, answer.exit, a) }
+        }
     }
 
     /// Writes the rating kept for `entries[i]` while its labels could not be written, never
@@ -1140,26 +1213,54 @@ final class PipelineSync {
         return io.gh(["api", "-H", "Accept: application/vnd.github.diff", "repos/\(root.name)/compare/\(base)...\(head)"])
     }
 
-    func rateOne(_ i: Int, _ step: Step) {
+    /// Asks a queued job to rate `entries[i]`: its call saved in `rate/` and the ask in the
+    /// state, for `owed` to hand the front-end. An ask at its current head stands, Rate now
+    /// marking it forced. False when it was not asked.
+    @discardableResult
+    func ask(_ i: Int, forced: Bool) -> Bool {
         let e = entries[i]
-        guard let root = e.root, may(step) else { return }
-        if let why = banHold(e) { return notice("\(e.item.label) was not rated: \(why)") }
-        let again = awaitingRerate(e)
-        let head = e.item.kind == .pr ? e.item.headSha : nil
+        guard let root = e.root, may(forced ? .forced : .rate) else { return false }
+        if let why = banHold(e) {
+            notice("\(e.item.label) was not rated: \(why)")
+            return false
+        }
+        if forced { state.declined.removeAll { $0 == e.id } }
+        if let a = state.rateAsks[e.id], a.head == head(e) {
+            if forced { state.rateAsks[e.id]?.forced = true }
+            return true
+        }
         var diff: String?
         if e.item.kind == .pr {
-            let out = head.flatMap { self.diff(e, at: $0) }
+            let out = head(e).flatMap { self.diff(e, at: $0) }
             guard let out, out.ok else {
                 notice("\(e.item.label) was not rated: its diff could not be read: \(out?.why ?? "it has no head")")
-                return failed(e.id)
+                failed(e.id)
+                return false
             }
             diff = String(decoding: out.stdout, as: UTF8.self)
         }
-        let name = e.item.kind == .pr ? model.rater.prModel : model.rater.model
-        let out = io.claude(PipelineRater.arguments(model: name, schema: model.raterSchema,
-                                                    prompt: PipelineRater.ratePrompt(e, model)),
-                            Data(PipelineRater.input(e, diff: diff, model).utf8), root.path,
-                            model.rater.timeoutSecs)
+        let floor = diff.map { PipelineGate.diffFloor($0, diffChars: model.rater.diffChars) }
+        state.rateSeq += 1
+        let job = PipelineRateJob(item: e.id, stamp: String(state.rateSeq),
+                                  model: e.item.kind == .pr ? model.rater.prModel : model.rater.model,
+                                  prompt: PipelineRater.ratePrompt(e, model),
+                                  input: PipelineRater.input(e, diff: diff, model), cwd: root.path)
+        guard job.save(in: dir) else {
+            notice("\(e.item.label) was not rated: its rating could not be saved for the queue")
+            return false
+        }
+        state.rateAsks[e.id] = PipelineRateAsk(stamp: job.stamp, head: head(e), again: awaitingRerate(e),
+                                               forced: forced, floor: floor?.rating, reasons: floor?.reasons ?? [])
+        persist()
+        return true
+    }
+
+    /// The answer `out` to the ask `a` for `entries[i]`, labelled as a rating made in this
+    /// sync is.
+    func rated(_ i: Int, _ out: PipelineIO.Exit, _ a: PipelineRateAsk) {
+        let e = entries[i]
+        let step: Step = a.forced ? .forced : .rate
+        let (again, head) = (a.again, a.head)
         let said: PipelineRating, why: String
         switch PipelineRater.rating(out) {
         case .failure(let f):
@@ -1173,10 +1274,9 @@ final class PipelineSync {
         var detail = describe(rating) + (why.isEmpty ? "" : ": " + why)
         var floor = e.item.floor ?? PipelineRating(risk: .low, complexity: .low)
         var reasons = floorWhy[e.id] ?? []
-        if let diff {
-            let more = PipelineGate.diffFloor(diff, diffChars: model.rater.diffChars)
-            floor = floor.atLeast(more.rating)
-            reasons += more.reasons
+        if let more = a.floor {
+            floor = floor.atLeast(more)
+            reasons += a.reasons
         }
         if rating.atLeast(floor) != rating {
             rating = rating.atLeast(floor)
@@ -1764,6 +1864,8 @@ final class PipelineSync {
                 let code: String?
                 if let stop = stops(e).first {
                     (code, hold) = (PipelineGate.Hold.stopLabel(stop).code, PipelineGate.Hold.stopLabel(stop).message)
+                } else if state.rateAsks[e.id] != nil {
+                    (code, hold) = ("rating-asked", Self.ratingAsked)
                 } else if let h = mergeHold(e, fixes: fixesCandidate(e), unjudged: closesUnwritable(e)) {
                     (code, hold) = (h.code, h.message)
                 } else if let why = e.unwritable {
@@ -1867,6 +1969,7 @@ final class PipelineSync {
         if let why = incomplete[root.slug] { return "\(why), so a PR fixing it might not be seen" }
         if let why = partial[root.slug] ?? twinsUnread(e) { return why }
         if e.item.ratedBy != "label" && !takenOver(e) { return "its rating labels could not be written" }
+        if state.rateAsks[e.id] != nil { return Self.ratingAsked }
         if e.item.source == .linear, e.item.repo.uppercased() == "GH" {
             return "GitHub reads Linear team GH's `Fixes \(e.item.label)` as closing #\(e.item.label.dropFirst(3))"
         }
@@ -2022,7 +2125,7 @@ final class PipelineSync {
         let fix = may(.fix), review = may(.fastTrack)
         if fix { recheckLinear() }
         lateRevokes()
-        var out: [PipelineEffect] = []
+        var out = rateAsked()
         for i in entries.indices.sorted(by: newer) {
             let e = entries[i]
             guard e.item.hold == nil else { continue }
@@ -2058,11 +2161,31 @@ final class PipelineSync {
             switch effect {
             case .fixIssue, .fixLinear: what = "asked for a fix PR"
             case .review(_, _, _, let head, _): what = "asked for a fast-track review at \(head.prefix(7))"
+            case .rate(_, _, _, _, let forced, _):
+                let again = state.rateAsks[effect.url].flatMap { $0.again ? $0.head : nil }
+                what = "asked for a rating" + (again.map { " again at \($0.prefix(7))" } ?? "") + (forced ? " (Rate now)" : "")
             }
             log(effect.url, .asked, what)
             state.asked[effect.key] = effect.stamp
         }
         return out
+    }
+
+    /// Forced first, then oldest first.
+    func asked(_ a: PipelineRateAsk, before b: PipelineRateAsk) -> Bool {
+        (a.forced ? 0 : 1, Int(a.stamp) ?? 0) < (b.forced ? 0 : 1, Int(b.stamp) ?? 0)
+    }
+
+    /// A rating effect per ask this sync read the item of and no answer is waiting for, in
+    /// `asked` order.
+    func rateAsked() -> [PipelineEffect] {
+        let unforced = may(.rate), forced = may(.forced)
+        return state.rateAsks.sorted { asked($0.value, before: $1.value) }.compactMap { id, a in
+            guard let i = pos[id], let root = entries[i].root, a.forced ? forced : unforced,
+                  banHold(entries[i]) == nil, !PipelineRateJob.answered(id, a.stamp, in: dir) else { return nil }
+            return .rate(repo: root.slug, number: entries[i].number ?? 0, url: id, stamp: a.stamp, forced: a.forced,
+                         author: banDimension(entries[i]))
+        }
     }
 
     /// Holds each Linear candidate about to be asked a fix for that a fresh read finds no

@@ -967,7 +967,7 @@ def test_rate_now_and_fracture_are_off_where_the_last_sync_would_refuse_them(sto
 
     view.select(I5)
     assert shown("rate", "fracture") == [
-        (True, "Rate it in a sync started now, ahead of every limit"), (False, split)]
+        (True, "Queue its rating from a sync started now, past the ones a sync asks for itself"), (False, split)]
     view.select(I6)
     assert shown("rate", "fracture") == [(False, part), (False, part)]
     view.select(P2)

@@ -93,8 +93,8 @@ bays.
   session that replaces it takes its place in the list.
 - **Free slots** are the rest of the cap. Each running automatic agent takes one, a
   task from a sweep included - the queue picked the moment for it, so it holds a
-  bay like anything else that waited there. An agent a wizard press opened on the
-  spot takes none. Queued work starts here on the next poll.
+  bay like anything else that waited there, and so does a Pipeline rating while it runs. An
+  agent a wizard press opened on the spot takes none. Queued work starts here on the next poll.
 - **Auto-execute queue** is the switch at the top of the queue (**default on**): off,
   nothing starts by itself and every row waits for *execute now*. The monitors keep
   finding work and queueing it either way. It stays on screen while it is off even
@@ -117,6 +117,11 @@ bays.
   asked for it - and nothing does at all for a fix, since the monitors read PRs and
   never look at an issue. A fix is keyed by its ISSUE number, so it is a row of its
   own beside a review of the PR that happens to share it.
+- **Ratings** - the [Pipeline's](pipeline.md#ratings), one row per item - wait in a band of
+  their own between the swept reviews and the swept issue fixes: a rating takes minutes and
+  decides whether a fix is owed at all. One runs headless, with no window to focus, its row
+  reading *running* until it returns. **cancel** keeps the Pipeline from asking again until
+  **Rate now**.
 - **Resolve-conflicts** rows run last of all, whatever
   order the monitors found them in, and no drag lifts one out of its band (a drag
   between bands is refused rather than sprung back on the next poll). An agent
@@ -127,7 +132,7 @@ bays.
 
 Five things hold work. The cap holds what there is no slot for, and releases it as
 slots free. The [free-disk floor](automation.md#the-free-disk-floor) holds everything
-while the disk agents write to is nearly full. The [spending budget](automation.md#the-spending-budget) holds everything when the account is
+while the disk agents write to is nearly full. The [spending budget](automation.md#the-spending-budget) holds everything priced in an account
 too low to afford another agent, and releases it when a window refills or the
 balance is topped up. A
 **monitor you switched off** holds its own work indefinitely: it keeps polling and
