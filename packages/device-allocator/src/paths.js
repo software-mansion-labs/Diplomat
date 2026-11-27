@@ -62,28 +62,36 @@ export let EMULATOR_BIN =
 const SDK_ADB = path.join(ANDROID_HOME, 'platform-tools', 'adb');
 export let ADB_BIN = process.env.ADB_PATH || (fs.existsSync(SDK_ADB) ? SDK_ADB : 'adb');
 
+const isExecutableFile = (p) => {
+  try { fs.accessSync(p, fs.constants.X_OK); return fs.statSync(p).isFile(); } catch { return false; }
+};
 const onPath = (name, dirs = '') => dirs.split(path.delimiter).filter(Boolean)
-  .map((d) => path.join(d, name)).find((p) => fs.existsSync(p));
+  .map((d) => path.join(d, name)).find(isExecutableFile);
 
 // A bare name no PATH entry holds is looked up where the operator's terminal would
 // find it: the SDK under the ANDROID_HOME / ANDROID_SDK_ROOT their shell's rc files
-// export, else on that shell's PATH. A daemon launchd started inherits neither. Once
-// per process; run before either binary.
+// export, else on that shell's PATH. A daemon launchd started inherits neither. Run
+// before either binary. A shell that answered is not asked again in this process; one
+// that did not is asked again LOGIN_SHELL_RETRY_MS later.
 let located;
+let retryAt = 0;
 export function locateAndroidTools() {
-  located ??= (async () => {
-    const missing = (bin, name) => bin === name && !onPath(name, process.env.PATH);
-    if (!missing(ADB_BIN, 'adb') && !missing(EMULATOR_BIN, 'emulator')) return;
-    const env = await loginShellEnv(['ANDROID_HOME', 'ANDROID_SDK_ROOT', 'PATH']);
-    if (!env) return;
-    const root = env.ANDROID_HOME || env.ANDROID_SDK_ROOT;
-    const find = (dir, name) => {
-      const sdk = root && path.join(root, dir, name);
-      return sdk && fs.existsSync(sdk) ? sdk : onPath(name, env.PATH);
-    };
-    if (missing(ADB_BIN, 'adb')) ADB_BIN = find('platform-tools', 'adb') || ADB_BIN;
-    if (missing(EMULATOR_BIN, 'emulator')) EMULATOR_BIN = find('emulator', 'emulator') || EMULATOR_BIN;
-  })();
+  if (!located || (retryAt && Date.now() >= retryAt)) {
+    retryAt = 0;
+    located = (async () => {
+      const missing = (bin, name) => bin === name && !onPath(name, process.env.PATH);
+      if (!missing(ADB_BIN, 'adb') && !missing(EMULATOR_BIN, 'emulator')) return;
+      const env = await loginShellEnv(['ANDROID_HOME', 'ANDROID_SDK_ROOT', 'PATH']);
+      if (!env) { retryAt = Date.now() + LOGIN_SHELL_RETRY_MS; return; }
+      const root = env.ANDROID_HOME || env.ANDROID_SDK_ROOT;
+      const find = (dir, name) => {
+        const sdk = root && path.join(root, dir, name);
+        return sdk && isExecutableFile(sdk) ? sdk : onPath(name, env.PATH);
+      };
+      if (missing(ADB_BIN, 'adb')) ADB_BIN = find('platform-tools', 'adb') || ADB_BIN;
+      if (missing(EMULATOR_BIN, 'emulator')) EMULATOR_BIN = find('emulator', 'emulator') || EMULATOR_BIN;
+    })();
+  }
   return located;
 }
 
@@ -91,28 +99,44 @@ const ENV_MARK = 'diplomat-env:';
 const shq = (s) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 // `names` as a login shell running an interactive one sets them (LoginShell.swift's
-// pair), or null when it gives no answer within LOGIN_SHELL_TIMEOUT_MS.
+// pair), or null when it gives no answer within LOGIN_SHELL_TIMEOUT_MS. Read as soon as
+// it is printed: a job the rc started may hold stdout open long after. printenv, as a
+// bare "$NAME" aborts under nounset.
 function loginShellEnv(names) {
   const shell = process.env.SHELL || '/bin/sh';
-  const probe = `printf '\\n${ENV_MARK}%s\\n' ${names.map((n) => `"$${n}"`).join(' ')}`;
+  const probe = names.map((n) => `printf '\\n${ENV_MARK}'; printenv ${n}; printf '\\n'`).join('; ');
   return new Promise((resolve) => {
+    let child;
     let out = '';
-    const child = spawn(shell, ['-l', '-c', `${shq(shell)} -i -c ${shq(probe)}`],
-      { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    let timer;
+    let done = false;
     // The whole group: a hung rc leaves the inner shell running.
-    const timer = setTimeout(() => {
-      try { process.kill(-child.pid, 'SIGKILL'); } catch {}
-      resolve(null);
-    }, LOGIN_SHELL_TIMEOUT_MS);
-    child.stdout.on('data', (d) => { out += d; });
-    child.on('error', () => resolve(null));
-    child.on('close', () => {
+    const kill = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} };
+    const settle = (env) => {
+      if (done) return;
+      done = true;
       clearTimeout(timer);
-      const said = out.split('\n').filter((l) => l.startsWith(ENV_MARK)).slice(-names.length);
-      resolve(said.length === names.length
-        ? Object.fromEntries(names.map((n, i) => [n, said[i].slice(ENV_MARK.length)]))
-        : null);
+      process.off('exit', kill);
+      child?.unref();
+      child?.stdout.unref();
+      resolve(env);
+    };
+    try {
+      child = spawn(shell, ['-l', '-c', `${shq(shell)} -i -c ${shq(probe)}`],
+        { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch { return settle(null); }
+    timer = setTimeout(() => { kill(); settle(null); }, LOGIN_SHELL_TIMEOUT_MS);
+    process.once('exit', kill);
+    child.stdout.on('data', (d) => {
+      if (done) return;
+      out += d;
+      const said = out.split('\n').slice(0, -1).filter((l) => l.startsWith(ENV_MARK));
+      if (said.length >= names.length) {
+        settle(Object.fromEntries(names.map((n, i) => [n, said[i].slice(ENV_MARK.length)])));
+      }
     });
+    child.on('error', () => settle(null));
+    child.on('close', () => settle(null));
   });
 }
 
@@ -128,6 +152,7 @@ export const POOL_INTERVAL_MS = Number(process.env.DA_POOL_INTERVAL_MS) || 8 * 1
 export const ALLOC_GRACE_MS = Number(process.env.DA_ALLOC_GRACE_MS) || 20 * 1000;
 // How long locateAndroidTools() waits on the operator's shell: rc files can be slow.
 const LOGIN_SHELL_TIMEOUT_MS = Number(process.env.DA_LOGIN_SHELL_TIMEOUT_MS) || 10 * 1000;
+const LOGIN_SHELL_RETRY_MS = Number(process.env.DA_LOGIN_SHELL_RETRY_MS) || 60 * 1000;
 
 // Max concurrent devices held across all agents. The device *pool* is unbounded
 // (agents create devices on demand), so this caps concurrency, not inventory.
