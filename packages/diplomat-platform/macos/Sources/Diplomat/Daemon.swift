@@ -83,19 +83,22 @@ enum Daemon {
         }
     }
 
-    /// What the agents start: a link to `/usr/bin/env` named for Login Items to list them by.
-    static var launcher: String { RepoPaths.installDir.appendingPathComponent("Diplomat").path }
-
-    /// Has an agent plist an older installer wrote start its binary through `launcher`:
-    /// macOS kills an agent loaded at login whose program's signature has changed since,
-    /// and every build re-signs Diplomat, so each update costs such an agent its next
-    /// start. Returns whether it wrote.
+    /// Has an agent plist an older installer wrote, starting a bundle's binary itself,
+    /// start it through the `install/Diplomat` beside that bundle, as the installers write
+    /// it: macOS kills an agent loaded at login whose program's signature has changed
+    /// since, and every build re-signs Diplomat, so each update costs such an agent its
+    /// next start. Not this instance's link: one run from another checkout would tie the
+    /// agents to that checkout. Returns whether it wrote.
     @discardableResult
-    static func startThroughLauncher(plist url: URL, launcher: String = launcher) -> Bool {
-        guard FileManager.default.fileExists(atPath: launcher) else { return false }
-        return rewrite(url) { dict in
-            guard let args = dict["ProgramArguments"] as? [String], let first = args.first,
-                  first != launcher else { return false }
+    static func startThroughLauncher(plist url: URL) -> Bool {
+        rewrite(url) { dict in
+            guard let args = dict["ProgramArguments"] as? [String], let first = args.first else { return false }
+            let binary = URL(fileURLWithPath: first)
+            guard binary.pathComponents.suffix(3) == ["Contents", "MacOS", "Diplomat"] else { return false }
+            let launcher = binary.deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("install/Diplomat").path
+            guard FileManager.default.fileExists(atPath: launcher) else { return false }
             dict["ProgramArguments"] = [launcher] + args
             return true
         }

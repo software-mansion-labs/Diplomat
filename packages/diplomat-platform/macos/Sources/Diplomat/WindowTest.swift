@@ -244,26 +244,34 @@ enum WindowTest {
         check("no plist, no agent: nothing is written",
               !Daemon.markLoginStartUnattended(plist: absent) && !fm.fileExists(atPath: absent.path))
 
-        print("agents: an older plist starts the binary through the launcher")
-        let launcher = scratch.appendingPathComponent("Diplomat").path
+        print("agents: an older plist starts the binary through the launcher beside its bundle")
+        let pkg = scratch.appendingPathComponent("pkg")
+        let launcher = pkg.appendingPathComponent("install/Diplomat").path
+        let binary = pkg.appendingPathComponent("Diplomat.app/Contents/MacOS/Diplomat").path
+        try? fm.createDirectory(at: pkg.appendingPathComponent("install"), withIntermediateDirectories: true)
         try? fm.createSymbolicLink(atPath: launcher, withDestinationPath: "/usr/bin/env")
-        let direct: [String: Any] = ["Label": "\(Daemon.label).watchdog", "ProgramArguments": ["/x/Diplomat"],
-                                     "StartInterval": 300]
-        try? PropertyListSerialization.data(fromPropertyList: direct, format: .xml, options: 0).write(to: plist)
-        check("with no launcher there, nothing is written",
-              !Daemon.startThroughLauncher(plist: plist, launcher: scratch.appendingPathComponent("none").path))
-        check("a plist naming the binary is rewritten", Daemon.startThroughLauncher(plist: plist, launcher: launcher))
+        func direct(_ binary: String) {
+            let old: [String: Any] = ["Label": "\(Daemon.label).watchdog", "ProgramArguments": [binary],
+                                      "StartInterval": 300]
+            try? PropertyListSerialization.data(fromPropertyList: old, format: .xml, options: 0).write(to: plist)
+        }
+        direct(scratch.appendingPathComponent("bare/Diplomat.app/Contents/MacOS/Diplomat").path)
+        check("with no launcher beside the bundle, nothing is written", !Daemon.startThroughLauncher(plist: plist))
+        direct(pkg.appendingPathComponent("Diplomat.app/Contents/Resources/Diplomat").path)
+        check("a plist starting anything but a bundle's binary is left alone", !Daemon.startThroughLauncher(plist: plist))
+        direct(binary)
+        check("a plist naming the binary is rewritten", Daemon.startThroughLauncher(plist: plist))
         let wrapped = (try? Data(contentsOf: plist)).flatMap {
             try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any]
         } ?? [:]
-        check("…to start the launcher with the binary as its argument",
-              wrapped["ProgramArguments"] as? [String] == [launcher, "/x/Diplomat"], "\(wrapped)")
+        check("…to start the launcher beside its bundle with the binary as its argument",
+              wrapped["ProgramArguments"] as? [String] == [launcher, binary], "\(wrapped)")
         check("…and every other key kept",
               wrapped["Label"] as? String == "\(Daemon.label).watchdog" && wrapped["StartInterval"] as? Int == 300,
               "\(wrapped)")
-        check("a plist starting the launcher is left alone", !Daemon.startThroughLauncher(plist: plist, launcher: launcher))
+        check("a plist starting the launcher is left alone", !Daemon.startThroughLauncher(plist: plist))
         check("no plist: nothing is written",
-              !Daemon.startThroughLauncher(plist: absent, launcher: launcher) && !fm.fileExists(atPath: absent.path))
+              !Daemon.startThroughLauncher(plist: absent) && !fm.fileExists(atPath: absent.path))
         check("every agent the installers write is on the list the launch rewrites",
               Daemon.agentLabels.map { Daemon.plist($0).lastPathComponent }
                   == ["com.ignacy.diplomat.plist", "com.ignacy.diplomat.autoupdate.plist",
@@ -287,7 +295,7 @@ enum WindowTest {
             return (did, calls)
         }
         let reloaded = [["bootout", "\(domain)/\(watchdog)"], ["bootstrap", domain, plist.path]]
-        let stale = reload([job("/x/Diplomat", "not running")])
+        let stale = reload([job(binary, "not running")])
         check("a job starting the binary the plist no longer names is booted out and loaded again",
               stale.0 && stale.1 == [["print", "\(domain)/\(watchdog)"]] + reloaded, "\(stale)")
         let current = reload([job(launcher, "not running")])
@@ -295,10 +303,10 @@ enum WindowTest {
               !current.0 && current.1.count == 1, "\(current)")
         let unloaded = reload([(113, "Could not find service \"\(watchdog)\" in domain for user gui: 501\n")])
         check("an agent that is not loaded is not loaded", !unloaded.0 && unloaded.1.count == 1, "\(unloaded)")
-        let busy = reload([job("/x/Diplomat", "running"), job("/x/Diplomat", "not running")])
+        let running = reload([job(binary, "running"), job(binary, "not running")])
         check("a run in progress is waited out, then the job reloaded",
-              busy.0 && busy.1.count == 4 && Array(busy.1.suffix(2)) == reloaded, "\(busy)")
-        let stuck = reload([job("/x/Diplomat", "running")], wait: 0)
+              running.0 && running.1.count == 4 && Array(running.1.suffix(2)) == reloaded, "\(running)")
+        let stuck = reload([job(binary, "running")], wait: 0)
         check("…and left running past the wait", !stuck.0 && stuck.1.count == 1, "\(stuck)")
         let unreadable = reload([(0, "\(domain)/\(watchdog) = {\n}\n")])
         check("output it cannot read reloads nothing", !unreadable.0 && unreadable.1.count == 1, "\(unreadable)")
