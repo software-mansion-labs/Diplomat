@@ -1,5 +1,5 @@
 {
-  "_comment": "The Resolve-conflicts prompt model: scope templates + the action text blocks the wizard assembles into the agent prompt. Single source for both front-ends; the assembly order/conditions live as a tiny glue layer in each (see Conflict.swift / conflicts.py).",
+  "_comment": "The Resolve-conflicts prompt model: scope templates + the action text blocks the wizard assembles into the agent prompt. Single source for both front-ends; the assembly order/conditions live in Conflict.swift, reached from Linux through the diplomat-core CLI.",
   "scope": {
     "single": "Take PR #{pr} in {owner}/{repo}. Use the `gh` CLI to fetch it and check out its branch.",
     "multi": "Find {scope} in {owner}/{repo}. Use the `gh` CLI to enumerate them, then go through EACH one.",
