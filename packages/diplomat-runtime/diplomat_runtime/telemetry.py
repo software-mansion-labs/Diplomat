@@ -75,7 +75,7 @@ def _model_get(key: str, default):
         return default
 
 
-#: How often a poll writes a quota/token sample. Read from the shared model so the
+#: How often a sample is written. Read from the shared model so the
 #: two platforms can't drift on ledger growth.
 SAMPLE_INTERVAL_SECS = float(_model_get("sampleIntervalSecs", 900))
 #: How far back the ledger is kept when it is rewritten.

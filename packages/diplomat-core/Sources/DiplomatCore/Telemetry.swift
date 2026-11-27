@@ -23,9 +23,9 @@ import Foundation
 /// - `cleared` — a poll no longer sees it owed and we never started it (someone
 ///               replied by hand, the PR closed).
 ///
-/// plus one `sample` per poll carrying the account's remaining quota fractions and
-/// this machine's cumulative Claude token counters, split monitored-repo vs
-/// everything else.
+/// plus a `sample` every `sampleIntervalSecs` carrying the account's remaining
+/// quota fractions and this machine's cumulative Claude token counters, split
+/// monitored-repo vs everything else.
 ///
 /// The quota fractions are a measurement, and the screen draws them as one
 /// (`quotaSeries`): every rate-limit window a reading carries, over the lookback,
@@ -252,7 +252,7 @@ public enum Telemetry {
     /// the account spent `dUtil` of its window and this machine logged `dTokens`, so
     /// the whole window is worth `dTokens / dUtil`. Summing numerator and
     /// denominator across every usable interval weights long intervals more heavily,
-    /// which is what you want — a 30-second interval's rounding error should not
+    /// which is what you want — a 15-minute interval's rounding error should not
     /// count as much as an hour's.
     ///
     /// A flat interval (`dUtil == 0`) still counts its tokens: the reading moves in
@@ -626,7 +626,7 @@ public enum Telemetry {
         /// they carry no tokens and sit out the spread.
         public let unattributedCount: Int
 
-        /// Oldest and newest poll sample in the whole ledger (not just the range),
+        /// Oldest and newest sample in the whole ledger (not just the range),
         /// so the screen can say how far back the data actually goes.
         public let firstSampleAt: Double?
         public let lastSampleAt: Double?

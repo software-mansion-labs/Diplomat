@@ -18,6 +18,7 @@ import os
 import re
 import shlex
 import time
+from pathlib import Path
 
 import pytest
 
@@ -275,6 +276,26 @@ def test_sampling_is_paced_by_the_ledger_not_by_the_caller(ledger):
     telemetry._reset_cache()
     assert not telemetry.sample_due()
     assert telemetry.sample_due(time.time() + telemetry.SAMPLE_INTERVAL_SECS + 1)
+
+
+def test_the_ledger_docs_tie_samples_to_the_interval_not_the_poll():
+    packages = Path(__file__).resolve().parents[3]
+    swift = (packages / "diplomat-core" / "Sources" / "DiplomatCore"
+             / "Telemetry.swift").read_text(encoding="utf-8")
+    assert swift.partition("/// plus ")[2].partition(" carrying")[0] == (
+        "a `sample` every `sampleIntervalSecs`")
+    assert swift.partition("what you want — ")[2].partition(" interval's")[0] == (
+        f"a {telemetry.SAMPLE_INTERVAL_SECS / 60:g}-minute")
+    assert swift.partition("/// Oldest and newest ")[2].partition(" in ")[0] == "sample"
+    freshness = core.telemetry()["_quotaFreshnessComment"]
+    assert freshness.partition("ride out a few ")[2].partition(",")[0] == "missed samples"
+
+    def how_often(path: Path) -> str:
+        return path.read_text(encoding="utf-8").partition("How often ")[2].partition(".")[0]
+
+    macos = (packages / "diplomat-platform" / "macos" / "Sources" / "Diplomat"
+             / "TelemetryLog.swift")
+    assert how_often(Path(telemetry.__file__)) == how_often(macos) == "a sample is written"
 
 
 def _quota_headline(ledger, readings, *, now):
