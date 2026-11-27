@@ -520,15 +520,13 @@ enum AllocatorSetupTest {
             } else {
                 check("the screen polls --check while its window is up", shown >= 2, "polled \(shown)")
                 window.orderOut(nil)
-                // Settled once the view has heard of the hide and a poll it started then has run.
-                for _ in 0..<500 where window.occlusionState.contains(.visible) {
-                    try? await Task.sleep(nanoseconds: 20_000_000)
-                }
                 _ = await polls(within: 0.5)
+                // A poll started before the hide landed records only once its slow start is up.
                 for _ in 0..<500 where AppLog.inFlight().contains("devicesPoll") {
                     try? await Task.sleep(nanoseconds: 20_000_000)
                 }
-                let hidden = await polls(within: 1.0)
+                // Longer than a poll takes to record, so one made while hidden shows up here.
+                let hidden = await polls(within: 2.5)
                 check("…and not once it is hidden", hidden == 0, "polled \(hidden) times")
                 window.orderFrontRegardless()
                 let back = await polls(within: 10, until: 1)
