@@ -1070,17 +1070,17 @@ def test_a_syncs_deadline_grows_with_what_it_may_do(monkeypatch):
                         lambda: {"rater": {"asks": 4, "timeoutSecs": 300}})
     # 4 rating asks and the 2 forced, 16 gh calls of 65 each and no claude call: a queued
     # job makes that; a fracture and the forced one, 2 claude calls at 300 + 5 + 16 gh
-    # calls, and 6 parts of 5 gh calls each; 2 roots of 218 gh calls (below); Linear's
+    # calls, and 6 parts of 5 gh calls each; 2 roots of 233 gh calls (below); Linear's
     # 300, its 3 re-reads of 30 and the login's refresh; the lookups and the margin.
     assert pipeline.tick_timeout({
         "roots": [{}, {}], "linearTeams": [{}],
         "force": {"rate": ["a", "b"], "fracture": ["c"]}}) == (
-            6 * 1040 + 2 * 1345 + 2 * 1950 + 2 * 14170 + 300 + 4 * 30 + 40)
-    assert pipeline.tick_timeout({}) == 4 * 1040 + 1345 + 1950 + 14170 + 40
+            6 * 1040 + 2 * 1345 + 2 * 1950 + 2 * 15145 + 300 + 4 * 30 + 40)
+    assert pipeline.tick_timeout({}) == 4 * 1040 + 1345 + 1950 + 15145 + 40
     # The asks are read from the rater's own setting.
     monkeypatch.setattr(pipeline, "tunables",
                         lambda: {"rater": {"asks": 1, "timeoutSecs": 300}})
-    assert pipeline.tick_timeout({}) == 1040 + 1345 + 1950 + 14170 + 40
+    assert pipeline.tick_timeout({}) == 1040 + 1345 + 1950 + 15145 + 40
     # A gh call for each item an ask is held for.
     assert pipeline.tick_timeout({"queued": ["a", "b"]}) == pipeline.tick_timeout({}) + 2 * 65
     # Twice a re-read and two label writes for each takeover or revoke asked.
@@ -1092,11 +1092,12 @@ def test_a_syncs_deadline_fits_a_capped_roots_whole_read():
     """A root read whole at ``githubMaxItems`` open issues and as many open PRs, every page
     cut to ``githubPage.least`` by timeouts: 300 / 3 pages of each, the first two in one
     ``Repo`` call, the halvings that cut them (100 issues to 3 in five, 12 PRs in two),
-    and 3 merges of 4 calls: two reads before ``gh pr merge`` and one after."""
+    and 3 merges of 9 calls: two reads before ``gh pr merge`` and one after, three compares
+    and two trees."""
     t = pipeline.tunables()
     assert (t["githubMaxItems"], t["githubPage"]) == (300, {"issues": 100, "prs": 12, "least": 3})
     per_root = pipeline.tick_timeout({"roots": [{}, {}]}) - pipeline.tick_timeout({"roots": [{}]})
-    assert per_root == (2 * 100 - 1 + 5 + 2 + 3 * 4) * 65
+    assert per_root == (2 * 100 - 1 + 5 + 2 + 3 * 9) * 65
 
 
 def test_a_syncs_deadline_is_a_day_at_most(monkeypatch):
