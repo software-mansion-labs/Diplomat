@@ -600,6 +600,8 @@ extension Store {
     nonisolated private static let pipelineReviewKey = PipelineEffect.review(repo: "", number: 0, url: "", headSha: "", author: "").key
     nonisolated private static let pipelineFixKey = PipelineEffect.fixIssue(repo: "", number: 0, url: "", author: "").key
 
+    /// The open records a run of `kind` on `url` is the attempt of; one of no attempts
+    /// (`pipelinePreempted`) is no run's. Twin of `pipeline._open_keys`.
     nonisolated private static func pipelineOpenKeys(_ attempts: [String: ReviewAttempt],
                                                      kind: String, url: String) -> [String] {
         let prefix: String
@@ -610,7 +612,7 @@ extension Store {
         }
         let item = pipelineIdentity(url)
         return attempts.filter { key, rec in
-            rec.concludedAt == nil && key.hasPrefix(prefix)
+            rec.concludedAt == nil && rec.attempts > 0 && key.hasPrefix(prefix)
                 && pipelineIdentity(String(key.dropFirst(prefix.count))) == item
         }.map(\.key)
     }
@@ -638,13 +640,17 @@ extension Store {
         return out
     }
 
-    /// Drops the open record of `job`, just spawned for another asker, which its run would
-    /// otherwise conclude: once it is over, the pipeline asks for its own. Twin of
+    /// Sets the open record of each of the pipeline's queued `asks` another asker's took the
+    /// place of to no attempts, its stamp and date kept: no run concludes it, so the pipeline
+    /// asks again, as a first attempt, once nothing else is on the item. Twin of
     /// `pipeline.preempted`.
     nonisolated static func pipelinePreempted(_ attempts: [String: ReviewAttempt],
-                                              job: AgentJob) -> [String: ReviewAttempt] {
-        let gone = Set(pipelineOpenKeys(attempts, kind: job.kind, url: job.prURL ?? ""))
-        return attempts.filter { !gone.contains($0.key) }
+                                              by asks: [RequestedWork]) -> [String: ReviewAttempt] {
+        var out = attempts
+        for ask in asks {
+            for key in pipelineOpenKeys(out, kind: ask.config.action, url: ask.url) { out[key]?.attempts = 0 }
+        }
+        return out
     }
 
     /// Concludes the cancelled `job`'s record, so no sync asks for it again at that stamp.

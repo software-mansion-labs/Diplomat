@@ -406,14 +406,14 @@ _FIX_PREFIX = "pipeline-fix:"
 
 
 def _open_keys(attempts: dict, kind: str, url: str) -> list[str]:
-    """The open records a run of ``kind`` on ``url`` is the attempt of. Twin of
-    ``Store.pipelineOpenKeys``."""
+    """The open records a run of ``kind`` on ``url`` is the attempt of; one of no attempts
+    (:func:`preempted`) is no run's. Twin of ``Store.pipelineOpenKeys``."""
     prefix = {QUEUE_REVIEW_ACTION: _REVIEW_PREFIX, QUEUE_ISSUES_ACTION: _FIX_PREFIX}.get(kind)
     if prefix is None:
         return []
     item = identity(url)
     return [k for k, a in attempts.items()
-            if a.concluded_at is None and k.startswith(prefix)
+            if a.concluded_at is None and a.attempts > 0 and k.startswith(prefix)
             and identity(k[len(prefix):]) == item]
 
 
@@ -539,12 +539,16 @@ def spawned(attempts: dict, kind: str, url: str, now_ts: float) -> dict:
     return out
 
 
-def preempted(attempts: dict, kind: str, url: str) -> dict:
-    """``attempts`` without the open record of the job (``kind`` on ``url``) that just
-    spawned for another asker, which its run would otherwise conclude: once it is over,
-    the pipeline asks for its own. Twin of ``Store.pipelinePreempted``."""
-    gone = set(_open_keys(attempts, kind, url))
-    return {k: a for k, a in attempts.items() if k not in gone}
+def preempted(attempts: dict, asks: list) -> dict:
+    """``attempts`` with the open record of each of the pipeline's queued ``asks`` another
+    asker's took the place of set to no attempts, its stamp and date kept: no run
+    concludes it, so the pipeline asks again, as a first attempt, once nothing else is on
+    the item. Twin of ``Store.pipelinePreempted``."""
+    out = dict(attempts)
+    for ask in asks:
+        for k in _open_keys(out, ask.action, ask.url):
+            out[k] = replace(out[k], attempts=0)
+    return out
 
 
 def cancelled(attempts: dict, kind: str, url: str, now_ts: float) -> dict:

@@ -1978,23 +1978,57 @@ def test_the_run_of_an_ask_that_took_the_pipelines_place_answers_none_of_its_eff
     other = _asked(effect)
     assert pipe.request_one(other)
     _report(pipe, monkeypatch, pipe.queued_tasks[0])
+    # Still the core's to read past its item cap.
+    assert pipe.pipeline_settings_payload()["queued"] == [effect["url"]]
     _sync(pipe, _result(effect))
     assert [(t.id, t.job.counter) for t in pipe.queued_tasks] == [(other.key, PIPELINE_COUNTER)]
+    assert pipe._load_attempts(PIPELINE_ATTEMPTS)[effect["key"]].attempts == 1
 
 
-def test_the_run_of_an_ask_after_a_pipeline_run_died_answers_none_of_its_effects(
+def test_a_new_head_after_an_ask_that_took_the_pipelines_place_waits_the_hour_from_its_queueing(
         pipe, monkeypatch):
-    calls = _spawn_recorder(monkeypatch)
-    _sync(pipe, _result(_review()))
-    pipe._execute_queued_task(pipe.queued_tasks[0])
-    with open(calls[0]["done"], "w") as fh:
-        fh.write("0")
-    fake_probes(monkeypatch)
-    pipe._settle_agents()
+    _spawn_recorder(monkeypatch)
+    asked = time.time()
+    pipe._apply_pipeline_effects(_result(_review()), asked)
     assert pipe.request_one(_asked(_review()))
     _report(pipe, monkeypatch, pipe.queued_tasks[0])
-    pipe._apply_pipeline_effects(_result(_review()), time.time() + autofix.RETRY_MAX_BACKOFF)
+    pipe._apply_pipeline_effects(_result(_review("def456")), asked + 60)
+    assert pipe.queued_tasks == []
+    pipe._apply_pipeline_effects(_result(_review("def456")), asked + autofix.RE_REQUEST_COOLDOWN)
     assert [t.job.counter for t in pipe.queued_tasks] == [PIPELINE_COUNTER]
+
+
+def test_a_preempt_sets_only_its_items_open_record_to_no_attempts_which_no_run_concludes(pipe):
+    same = "https://github.com/O/R/pull/7"
+    attempts = {
+        f"pipeline-review:{PR}": autofix.ReviewAttempt("abc123", 100.0, 2),
+        f"pipeline-review:{same}": autofix.ReviewAttempt("old", 50.0, 1, concluded_at=60.0),
+        "pipeline-review:https://github.com/o/r/pull/8": autofix.ReviewAttempt("def", 100.0, 1),
+        "pipeline-fix:https://github.com/o/r/issues/7": autofix.ReviewAttempt("fix", 100.0, 1),
+    }
+    marked = pipeline.preempted(attempts, [pipe.pipeline_work(_review())])
+    assert marked == {**attempts, f"pipeline-review:{PR}": autofix.ReviewAttempt("abc123", 100.0, 0)}
+    run = SimpleNamespace(kind="review", pr_url=PR, ledger_key="")
+    assert pipeline.concluded(marked, [run], 200.0) == marked
+
+
+def test_another_askers_fix_beside_the_pipelines_running_one_asks_for_no_third(pipe, monkeypatch):
+    """A fix is no PR's, so the gate lets the other start while the Pipeline's runs. That
+    takes no ask's place, so a run concludes the Pipeline's record."""
+    from diplomat_runtime import agentregistry
+
+    _spawn_recorder(monkeypatch)
+    _sync(pipe, _result(_fix()))
+    pipe._execute_queued_task(pipe.queued_tasks[0])
+    assert pipe.request_one(_asked(_fix()))
+    pipe._execute_queued_task(pipe.queued_tasks[0])
+    runs = agentregistry.load()
+    assert len(runs) == 2, "both fixes must run, or this pins nothing"
+    fake_probes(monkeypatch, activity={r.run_id: ("idle", time.time() - 5) for r in runs})
+    pipe._settle_agents()
+    assert agentregistry.load() == []
+    pipe._apply_pipeline_effects(_result(_fix()), time.time() + autofix.RETRY_MAX_BACKOFF)
+    assert pipe.queued_tasks == []
 
 
 def test_a_starting_fix_is_left_to_its_dispatch(pipe):

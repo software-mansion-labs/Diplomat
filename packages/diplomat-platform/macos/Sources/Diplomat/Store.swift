@@ -4101,7 +4101,7 @@ final class Store: ObservableObject {
     /// pressing SPAWN twice, or sweeping a scope that overlaps an earlier one,
     /// idempotent rather than a way to double up. Any other ask takes the place of a
     /// Pipeline ask nothing has started, which the Pipeline's switches would withdraw or
-    /// pause.
+    /// pause, and its run answers none of the Pipeline's records (`pipelinePreempted`).
     private func request(_ asks: [RequestedWork]) -> (queued: Int, already: Int) {
         let starting = Set(startingTasks.map(\.id))
         let fresh = asks.filter { ask in
@@ -4111,6 +4111,10 @@ final class Store: ObservableObject {
         guard !fresh.isEmpty else { return (0, asks.count) }
         if !pipelineJudged { pipelineStale.formUnion(fresh.filter(\.config.isPipeline).map(\.key)) }
         let taken = Set(fresh.map(\.key))
+        let replaced = requestedWork.filter { taken.contains($0.key) }
+        if !replaced.isEmpty {
+            savePipelineAttempts(Store.pipelinePreempted(loadPipelineAttempts(), by: replaced))
+        }
         requestedWork = requestedWork.filter { !taken.contains($0.key) } + fresh
         publishRequested(fresh)
         bringPollForward(capLoad: autoTasksMeasured)
@@ -4417,16 +4421,10 @@ final class Store: ObservableObject {
 
     /// Write the retry-backoff record for a task the queue dispatched, into the same
     /// per-monitor ledger that monitor writes itself: `AgentJob.counter` names the
-    /// ledger, `attemptStamp` is the stamp that monitor compares against. The pipeline's
-    /// open record another ask's run would answer is dropped (`pipelinePreempted`). Not private:
+    /// ledger, `attemptStamp` is the stamp that monitor compares against. Not private:
     /// the pipeline self-test, which spawns nothing, drives it.
     func recordQueuedAttempt(_ entry: QueuedAgentTask) {
-        guard let counter = entry.job.counter else {
-            let attempts = loadPipelineAttempts()
-            let kept = Store.pipelinePreempted(attempts, job: entry.job)
-            if kept != attempts { savePipelineAttempts(kept) }
-            return
-        }
+        guard let counter = entry.job.counter else { return }
         let record = ReviewAttempt(requestedAt: entry.job.attemptStamp,
                                    lastDispatchedAt: Date(), attempts: entry.attemptNumber)
         func put(_ load: () -> [String: ReviewAttempt], _ save: ([String: ReviewAttempt]) -> Void) {

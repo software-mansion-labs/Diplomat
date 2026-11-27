@@ -3012,7 +3012,8 @@ class Store(QObject):
         pressing SPAWN twice, or sweeping a scope that overlaps an earlier one,
         idempotent rather than a way to double up. Any other ask takes the place of a
         Pipeline ask nothing has started, which the Pipeline's switches would withdraw or
-        pause."""
+        pause, and its run answers none of the Pipeline's records
+        (:func:`pipeline.preempted`)."""
         def fresh_of(candidates: list[autofix.RequestedWork]) -> list[autofix.RequestedWork]:
             held = {r.key: r.pipeline for r in self.requested_work}
             starting = {e.id for e in self.starting_tasks}
@@ -3036,6 +3037,10 @@ class Store(QObject):
                 if not self._pipeline_judged:
                     self._pipeline_stale |= {a.key for a in fresh if a.pipeline}
                 taken = {a.key for a in fresh}
+                replaced = [r for r in self.requested_work if r.key in taken]
+                if replaced:
+                    self._save_attempts(PIPELINE_ATTEMPTS, pipeline.preempted(
+                        self._load_attempts(PIPELINE_ATTEMPTS), replaced))
                 self.requested_work = [r for r in self.requested_work
                                        if r.key not in taken] + fresh
                 # Under the lock too: queued_tasks is read-modify-written, so a press
@@ -3550,13 +3555,11 @@ class Store(QObject):
         same per-monitor ledger that monitor writes itself: ``AgentJob.counter`` names
         the ledger, ``attempt_stamp`` is the stamp that monitor compares against. The
         Pipeline's records are its effects', written when asked for: the one this run
-        is the attempt of is dated now (:func:`pipeline.spawned`), and one another ask's
-        run would answer is dropped (:func:`pipeline.preempted`)."""
-        if entry.job.counter in (PIPELINE_COUNTER, None):
+        is the attempt of is dated now (:func:`pipeline.spawned`)."""
+        if entry.job.counter == PIPELINE_COUNTER:
             attempts = self._load_attempts(PIPELINE_ATTEMPTS)
-            url = entry.job.pr_url or ""
-            dated = (pipeline.spawned(attempts, entry.job.kind, url, time.time())
-                     if entry.job.counter else pipeline.preempted(attempts, entry.job.kind, url))
+            dated = pipeline.spawned(attempts, entry.job.kind, entry.job.pr_url or "",
+                                     time.time())
             if dated != attempts:
                 self._save_attempts(PIPELINE_ATTEMPTS, dated)
             return

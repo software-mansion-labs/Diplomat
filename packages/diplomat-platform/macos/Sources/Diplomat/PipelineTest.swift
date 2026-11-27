@@ -1104,19 +1104,50 @@ enum PipelineTest {
             await store.applyPipeline(result([effect]), now: now)
             store.requestOne(other)
             report(store.queuedTasks.first)
+            let read = Store.pipelineQueued(store.requestedWork, attempts: store.loadPipelineAttempts()) == [effect.url]
             await store.applyPipeline(result([effect]), now: now)
             check("the run of an ask that took the pipeline's place answers none of its effects: "
-                  + "it asks for its own (\(other.key))", store.queuedTasks.map(\.job.counter) == [.pipeline])
+                  + "it asks for its own, as a first attempt (\(other.key))",
+                  store.queuedTasks.map(\.job.counter) == [.pipeline]
+                      && store.loadPipelineAttempts()[effect.key]?.attempts == 1)
+            check("…its item still the core's to read past its cap meanwhile (\(other.key))", read)
             clearQueue()
             store.savePipelineAttempts([:])
         }
         await store.applyPipeline(result([review]), now: now)
-        if let task = store.queuedTasks.first { store.recordQueuedAttempt(task) }
-        clearQueue()
         store.requestOne(sweptReview)
         report(store.queuedTasks.first)
-        await store.applyPipeline(result([review]), now: now.addingTimeInterval(ReviewReconcile.retryMaxBackoff))
-        check("…nor those of a pipeline run that died", store.queuedTasks.map(\.job.counter) == [.pipeline])
+        await store.applyPipeline(result([pushed]), now: now.addingTimeInterval(60))
+        let waited = store.queuedTasks.isEmpty
+        await store.applyPipeline(result([pushed]), now: now.addingTimeInterval(ReviewReconcile.reRequestCooldown))
+        check("…and a new head's waits the hour from when the pipeline's was queued",
+              waited && store.queuedTasks.map(\.job.counter) == [.pipeline])
+        clearQueue()
+        store.savePipelineAttempts([:])
+        let spread = [review.key: ReviewAttempt(requestedAt: "aaa111", lastDispatchedAt: now, attempts: 2),
+                      "pipeline-review:https://github.com/O/R/pull/90011":
+                          ReviewAttempt(requestedAt: "old", lastDispatchedAt: t0, attempts: 1, concludedAt: t0),
+                      "pipeline-review:https://github.com/o/r/pull/90012":
+                          ReviewAttempt(requestedAt: "x", lastDispatchedAt: now, attempts: 1),
+                      "pipeline-fix:https://github.com/o/r/issues/90011":
+                          ReviewAttempt(requestedAt: "fix", lastDispatchedAt: now, attempts: 1)]
+        var zeroed = spread
+        zeroed[review.key]?.attempts = 0
+        let marked = Store.pipelinePreempted(spread, by: store.pipelineAsk(review).map { [$0] } ?? [])
+        check("a takeover sets only its item's open record to no attempts, which no run then concludes",
+              marked == zeroed && Store.pipelineConcluded(marked, runs: [reviewRun], at: now) == marked)
+        await store.applyPipeline(result([fix]), now: now)
+        if let own = store.queuedTasks.first {
+            store.recordQueuedAttempt(own)
+            store.forgetRequested(own.id)
+            store.dropQueuedTask(own.id)
+            store.requestOne(community)
+            report(store.queuedTasks.first)
+            report(own)
+        }
+        await store.applyPipeline(result([fix]), now: now.addingTimeInterval(ReviewReconcile.retryMaxBackoff))
+        check("another asker's fix started beside the pipeline's running one takes no ask's place: "
+              + "a run concludes its record, and no third is asked for", store.queuedTasks.isEmpty)
         clearQueue()
         store.savePipelineAttempts([:])
         check("a result dated in the second its sync began is that sync's",
