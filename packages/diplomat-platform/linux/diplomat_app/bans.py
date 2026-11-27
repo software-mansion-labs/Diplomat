@@ -131,9 +131,16 @@ def read() -> list[BannedAuthor]:
 def unreadable() -> bool:
     """Whether the file is present but no JSON object whose ``banned`` is a list or
     absent. Twin of ``BanList.readFile``'s ``unreadable``."""
+    return _listed() is None
+
+
+def _listed() -> dict | None:
+    """The file's object (``{}`` when absent), or None when it is :func:`unreadable`."""
     path = banned_path()
     data = atomicjson.read_object(path)
-    return path.exists() if data is None else not isinstance(data.get("banned", []), list)
+    if data is None:
+        return None if os.path.exists(path) else {}
+    return data if isinstance(data.get("banned", []), list) else None
 
 
 #: Why a gate refused work while the list is :func:`unreadable`.
@@ -277,9 +284,9 @@ def _write_directly(login: str, handle: str, place: str, permalink: str,
     file that is :func:`unreadable` is left as it is: writing over it would lift every
     ban in it."""
     path = banned_path()
-    if unreadable():
+    data = _listed()
+    if data is None:
         return f"{path} is unreadable, so it was left as it is"
-    data = atomicjson.read_object(path) or {}
     data.setdefault("banned", [])
     at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     entry = {"login": login, "reason": "prompt injection", "pr": permalink or None,
@@ -323,9 +330,9 @@ def _unban_directly(login: str) -> str | None:
     """The daemon's ``handleUnban``; returns why it failed, or None. A list that does
     not hold ``login`` is left unwritten."""
     path = banned_path()
-    if unreadable():
+    data = _listed()
+    if data is None:
         return f"{path} is unreadable, so it was left as it is"
-    data = atomicjson.read_object(path) or {}
     listed = data.get("banned", [])
     low = login.lower()
     kept = [b for b in listed

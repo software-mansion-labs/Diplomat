@@ -402,10 +402,11 @@ extension Store {
                 return refused("comms-fix", who, "@\(issue.author) is banned, so "
                                + "\(Store.commsRef(n, in: root)) was not queued")
             }
-            var cfg = IssueConfig(target: .specific, me: (try? await me(for: root)) ?? "",
-                                  specificIssue: String(n))
+            let login = (try? await me(for: root)) ?? ""
+            var cfg = IssueConfig(target: .specific, me: login, specificIssue: String(n))
             cfg.home = root
-            return queue(RequestedWork(number: n, url: issue.url, author: issue.author,
+            let mine = !login.isEmpty && issue.author.lowercased() == login.lowercased()
+            return queue(RequestedWork(number: n, url: issue.url, author: mine ? "" : issue.author,
                                        config: .issues(cfg)),
                          verb: "comms-fix", who: who, front: true)
         case .bump(let n, let repo):

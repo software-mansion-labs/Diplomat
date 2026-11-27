@@ -1032,17 +1032,19 @@ enum CommsTest {
         }
         check("…and its gate refuses whoever's work reaches it: \(probe.map { "\($0)" } ?? "<not queued>")",
               probe == .banListUnreadable)
-        var unattributed = victorTask
-        unattributed?.job.authorLogin = ""
-        var unattributedProbe: Store.DispatchOutcome?
-        if let job = unattributed?.job {
+        var unattributed: [Store.DispatchOutcome] = []
+        var unattributedHeld: [Bool] = []
+        for author in ["", nil] as [String?] {
+            guard var task = victorTask else { break }
+            task.job.authorLogin = author
+            unattributedHeld.append(store.isHeld(task))
             let autoRun = store.queueAutoRun
             store.queueAutoRun = false
-            unattributedProbe = await store.dispatchAgent(job, source: .auto)
+            unattributed.append(await store.dispatchAgent(task.job, source: .auto))
             store.queueAutoRun = autoRun
         }
         check("…but work naming no author neither waits nor is refused for it",
-              unattributed.map { store.isHeld($0) } == false && unattributedProbe == .atCapacity)
+              unattributedHeld == [false, false] && unattributed == [.atCapacity, .atCapacity])
         store.error = nil
         let unreadSkipsBefore = feed("ban-skip").count
         if probe == .banListUnreadable { await store.executeQueuedTask(victorKey) }

@@ -702,8 +702,8 @@ def test_an_unreadable_ban_list_holds_each_review_request_until_it_reads(store, 
     bans.banned_path().parent.mkdir(parents=True)
     bans.banned_path().write_text("{")
     store._poll_review_requests([ROOT])
-    assert (calls, store._load_attempts("reviewReqAttempts"), store.unaddressed_reviews) == (
-        [], {}, 1)
+    assert (calls, store._load_attempts("reviewReqAttempts"), store.unaddressed_reviews,
+            store._staged_queue) == ([], {}, 1, [])
     assert [e.detail for e in activity.read() if e.action == "ban-skip"] == []
     bans.banned_path().unlink()
     store._poll_review_requests([ROOT])

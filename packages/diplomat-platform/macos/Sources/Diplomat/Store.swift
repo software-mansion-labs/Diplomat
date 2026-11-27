@@ -4274,8 +4274,9 @@ final class Store: ObservableObject {
 
     /// The queued tasks the drain may start, in the operator's order — everything
     /// whose monitor is still on, plus the reviews the operator asked for, which no
-    /// monitor speaks for either way. Empty while `queueAutoRun` is off, including
-    /// the asks: that switch is over the queue itself, not over what fills it.
+    /// monitor speaks for either way, less what `isHeld` holds. Empty while
+    /// `queueAutoRun` is off, including the asks: that switch is over the queue
+    /// itself, not over what fills it.
     ///
     /// Not private: this is the seam the queue self-test drives. Asserting on the
     /// list the drain walks is how the "a paused monitor's work is held, not run"
@@ -4642,7 +4643,7 @@ final class Store: ObservableObject {
     /// is filling, and skips paused work by construction) and "execute now" (where
     /// the operator is overriding both holds deliberately). It skips the measurement —
     /// not just its verdict — so neither pays for a second `ps` scan, and so a forced
-    /// run cannot re-queue itself.
+    /// run cannot re-queue itself for want of a slot.
     ///
     /// `forced` is only the second of those, and it also overrides the budget and the
     /// disk floor. The drain runs the machine's own automatic work, and work that could

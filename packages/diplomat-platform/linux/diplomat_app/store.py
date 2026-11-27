@@ -2082,7 +2082,7 @@ class Store(QObject):
         """Run one agent job through the shared gate (``autofix.dispatch_decide`` -
         the pure, tested decision both platforms mirror) and, on proceed, spawn and
         register it. Returns the verdict: ``"spawned"``, an ``autofix.VERDICT_*``
-        refusal, or ``"failed"`` (spawn error). Twin of Store.dispatchAgent (macOS).
+        refusal, :data:`bans.VERDICT_UNREADABLE`, or ``"failed"`` (spawn error). Twin of Store.dispatchAgent (macOS).
 
         With the Diplomacy Network on, proceeding is an offer to the job's pool
         (:meth:`_offer_tracked`), booked and counted as a spawn and answered with a
@@ -2114,7 +2114,7 @@ class Store(QObject):
         it is filling, and skips paused work by construction) and "execute now"
         (where the operator is overriding both holds deliberately). It skips the
         measurement — not just its verdict — so neither pays for a second ``ps``
-        scan, and so a forced run cannot re-queue itself.
+        scan, and so a forced run cannot re-queue itself for want of a slot.
 
         ``forced`` is only the second of those, and lifts the budget and the disk
         floor. The drain runs the machine's own automatic work, and work that could
@@ -3409,7 +3409,7 @@ class Store(QObject):
     def drainable_tasks(self) -> list[autofix.QueuedTask]:
         """The queued tasks the drain may start, in the operator's order — everything
         whose monitor is still on, plus the reviews the operator asked for, which no
-        monitor speaks for either way.
+        monitor speaks for either way, less what :meth:`is_held` holds.
 
         Empty while :attr:`queue_auto_run` is off, including the asks: that switch is
         over the queue itself, not over what fills it."""
