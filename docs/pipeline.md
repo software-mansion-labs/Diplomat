@@ -203,10 +203,10 @@ An open PR's files, as GitHub lists them, put a floor under its rating in code (
 
 A test file is one under a `test`, `tests`, `__tests__` or `testdata` directory, or named like
 `test_*`, `*_test.*`, `*.test.*`, `*_spec.*` or `*.spec.*`. Rating a PR also floors it by its diff:
-a moved submodule, or a diff longer than the 20,000 characters the rater reads, makes risk
-high. The model can rate above the floor, never below it, and Diplomat neither
-puts a PR whose floor is past its limit on the fast track nor merges it, whatever its labels say,
-unless you [take it over](#takeover).
+a moved submodule, a binary file's change, a denied path renamed away, or a diff longer than the
+20,000 characters the rater reads, makes risk high. The model can rate above the floor, never below
+it, and Diplomat neither puts a PR whose floor is past its limit on the fast track nor merges it,
+whatever its labels say, unless you [take it over](#takeover).
 
 ### The fast-track limit
 

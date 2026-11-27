@@ -871,7 +871,6 @@ final class PipelineSync {
             + entries.indices.filter { entries[$0].item.source == .linear && PipelineRead.closes(pr, linear: entries[$0]) }
     }
 
-    /// The highest rating `e`'s fast track takes.
     func limit(_ e: PipelineEntry) -> PipelineRating { e.root?.limit ?? .low }
 
     /// `lifted`: whatever its rating or triage, as when taken over.

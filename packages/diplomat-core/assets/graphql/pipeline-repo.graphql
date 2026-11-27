@@ -1,7 +1,7 @@
 # Every read a pipeline sync makes of one repository, each picked by `gh api graphql -f
 # operationName=<name>`. Open issues and PRs page newest created first, so an item updated
-# meanwhile keeps its place. `files` need not list past `floor.maxFiles`: `changedFiles`
-# says a PR exceeds it. Any other `totalCount` past what a connection lists reads as
+# meanwhile keeps its place. A PR's `changedFiles` past what `files` lists floors its risk
+# high. Any other `totalCount` past what a connection lists reads as
 # whatever holds the item back: a label, an unresolved thread, a reviewer, a commit or a
 # closing reference nobody saw. A timeline's `totalCount` counts every event whatever
 # `itemTypes` says; `filteredCount` counts the ones it names.

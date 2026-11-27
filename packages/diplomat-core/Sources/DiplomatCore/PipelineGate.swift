@@ -109,7 +109,9 @@ public enum PipelineGate {
     }
 
     /// What the diff's text adds to `floor`. A moved submodule is high risk: GitHub lists it
-    /// as one modified line whatever it pulls in. So is a diff the rater cannot read whole.
+    /// as one modified line whatever it pulls in. So is what the rater cannot read: a diff past
+    /// its length, or a binary file's content; and a denied path renamed away, which the
+    /// files list names by its new path only.
     static func diffFloor(_ diff: String, diffChars: Int) -> (rating: PipelineRating, reasons: [String]) {
         var rating = PipelineRating(risk: .low, complexity: .low)
         var reasons: [String] = []
@@ -123,6 +125,20 @@ public enum PipelineGate {
         if moved {
             rating.risk = .high
             reasons.append("moves a submodule")
+        }
+        let lines = diff.split(separator: "\n")
+        if lines.contains(where: { $0.hasPrefix("Binary files ") && $0.hasSuffix(" differ") }) {
+            rating.risk = .high
+            reasons.append("changes a binary file")
+        }
+        if let f = (try? CoreAssets.pipeline())?.floor {
+            for line in lines where line.hasPrefix("rename from ") {
+                let path = String(line.dropFirst("rename from ".count))
+                if isDenied(path, f) {
+                    rating.risk = .high
+                    reasons.append("renames \(path), a denied path")
+                }
+            }
         }
         return (rating, reasons)
     }

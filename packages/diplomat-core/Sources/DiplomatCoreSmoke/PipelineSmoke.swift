@@ -2332,6 +2332,24 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     check(item(sm.result, prURL(11))?.rating == rating(.high, .low)
           && sm.events.contains { $0.kind == .rated && $0.detail.contains("moves a submodule") },
           "a submodule bump: \(sm.events.map(\.detail))")
+    func diffRated(_ name: String, _ diff: String) -> Synced {
+        let t = only([4, 11])
+        t.diffs[11] = diff
+        return sync(t, rateOwn, dir(name), t0)
+    }
+    let renamed = diffRated("renamed-denied", "diff --git a/.github/workflows/release.yml b/docs/release.yml\n"
+        + "similarity index 100%\nrename from .github/workflows/release.yml\nrename to docs/release.yml\n")
+    check(item(renamed.result, prURL(11))?.rating == rating(.high, .low) && renamed.events.contains {
+        $0.detail.contains("renames .github/workflows/release.yml, a denied path")
+    }, "a denied path renamed away: \(renamed.events.map(\.detail))")
+    let moved = diffRated("renamed", "diff --git a/src/a.swift b/src/b.swift\nsimilarity index 100%\n"
+        + "rename from src/a.swift\nrename to src/b.swift\n")
+    check(item(moved.result, prURL(11))?.rating == rating(.low, .low), "any other rename: \(moved.events.map(\.detail))")
+    let binary = diffRated("binary", "diff --git a/assets/logo.png b/assets/logo.png\nindex 1..2 100644\n"
+        + "Binary files a/assets/logo.png and b/assets/logo.png differ\n")
+    check(item(binary.result, prURL(11))?.rating == rating(.high, .low)
+          && binary.events.contains { $0.detail.contains("changes a binary file") },
+          "a binary file: \(binary.events.map(\.detail))")
     let long = only([4, 11])
     long.diffs[11] = "diff --git a/src/a.swift b/src/a.swift\n" + String(repeating: "+x\n", count: model.rater.diffChars / 3 + 1)
     let lg = sync(long, rateOwn, dir("long-diff"), t0)
