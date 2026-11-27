@@ -24,20 +24,24 @@ PROMPTS = {
 _FILES = re.compile(r"\w+\.(?:swift|py)\b")
 
 
+def _places_assembly_in(text: str, swift: str, sentence: str) -> None:
+    assert _FILES.findall(text) == [swift], "name no source file but the Swift builder"
+    assert sentence in text
+    assert "glue" not in text
+
+
 @pytest.mark.parametrize("asset", sorted(PROMPTS))
 def test_the_prompt_asset_comment_places_assembly_in_its_swift_builder(asset: str):
     swift, _ = PROMPTS[asset]
     assert "func buildPrompt() -> String" in (CORE / swift).read_text(encoding="utf-8")
-    comment = getattr(core, asset)()["_comment"]
-    assert _FILES.findall(comment) == [swift]
-    assert (f"assembly order/conditions live in {swift}, reached from Linux through the "
-            "diplomat-core CLI.") in comment
+    _places_assembly_in(getattr(core, asset)()["_comment"], swift,
+                        f"assembly order/conditions live in {swift}, reached from Linux "
+                        "through the diplomat-core CLI.")
 
 
 @pytest.mark.parametrize("asset", sorted(PROMPTS))
 def test_the_linux_config_module_places_assembly_in_its_swift_builder(asset: str):
     swift, module = PROMPTS[asset]
-    doc = " ".join(importlib.import_module(module).__doc__.split())
-    assert _FILES.findall(doc) == [swift]
-    assert (f"the *assembly* order/conditions live in Swift (DiplomatCore/{swift}) and are "
-            "reached by shelling out to the ``diplomat-core`` CLI") in doc
+    _places_assembly_in(" ".join(importlib.import_module(module).__doc__.split()), swift,
+                        f"the *assembly* order/conditions live in Swift (DiplomatCore/{swift}) "
+                        "and are reached by shelling out to the ``diplomat-core`` CLI")

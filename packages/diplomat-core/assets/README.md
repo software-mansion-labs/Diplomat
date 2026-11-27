@@ -8,7 +8,7 @@ Everything in here is consumed **verbatim** by both front-ends:
 The two UIs differ only in *rendering*. All the triage logic — what to query,
 how to filter, what the prompts say — lives here once. Change a query or a
 threshold in one file and both platforms pick it up; the golden-prompt tests
-(below) fail CI if the two front-ends' prompts ever differ by a byte.
+(below) fail CI if either front-end drifts from them by a byte.
 
 | File | What it holds |
 |------|---------------|
