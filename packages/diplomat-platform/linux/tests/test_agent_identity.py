@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -79,9 +80,9 @@ def _await_exec(pid: int, timeout: float = 10.0) -> str:
 
     The pid file is written by the ``printf`` BEFORE the exec, so the sample cannot be
     taken the moment it appears: between the two the argv is still the shell's, and
-    reading it there says "wrapper" about a run that is about to be the agent. Waited
-    for rather than slept on, so a shell that never execs still fails — just at the
-    deadline, with the argv it was stuck on.
+    reading it there says "wrapper" about a run that is about to be the agent; inside
+    the exec itself it reads empty. Waited for rather than slept on, so a shell that
+    never execs still fails — just at the deadline, with the argv it was stuck on.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -224,6 +225,22 @@ def test_the_recorded_pid_dies_with_the_agent(tmp_path):
         _kill(proc)
 
 
+def test_the_two_runs_check_waits_out_the_exec(tmp_path, monkeypatch):
+    """The second run's pid file can be read while its agent is still being exec'd,
+    and a ``/proc/<pid>/cmdline`` read inside the exec is empty. Serving each pid's
+    first read that empty argv puts every read the check makes at that instant."""
+    real, served = _cmdline, set()
+
+    def mid_exec_first(pid: int) -> str:
+        if pid in served:
+            return real(pid)
+        served.add(pid)
+        return ""
+
+    monkeypatch.setattr(sys.modules[__name__], "_cmdline", mid_exec_first)
+    test_two_runs_on_one_pr_get_distinct_identities(tmp_path)
+
+
 def test_two_runs_on_one_pr_get_distinct_identities(tmp_path):
     """The case the prompt-text scan could not represent at all: it yielded a set of PR
     numbers, so a second run on #337 was indistinguishable from the first. Two pid
@@ -247,7 +264,7 @@ def test_two_runs_on_one_pr_get_distinct_identities(tmp_path):
             assert _await_file(pid_file), f"run {i} never wrote a pid"
             pids.append(int(pid_file.read_text().strip()))
         assert pids[0] != pids[1], "two runs on one PR must not share an identity"
-        assert all("claude" in _cmdline(p) for p in pids)
+        assert all("claude" in _await_exec(p) for p in pids)
     finally:
         for p in procs:
             _kill(p)
