@@ -25,6 +25,8 @@ rm -rf "/Applications/$APP" "$HOME/Applications/$APP" \
   || echo "Could not remove an old copy of $APP; delete it by hand, a click on it starts stale code." >&2
 
 # Write the LaunchAgent.
+. "$HERE/agent-launcher.sh"
+PROGRAM="$(agent_program "$BIN")"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$PLIST" <<PL
@@ -33,11 +35,8 @@ cat > "$PLIST" <<PL
 <plist version="1.0">
 <dict>
   <key>Label</key><string>$LABEL</string>
-  <!-- install/Diplomat, a link to /usr/bin/env, runs the binary: macOS kills an agent
-       loaded at login whose program's signature has changed since, and every build
-       re-signs Diplomat. Login Items lists the agent by the link's name. -->
   <key>ProgramArguments</key>
-  <array><string>$PKG_DIR/install/Diplomat</string><string>$BIN</string></array>
+  <array>$PROGRAM</array>
   <!-- An unattended start: no window, and the frontmost app keeps focus. -->
   <key>EnvironmentVariables</key>
   <dict><key>DIPLOMAT_BACKGROUND</key><string>1</string></dict>

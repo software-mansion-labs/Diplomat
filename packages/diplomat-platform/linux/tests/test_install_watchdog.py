@@ -104,7 +104,9 @@ def macos_agent(tmp_path: Path) -> tuple[dict, str, Path]:
 def test_the_macos_agent_runs_the_binary_in_watchdog_mode_every_five_minutes(macos_agent) -> None:
     agent, calls, binary = macos_agent
     assert agent["Label"] == "com.ignacy.diplomat.watchdog"
-    assert agent["ProgramArguments"] == [str(MACOS_INSTALL / "Diplomat"), str(binary)]
+    launcher = tmp_path / "Library" / "Application Support" / "Diplomat" / "Diplomat"
+    assert agent["ProgramArguments"] == [str(launcher), str(binary)]
+    assert os.readlink(launcher) == "/usr/bin/env"
     assert agent["EnvironmentVariables"] == {"DIPLOMAT_WATCHDOG": "1"}
     assert agent["StartInterval"] == 300
     # launchd restarting the app itself is what would fight the singleton; the agent

@@ -83,23 +83,60 @@ enum Daemon {
         }
     }
 
-    /// Has an agent plist an older installer wrote, starting a bundle's binary itself,
-    /// start it through the `install/Diplomat` beside that bundle, as the installers write
-    /// it: macOS kills an agent loaded at login whose program's signature has changed
-    /// since, and every build re-signs Diplomat. Not this instance's link: a run from
-    /// another checkout would tie the agents to that one. Returns whether it wrote.
+    /// What the agents start a bundle's binary through, as `install/agent-launcher.sh`
+    /// makes it: a link to `/usr/bin/env`, outside every checkout.
+    static var launcher: URL {
+        URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Application Support/Diplomat/Diplomat")
+    }
+
+    /// Makes `link` a link to `/usr/bin/env`, replacing anything else there. Returns
+    /// whether it is one.
     @discardableResult
-    static func startThroughLauncher(plist url: URL) -> Bool {
-        rewrite(url) { dict in
-            guard let args = dict["ProgramArguments"] as? [String], let first = args.first else { return false }
-            let binary = URL(fileURLWithPath: first)
-            guard binary.pathComponents.suffix(3) == ["Contents", "MacOS", "Diplomat"] else { return false }
-            let launcher = binary.deletingLastPathComponent().deletingLastPathComponent()
-                .deletingLastPathComponent().deletingLastPathComponent()
-                .appendingPathComponent("install/Diplomat").path
-            guard FileManager.default.fileExists(atPath: launcher) else { return false }
-            dict["ProgramArguments"] = [launcher] + args
-            return true
+    static func makeLauncher(_ link: URL = launcher) -> Bool {
+        let fm = FileManager.default
+        func made() -> Bool { (try? fm.destinationOfSymbolicLink(atPath: link.path)) == "/usr/bin/env" }
+        if made() { return true }
+        try? fm.removeItem(at: link)
+        try? fm.createDirectory(at: link.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? fm.createSymbolicLink(atPath: link.path, withDestinationPath: "/usr/bin/env")
+        return made()
+    }
+
+    /// A GUI launch's: has every agent start its binary through `launcher`, then loads the
+    /// updater and the watchdog again where launchd still holds what their plists named
+    /// before, off the calling thread as each can wait a minute. Not the login agent: it
+    /// starts only at login, which loads it anew, and a reload would start a second
+    /// instance. `done` gets the labels reloaded.
+    static func startAgentsThroughLauncher(plist: (String) -> URL = plist, launcher: URL = launcher,
+                                           launchctl: @escaping ([String]) -> (status: Int32, out: String) = launchctl,
+                                           done: @escaping ([String]) -> Void = { _ in }) {
+        rewriteOntoLauncher(plists: agentLabels.map(plist), launcher: launcher)
+        let scheduled = scheduledAgents.map { ($0, plist($0)) }
+        DispatchQueue.global(qos: .utility).async {
+            done(scheduled.filter { reloadIfStale($0.0, plist: $0.1, launchctl: launchctl) }.map(\.0))
+        }
+    }
+
+    /// Has agent plists an older installer wrote, starting a bundle's binary itself, start
+    /// it through `launcher`, by `install/agent-launcher.sh`'s rule: not a path holding `=`,
+    /// which env would take for a variable. Not one with a `Program`, which launchd runs
+    /// instead. Makes or repairs the link first while any plist is there. Returns the plists
+    /// it rewrote.
+    @discardableResult
+    static func rewriteOntoLauncher(plists: [URL], launcher: URL) -> [URL] {
+        let present = plists.filter { FileManager.default.fileExists(atPath: $0.path) }
+        guard !present.isEmpty, makeLauncher(launcher) else { return [] }
+        return present.filter { url in
+            rewrite(url) { dict in
+                guard dict["Program"] == nil,
+                      let args = dict["ProgramArguments"] as? [String], let first = args.first,
+                      !first.contains("="),
+                      URL(fileURLWithPath: first).pathComponents.suffix(3) == ["Contents", "MacOS", "Diplomat"]
+                else { return false }
+                dict["ProgramArguments"] = [launcher.path] + args
+                return true
+            }
         }
     }
 
@@ -107,11 +144,14 @@ enum Daemon {
     /// named before a rewrite: until the next login, launchd refuses (EX_CONFIG) to start
     /// an agent loaded at login whose plist has changed since. Waits up to `wait` for a
     /// run in progress, which a reload would stop: the updater and the watchdog stay up
-    /// for seconds after starting the app that calls this. Returns whether it reloaded.
+    /// for seconds after starting the app that calls this. One still running then is left
+    /// to the next GUI launch. Returns whether it reloaded.
     @discardableResult
     static func reloadIfStale(_ label: String, plist url: URL, wait: TimeInterval = 60,
                               launchctl: ([String]) -> (status: Int32, out: String) = launchctl) -> Bool {
-        guard let program = (read(url)?["ProgramArguments"] as? [String])?.first else { return false }
+        guard let dict = read(url),
+              let program = dict["Program"] as? String ?? (dict["ProgramArguments"] as? [String])?.first
+        else { return false }
         let domain = "gui/\(getuid())"
         let deadline = Date().addingTimeInterval(wait)
         while true {

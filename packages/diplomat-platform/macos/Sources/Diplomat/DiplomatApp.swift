@@ -69,12 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             SingleInstance.terminateOthers()
             OperatorQuit.clear()
             Daemon.markLoginStartUnattended()
-            for agent in Daemon.agentLabels { Daemon.startThroughLauncher(plist: Daemon.plist(agent)) }
-            // Not the login agent: it starts only at login, which loads it anew, and a
-            // reload would start a second instance.
-            DispatchQueue.global(qos: .utility).async {
-                for agent in Daemon.scheduledAgents { Daemon.reloadIfStale(agent, plist: Daemon.plist(agent)) }
-            }
+            Daemon.startAgentsThroughLauncher()
 
             // First run from a terminal (`swift run`): offer to install as a login
             // daemon. If accepted, the detached installer builds + launches the

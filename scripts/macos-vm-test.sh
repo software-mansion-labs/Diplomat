@@ -93,16 +93,16 @@ STAGED="/Volumes/My Shared Files/stage"
 # A layout RepoPaths takes for a checkout, so the watchdog finds the bundle it launches.
 APP='$HOME/chk/packages/diplomat-platform/macos/Diplomat.app'
 BIN="$APP/Contents/MacOS/Diplomat"
-LAUNCHER='$HOME/chk/packages/diplomat-platform/macos/install/Diplomat'
+LAUNCHER='$HOME/Library/Application Support/Diplomat/Diplomat'
 AGENT='$HOME/Library/LaunchAgents/com.ignacy.diplomat.plist'
 WATCHDOG='$HOME/Library/LaunchAgents/com.ignacy.diplomat.watchdog.plist'
 
 echo "== guest: install the bundle"
 g "pkill -x Diplomat; launchctl bootout gui/\$(id -u)/com.ignacy.diplomat 2>/dev/null; \
    launchctl bootout gui/\$(id -u)/com.ignacy.diplomat.watchdog 2>/dev/null; \
-   rm -rf ~/chk ~/.diplomat/operator-quit $AGENT $WATCHDOG && mkdir -p ~/chk/packages/diplomat-platform/macos && touch ~/chk/.git && \
-   cp -R '$STAGED/Diplomat.app' $APP && mkdir -p ~/chk/packages/diplomat-platform/macos/install && \
-   ln -s /usr/bin/env ~/chk/packages/diplomat-platform/macos/install/Diplomat && cp '$STAGED/winlist' ~/winlist && \
+   rm -rf ~/chk ~/.diplomat/operator-quit $AGENT $WATCHDOG \"$LAUNCHER\" && \
+   mkdir -p ~/chk/packages/diplomat-platform/macos && touch ~/chk/.git && \
+   cp -R '$STAGED/Diplomat.app' $APP && cp '$STAGED/winlist' ~/winlist && \
    defaults write com.ignacy.diplomat didTriggerTerminalAutomation -bool true"
 
 pid() { g "pgrep -x Diplomat | head -1" 2>/dev/null || true; }
@@ -143,11 +143,13 @@ check "it is a regular app, with a Dock icon" [ "$(app_type)" = "Foreground" ]
 shot 1-attended
 check "the main panel shows, not Settings" "$CACHE/ocr" "$OUT/1-attended.png" "AGENT TASKS"
 FIRST="$(pid)"
-check "the launch has that older login agent start the binary through install/Diplomat" \
-  g "[ \"\$(plutil -extract ProgramArguments.0 raw $AGENT)\" = $LAUNCHER ] && \
+check "the launch makes the launcher, a link to /usr/bin/env" \
+  g "[ \"\$(readlink \"$LAUNCHER\")\" = /usr/bin/env ]"
+check "…has that older login agent start the binary through it" \
+  g "[ \"\$(plutil -extract ProgramArguments.0 raw $AGENT)\" = \"$LAUNCHER\" ] && \
      [ \"\$(plutil -extract ProgramArguments.1 raw $AGENT)\" = $BIN ]"
-check "…and loads that older watchdog agent again, now starting install/Diplomat" \
-  within 10 g "launchctl print gui/\$(id -u)/com.ignacy.diplomat.watchdog | grep -q \"^.program = $LAUNCHER\\\$\""
+check "…and loads that older watchdog agent again, now starting it" \
+  within 10 g "launchctl print gui/\$(id -u)/com.ignacy.diplomat.watchdog | grep -qxF \"	program = $LAUNCHER\""
 g "launchctl bootout gui/\$(id -u)/com.ignacy.diplomat.watchdog; rm -f $WATCHDOG"
 
 echo "== the menu bar: Settings, close, reopen"

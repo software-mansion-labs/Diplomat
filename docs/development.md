@@ -145,15 +145,19 @@ frontmost app in front. Click the Dock icon to open the window. Any other launch
 answers before AppKit starts, so it never registers as an app. A login agent an
 older installer wrote, without `DIPLOMAT_BACKGROUND`, gets it at the next GUI launch.
 
-launchd starts each of the three as `install/Diplomat <the bundle's binary>`, where
-`install/Diplomat` is a link to `/usr/bin/env`. macOS ties an agent loaded at login to
-its program's code signature and kills a start whose signature has changed since
-(`Launch Constraint Violation`, with a crash report), and every build re-signs the
-ad-hoc-signed binary; env never changes. Login Items lists each agent by the link's
-name. An agent an older installer wrote, starting the binary itself, gets the link
-beside its bundle at the next GUI launch, which also loads the updater and the watchdog
-again, each once it is not running: until the next login, launchd refuses to start an
-agent loaded at login whose plist has changed since.
+launchd starts each of the three as `~/Library/Application Support/Diplomat/Diplomat
+<the bundle's binary>`, where that file is a link to `/usr/bin/env` the installers make
+(`install/agent-launcher.sh`). macOS ties an agent loaded at login to its program's code
+signature and kills a start whose signature has changed since (`Launch Constraint
+Violation`, with a crash report), and every build re-signs the ad-hoc-signed binary; env
+never changes. The link is outside the checkout, so no checkout or revert takes it from
+the agents, and Login Items lists each agent by its name. A bundle path holding `=` is
+started directly, as env would take it for a variable. Every GUI launch makes or repairs
+the link while an agent is installed, and has an agent an older installer wrote, starting
+the binary itself, start it through the link. It then loads the updater and the watchdog
+again, since until the next login launchd refuses to start an agent loaded at login whose
+plist has changed since: each once its run in progress ends, waiting up to a minute, and
+one still running then at a later GUI launch.
 
 ### Logs
 
