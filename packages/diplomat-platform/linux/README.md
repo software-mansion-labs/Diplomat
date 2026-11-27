@@ -67,7 +67,7 @@ slot**, then the **queue** that has no bay yet.
   asked for that nothing
   has started yet. Each
   carries **execute now** — start it immediately, past whatever is holding it but an
-  unreadable ban list — and a
+  unreadable ban list, on a row naming an author — and a
   drag grip: drop a row on another to set the order the queue runs in. That order is
   honoured at the top of the next poll, *before* the monitors go looking for more
   work, so a slot that just freed goes to whatever you put first rather than to
