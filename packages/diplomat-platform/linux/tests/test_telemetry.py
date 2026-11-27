@@ -1523,16 +1523,18 @@ def test_the_assets_readme_counts_every_metric():
 
 
 def test_the_parity_ledgers_quota_comment_maps_its_samples():
+    def state(left0, left1):
+        return "-" if None in (left0, left1) else "reset" if left1 > left0 else "burn"
+
     samples = telemetry.fold(_ledger_lines()).samples
-    pairs = list(zip(samples, samples[1:]))
-    unread = [i for i, pair in enumerate(pairs, 1)
-              if any(s.session_left is None and s.week_left is None for s in pair)]
-    resets = [i for i, (a, b) in enumerate(pairs, 1)
-              if None not in (a.session_left, b.session_left)
-              and b.session_left > a.session_left]
-    assert (len(samples), unread, resets) == (9, [1, 8], [4])
+    kinds = [(state(a.session_left, b.session_left), state(a.week_left, b.week_left))
+             for a, b in zip(samples, samples[1:])]
+    assert kinds == [("-", "-"), ("burn", "burn"), ("burn", "burn"), ("reset", "burn"),
+                     ("burn", "burn"), ("burn", "burn"), ("-", "burn"), ("-", "-")], (
+        "the quota samples moved: update the comment over them, then this map")
     block = inspect.getsource(_ledger_lines).split("# --- quota samples")[1]
-    comment = " ".join(re.findall(r"# (.+)", block.split("events +=")[0]))
-    assert comment.startswith("Nine samples, so eight intervals. The first and last each "
-                              "touch a sample with no quota reading at all")
-    assert "the fourth spans a RESET" in comment
+    assert " ".join(re.findall(r"# (.+)", block.split("events +=")[0])) == (
+        "Nine samples, so eight intervals. The first and last each touch a sample with no "
+        "quota reading at all, which still carries token counters for the repo/other "
+        "split; the fourth (a 5-hour RESET: session left goes UP) and the seventh price "
+        "only the week; the rest are ordinary burn-downs of both windows.")

@@ -59,8 +59,8 @@ def _ledger_lines() -> list[str]:
     # --- quota samples -------------------------------------------------------
     # Nine samples, so eight intervals. The first and last each touch a sample with no
     # quota reading at all, which still carries token counters for the repo/other
-    # split; the fourth spans a RESET (session left goes UP), which must be skipped by
-    # both sides or the window comes out negative; the rest are ordinary burn-downs.
+    # split; the fourth (a 5-hour RESET: session left goes UP) and the seventh price
+    # only the week; the rest are ordinary burn-downs of both windows.
     events += [
         # OUTSIDE the range, and the token counters have already moved by the time
         # the range opens. The split is measured from here, so an implementation
