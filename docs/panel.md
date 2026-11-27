@@ -102,7 +102,8 @@ bays.
   you cannot leave.
 - **Queued** rows are auto-fixes, auto-reviews and the work you asked for by
   sweeping that nothing has started yet. Each
-  carries **execute now** - start it immediately, past whatever is holding it -
+  carries **execute now** - start it immediately, past whatever is holding it but an
+  unreadable ban list -
   and a drag grip: drop a row on another in its band to set the order the queue runs
   in (a drag into another band is refused). That
   order is honoured at the top of the next poll, *before* the monitors go looking
