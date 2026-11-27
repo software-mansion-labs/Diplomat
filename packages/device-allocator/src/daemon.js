@@ -895,10 +895,10 @@ function appendAudit(source, action, detail) {
   } catch {}
 }
 
-// Read the ban list for `what` (a ban or an unban) as the applets read it: only a
-// missing file is an empty list. One there but not an object whose `banned` is a
-// list (or absent) could be banning anyone: the request fails, and the file is left
-// for the operator to repair.
+// Read the ban list for `what` (a ban or an unban) as the applets do: only a missing
+// file is empty. One there but not an object whose `banned` is a list (or absent)
+// could be banning anyone, so the request fails and the file is left for the operator
+// to repair.
 function readBanned(what) {
   let data;
   try { data = JSON.parse(fs.readFileSync(BANNED_PATH, 'utf8')); }
