@@ -25,9 +25,9 @@ _FILES = re.compile(r"\w+\.(?:swift|py)\b")
 
 
 def _places_assembly_in(text: str, swift: str, sentence: str) -> None:
-    assert _FILES.findall(text) == [swift], "name no source file but the Swift builder"
+    assert _FILES.findall(text) == [swift], "name the Swift builder once, and no other source file"
     assert sentence in text
-    assert "glue" not in text
+    assert "glue" not in text.lower()
 
 
 @pytest.mark.parametrize("asset", sorted(PROMPTS))
