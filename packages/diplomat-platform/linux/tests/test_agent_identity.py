@@ -82,7 +82,7 @@ def _await_exec(pid: int, timeout: float = 10.0) -> str:
     taken the moment it appears: between the two the argv is still the shell's, and
     reading it there says "wrapper" about a run that is about to be the agent; inside
     the exec itself it reads empty. Waited for rather than slept on, so a shell that
-    never execs still fails — just at the deadline, with the argv it was stuck on.
+    never execs ends the wait at the deadline, with the argv it was stuck on.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -227,8 +227,8 @@ def test_the_recorded_pid_dies_with_the_agent(tmp_path):
 
 def test_the_two_runs_check_waits_out_the_exec(tmp_path, monkeypatch):
     """The second run's pid file can be read while its agent is still being exec'd,
-    and a ``/proc/<pid>/cmdline`` read inside the exec is empty. Serving each pid's
-    first read that empty argv puts every read the check makes at that instant."""
+    and a ``/proc/<pid>/cmdline`` read inside the exec is empty. Each pid's first read
+    here is served that empty argv."""
     real, served = _cmdline, set()
 
     def mid_exec_first(pid: int) -> str:
