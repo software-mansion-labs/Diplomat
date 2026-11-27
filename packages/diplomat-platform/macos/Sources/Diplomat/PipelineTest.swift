@@ -88,7 +88,8 @@ enum PipelineTest {
         check("Merge cleared PRs points at every hold rather than listing some",
               SettingsView.pipelineMergeDetail.hasPrefix(
                   "A cleared PR is merged only when none of the holds in docs/pipeline.md applies "
-                      + "to it, checked again right before the merge."))
+                      + "to it, checked again right before the merge. With Fast-track my PRs on, one "
+                      + "behind its base has the base merged into it first."))
         func feed(_ action: String) -> [String] {
             AuditLog.read().filter { $0.action == action }.map { "\($0.source) \($0.detail)" }.reversed()
         }

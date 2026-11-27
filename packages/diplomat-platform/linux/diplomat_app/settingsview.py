@@ -1400,9 +1400,10 @@ class SettingsView(QWidget):
             "Merges past the review requirement with admin rights (gh pr merge --admin): "
             "no person approves the PR first",
             "A cleared PR is merged only when none of the holds in docs/pipeline.md "
-            "applies to it, checked again right before the merge. Admin rights skip "
-            "branch protection's approval requirement, so leave this off where a second "
-            "pair of eyes is required.")
+            "applies to it, checked again right before the merge. With Fast-track my PRs on, "
+            "one behind its base has the base merged into it first. Admin rights skip branch "
+            "protection's approval requirement, so leave this off where a second pair of eyes "
+            "is required.")
         self._sw_pipeline_fracture = self._pipeline_switch(
             inner, "Split big issues", st.pipeline_fracture, "pipeline_fracture",
             "One medium- or high-complexity issue a sync becomes low-complexity child issues",

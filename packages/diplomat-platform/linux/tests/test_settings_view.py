@@ -634,7 +634,8 @@ def test_the_pipeline_rows_read_as_their_macos_twins_do(make_view, monkeypatch):
     assert rows[2]._detail.text().endswith(" A PR rated while this is off stays a person's.")
     assert rows[3]._detail.text().startswith(
         "A cleared PR is merged only when none of the holds in docs/pipeline.md applies "
-        "to it, checked again right before the merge.")
+        "to it, checked again right before the merge. With Fast-track my PRs on, one behind "
+        "its base has the base merged into it first.")
     assert view._pipeline_row.summary() == (
         "Every 5m, the open issues and PRs of the GitHub repo roots and the Linear teams "
         "below")

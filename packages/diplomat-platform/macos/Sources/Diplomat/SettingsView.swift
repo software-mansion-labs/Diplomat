@@ -1212,8 +1212,9 @@ struct SettingsView: View {
 
     static let pipelineMergeDetail = """
         A cleared PR is merged only when none of the holds in docs/pipeline.md applies to \
-        it, checked again right before the merge. Admin rights skip branch protection's \
-        approval requirement, so leave this off where a second pair of eyes is required.
+        it, checked again right before the merge. With Fast-track my PRs on, one behind its \
+        base has the base merged into it first. Admin rights skip branch protection's approval \
+        requirement, so leave this off where a second pair of eyes is required.
         """
 
     private static let pipelineFractureDetail = """
