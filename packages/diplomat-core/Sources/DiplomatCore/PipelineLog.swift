@@ -184,7 +184,7 @@ struct PipelineParts: Codable, Equatable {
     var sent: Bool?
 }
 
-/// An item's ratings or splits failed in a row: the next is tried at sync `after`, 1, 2,
+/// An item's ratings, rating labels or splits failed in a row: the next is tried at sync `after`, 1, 2,
 /// 4 ... syncs on, and a day after `at` at the latest.
 struct PipelineRetry: Codable, Equatable {
     var failures: Int
@@ -192,23 +192,22 @@ struct PipelineRetry: Codable, Equatable {
     var at: Date
 }
 
-/// A rating Diplomat made, by item id: the rating itself for an item it may not label,
-/// read back while the item's `updatedAt` is unchanged, or for one whose rating labels
-/// could not be written (`unwritten`), until they are; for one it labelled, only the why.
-/// Forgotten with the item's `PipelineState.seen`.
+/// The rating Diplomat made of an item, by its id: the item's rating, which labels can only
+/// raise. Forgotten with the item's `PipelineState.seen`.
 struct PipelineCachedRating: Codable, Equatable {
     var rating: PipelineRating
     var why: String
-    var updatedAt: Date?
-    var unwritten: Bool?
-    /// A PR's timeline showed no rating or fast-track label before this rating's labels were
-    /// first written: its first rating, whatever labels they left on the timeline.
+    /// What the rating leads to, its labels where mirrored and the fast-track label, waits for
+    /// a sync that reads the item again.
+    var pending: Bool?
+    /// A PR's first rating: none was kept for it before, and its timeline, read again before
+    /// what the rating leads to, showed no rating or fast-track label.
     var first: Bool?
 
     static func url(in dir: URL) -> URL { dir.appendingPathComponent("ratings.json") }
 
     /// Like `PipelineState.load`: a missing file is empty, one that does not decode a
-    /// failure, since an empty cache would let lower labels count over a kept rating.
+    /// failure, since an empty cache would forget every rating.
     static func load(in dir: URL) -> Result<[String: PipelineCachedRating], PipelineIO.Failure> {
         let url = url(in: dir)
         guard FileManager.default.fileExists(atPath: url.path) else { return .success([:]) }

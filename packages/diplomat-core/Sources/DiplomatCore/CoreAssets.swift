@@ -302,6 +302,8 @@ public enum CoreAssets {
             public let fractured: String
             /// Hex digits, for the labels Diplomat creates.
             public let color: String
+            /// The most kept ratings a sync mirrors as labels, past the ones it rates.
+            public let mirrorPerSync: Int
         }
         /// Each level's definition.
         public struct Levels: Decodable {
