@@ -1407,7 +1407,8 @@ class SettingsView(QWidget):
             inner, "Split big issues", st.pipeline_fracture, "pipeline_fracture",
             "One medium- or high-complexity issue a sync becomes low-complexity child issues",
             "Only an issue Diplomat may write to, not rated high risk, with no children "
-            "and no open PR fixing it. Each child is a real sub-issue and comes back "
+            "and no open PR fixing it, whose code shows two or more independent fixes, or "
+            "groups of fixes, to split it into. Each child is a real sub-issue and comes back "
             "unrated; the parent is labelled diplomat:fractured. Fracture on the Pipeline "
             "screen splits one whatever its rating.")
         options.addWidget(nest)
