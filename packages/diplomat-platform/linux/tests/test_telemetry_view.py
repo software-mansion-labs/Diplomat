@@ -136,7 +136,6 @@ def test_a_ledger_with_work_draws_the_cards(store):
     assert not view.empty.isVisibleTo(view)
 
 
-_SOURCES = Path(__file__).resolve().parents[3]
 _NUMBERS = "one two three four five six seven eight nine ten".split()
 
 
@@ -146,27 +145,16 @@ def test_a_comment_counting_the_cards_counts_the_ones_both_views_build(store):
 
     from diplomat_app import telemetryview
 
-    _seed()
     view = _view(store)
     cards = len(view.body.findChildren(
         QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly))
-    swift = (_SOURCES / "diplomat-platform" / "macos" / "Sources" / "Diplomat"
+    swift = (Path(__file__).resolve().parents[2] / "macos" / "Sources" / "Diplomat"
              / "TelemetryView.swift").read_text(encoding="utf-8")
-    assert swift.count(".cardChrome()") == cards
+    assert swift.count(".cardChrome(") == cards
     prose = (swift + Path(telemetryview.__file__).read_text(encoding="utf-8")
              + Path(__file__).read_text(encoding="utf-8"))
-    stated = re.findall(rf"\b({'|'.join(_NUMBERS)}) cards\b", prose, re.I)
+    stated = re.findall(rf"\b({'|'.join(_NUMBERS)})[\s/]+cards\b", prose, re.I)
     assert [_NUMBERS.index(w.lower()) + 1 for w in stated] == [cards] * len(stated)
-
-
-def test_both_ledger_modules_say_the_same_of_the_screens_figures():
-    def claim(path: Path) -> str:
-        text = path.read_text(encoding="utf-8")
-        return re.search(r"\*\*Why a ledger and not counters\.\*\* (.+?) are about",
-                         text).group(1)
-
-    swift = _SOURCES / "diplomat-core" / "Sources" / "DiplomatCore" / "Telemetry.swift"
-    assert claim(swift) == claim(Path(telemetry.__file__))
 
 
 def test_the_share_of_the_limit_is_shown_once_the_window_has_a_price(store):

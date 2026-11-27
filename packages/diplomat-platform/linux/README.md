@@ -401,7 +401,7 @@ diplomat_app/
   diplomacynetwork.py  bridge to the Diplomacy Network daemon: its socket, its installer's
                   daemon verbs, the switch as last read, the retired mesh node
   networkview.py  the Network screen: the daemon's status, the hours, one card per pool
-  telemetryview.py  the Telemetry screen: the bell curves, the rate-limit windows, the backlog series, the token split
+  telemetryview.py  the Telemetry screen: the bell curves, the rate-limit windows, the backlog and finished-work series, the token split
   pipelineview.py the Pipeline screen: the picked repo's open issues and PRs as a graph, lane filter, an item's detail and asks
   widgets.py      cards, chips, rows
   panel.py        the main window (header, search, grid, results, agent tasks, devices)
