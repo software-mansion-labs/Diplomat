@@ -100,8 +100,8 @@ a Linear team was not read whole, no issue in the repo it maps to is fixed, spli
    `Fixes ENG-12` in its PR's description.
 2. The PR is rated on its own (**Rate issues and PRs**), from its text and diff, never below its
    [diff floor](#the-diff-floor). Every open PR of yours is rated, not only the ones Diplomat opened.
-3. Low/low at its first rating (its timeline showed no rating or fast-track label before it) and
-   closing only `candidate` issues (the fast track is for the fixes the pipeline asks for), it is
+3. Within its limit at its first rating (its timeline showed no rating or fast-track label before
+   it) and closing only `candidate` issues (the fast track is for the fixes the pipeline asks for), it is
    labelled `diplomat:fast-track` (**Fast-track my PRs**); a PR rated while that is off, rated
    past its limit, or that the label could not be put on stays a person's, the last with a hold
    saying so. A max-depth review run is queued for its head. It reviews the
@@ -394,7 +394,7 @@ Every action but **Open** is disabled while the pipeline is off, and **Rate now*
 
 ## Settings
 
-All of them are on the **Pipeline** card, all **default off**; the rows under the master switch show
+All of them are on the **Pipeline** card, every switch **default off**; the rows under the master switch show
 only while it is on. A switch turned on syncs at once. One turned off also stops a sync already
 running, which reads the switches again (`control.json`) before every step it takes and every
 `claude` call.
@@ -422,7 +422,7 @@ running, which reads the switches again (`control.json`) before every step it ta
   [Linear](#linear).
 
 The whole fast track, issue to merge, takes **Rate issues and PRs**, **Open fix PRs**,
-**Fast-track my PRs** and **Merge cleared PRs**. The switches are in UserDefaults (macOS) and
+**Fast-track my PRs** and **Merge cleared PRs**. These settings are in UserDefaults (macOS) and
 QSettings (Linux) under the same keys: `pipelineEnabled`, `pipelineRate`, `pipelineFix`,
 `pipelineFastTrack`, `pipelineMerge`, `pipelineFracture`, `pipelineLinearTeams` and `pipelineLimits`
 (JSON, each root's limit by its `owner/repo` lowercased).

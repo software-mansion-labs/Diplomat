@@ -468,8 +468,8 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
 /// asked, and before each sync. A sync reads it right before every outward step and rating
 /// call, and skips a step whose switch, or `enabled`, is off; a forced step needs `enabled`
 /// alone, and taking back the sync's own split claim needs neither. It can only stop what
-/// the settings allow: a root's limit below the sync's stops its fix, fast-track and merge
-/// steps. A missing or incomplete file leaves the settings as they were.
+/// the settings allow: any root's limit below the sync's stops every fix, fast-track and
+/// merge step. A missing, incomplete or unreadable file leaves the settings as they were.
 public struct PipelineControl: Codable, Equatable, Sendable {
     public var enabled: Bool
     public var rate: Bool
