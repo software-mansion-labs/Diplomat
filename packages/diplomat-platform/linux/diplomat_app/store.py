@@ -6741,6 +6741,7 @@ class Store(QObject):
                 # them the worker thread dies with update_state stuck on "updating",
                 # and the phase guard above then makes every later update a permanent
                 # no-op until the app restarts. Surface it as an error phase instead.
+                selfupdate._sched_log(f"update failed: {exc}")
                 self.update_state = {"phase": "error", "error": str(exc)}
             self.update_changed.emit()
 

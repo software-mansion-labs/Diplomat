@@ -5502,7 +5502,9 @@ final class Store: ObservableObject {
                 try await Task.detached(priority: .userInitiated) { try SelfUpdate.relaunch(background: false) }.value
                 self?.updateState = .restarting(commit: commit)
             } catch {
-                self?.updateState = .failed((error as? LocalizedError)?.errorDescription ?? "\(error)")
+                let message = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+                SelfUpdate.schedLog("update failed: \(message)")
+                self?.updateState = .failed(message)
             }
         }
     }
