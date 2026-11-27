@@ -18,6 +18,7 @@ import os
 import re
 import shlex
 import time
+from pathlib import Path
 
 import pytest
 
@@ -275,6 +276,13 @@ def test_sampling_is_paced_by_the_ledger_not_by_the_caller(ledger):
     telemetry._reset_cache()
     assert not telemetry.sample_due()
     assert telemetry.sample_due(time.time() + telemetry.SAMPLE_INTERVAL_SECS + 1)
+
+
+def test_the_swift_ledger_doc_gives_the_sample_cadence():
+    swift = (Path(__file__).resolve().parents[3] / "diplomat-core" / "Sources"
+             / "DiplomatCore" / "Telemetry.swift").read_text(encoding="utf-8")
+    assert swift.partition("/// plus ")[2].partition(" carrying")[0] == (
+        "a `sample` every `sampleIntervalSecs`")
 
 
 def _quota_headline(ledger, readings, *, now):

@@ -23,9 +23,9 @@ import Foundation
 /// - `cleared` — a poll no longer sees it owed and we never started it (someone
 ///               replied by hand, the PR closed).
 ///
-/// plus one `sample` per poll carrying the account's remaining quota fractions and
-/// this machine's cumulative Claude token counters, split monitored-repo vs
-/// everything else.
+/// plus a `sample` every `sampleIntervalSecs` carrying the account's remaining
+/// quota fractions and this machine's cumulative Claude token counters, split
+/// monitored-repo vs everything else.
 ///
 /// The quota fractions are a measurement, and the screen draws them as one
 /// (`quotaSeries`): every rate-limit window a reading carries, over the lookback,
