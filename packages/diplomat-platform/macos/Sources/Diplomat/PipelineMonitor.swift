@@ -96,9 +96,20 @@ extension Store {
         return (try? encoder.encode(limits)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
     }
 
-    /// Absent or unreadable, every root is low/low.
+    /// By slug lowercased; text that is no JSON object reads as none, a dimension missing or
+    /// not a level as low, and each is held to `PipelineRating.maxLimit`. Twin of
+    /// `pipeline.read_limits`.
     nonisolated static func pipelineLimits(_ json: String?) -> [String: PipelineRating] {
-        json.flatMap { try? JSONDecoder().decode([String: PipelineRating].self, from: Data($0.utf8)) } ?? [:]
+        guard let object = json.flatMap({ try? JSONSerialization.jsonObject(with: Data($0.utf8)) })
+                as? [String: Any] else { return [:] }
+        func level(_ entry: Any, _ key: String, _ cap: PipelineLevel) -> PipelineLevel {
+            min(((entry as? [String: Any])?[key] as? String).flatMap(PipelineLevel.init(rawValue:)) ?? .low, cap)
+        }
+        let top = PipelineRating.maxLimit
+        return Dictionary(object.map { slug, entry in
+            (slug.lowercased(), PipelineRating(risk: level(entry, "risk", top.risk),
+                                               complexity: level(entry, "complexity", top.complexity)))
+        }) { a, _ in a }
     }
 
     nonisolated static func pipelineLimitLowered(from old: [String: PipelineRating],

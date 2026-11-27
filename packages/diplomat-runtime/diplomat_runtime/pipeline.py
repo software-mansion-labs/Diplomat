@@ -63,7 +63,7 @@ def limit(value: object) -> dict:
 
 def read_limits(raw: str) -> dict:
     """The ``pipelineLimits`` setting's JSON, each root's :func:`limit` by its ``owner/repo``
-    lowercased; text that is no JSON object reads as none."""
+    lowercased; text that is no JSON object reads as none. Twin of ``Store.pipelineLimits(_:)``."""
     try:
         obj = json.loads(raw)
     except ValueError:

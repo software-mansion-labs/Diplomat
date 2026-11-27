@@ -81,7 +81,14 @@ enum PipelineTest {
         check("…and read back from it, an absent or unreadable one as none",
               Store.pipelineLimits(limitsJSON) == ["o/r": PipelineRating(risk: .low, complexity: .medium)]
                   && Store.pipelineLimits(#"{"o/r": {"risk": "medium", "complexity": "high"}}"#) == ["o/r": raised]
-                  && Store.pipelineLimits(nil).isEmpty && Store.pipelineLimits(#"{"o/r":{"risk":"huge"}}"#).isEmpty)
+                  && Store.pipelineLimits(nil).isEmpty && Store.pipelineLimits("not json").isEmpty
+                  && Store.pipelineLimits("[]").isEmpty)
+        check("…a hand-edited one by its slug lowercased, low where it is no level, risk stopping at medium",
+              Store.pipelineLimits(#"{"O/R": {"risk": "high", "complexity": "high"}}"#) == ["o/r": raised]
+                  && Store.pipelineLimits(#"{"o/r": {"risk": "severe", "complexity": 2}, "a/b": "medium", "c/d": {}}"#)
+                      == ["o/r": .low, "a/b": .low, "c/d": .low]
+                  && Store.pipelineLimits(#"{"o/r": {"complexity": "medium", "extra": "high"}}"#)
+                      == ["o/r": PipelineRating(risk: .low, complexity: .medium)])
         let epoch = store.pipelineEpoch
         store.pipelineLimits = ["o/r": raised]
         check("a limit raised cuts no sync short", store.pipelineEpoch == epoch)
