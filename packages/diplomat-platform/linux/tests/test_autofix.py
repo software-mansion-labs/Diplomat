@@ -1294,14 +1294,17 @@ def test_the_case_for_the_bound_never_puts_half_the_tasks_above_the_mean():
     root = Path(__file__).resolve().parents[4]
     homes = ["docs/automation.md",
              "packages/diplomat-core/Sources/DiplomatCore/Autofix.swift",
-             "packages/diplomat-runtime/diplomat_runtime/autofix.py"]
+             "packages/diplomat-runtime/diplomat_runtime/autofix.py",
+             "packages/diplomat-platform/linux/tests/test_autobudget.py"]
 
     def prose(rel: str) -> str:
         lines = (root / rel).read_text(encoding="utf-8").splitlines()
         return " ".join(re.sub(r"^\s*(/{2,}|#:?)?\s*", "", ln) for ln in lines).lower()
 
-    claim = re.compile(r"(?<!than )\bhalf\b[^.]*\bcost more than")
-    assert [rel for rel in homes if claim.search(prose(rel))] == []
+    claim = re.compile(
+        r"(?<!fewer than )(?<!less than )\bhalf\b[^.]*\bcost more than(?! the median)")
+    found = {rel: m.group(0) for rel in homes if (m := claim.search(prose(rel)))}
+    assert found == {}
 
 
 _FIRST = "first"
