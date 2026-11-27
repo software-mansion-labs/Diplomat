@@ -4389,10 +4389,16 @@ final class Store: ObservableObject {
 
     /// Write the retry-backoff record for a task the queue dispatched, into the same
     /// per-monitor ledger that monitor writes itself: `AgentJob.counter` names the
-    /// ledger, `attemptStamp` is the stamp that monitor compares against. Not private:
+    /// ledger, `attemptStamp` is the stamp that monitor compares against. The pipeline's
+    /// open record another ask's run would answer is dropped (`pipelinePreempted`). Not private:
     /// the pipeline self-test, which spawns nothing, drives it.
     func recordQueuedAttempt(_ entry: QueuedAgentTask) {
-        guard let counter = entry.job.counter else { return }
+        guard let counter = entry.job.counter else {
+            let attempts = loadPipelineAttempts()
+            let kept = Store.pipelinePreempted(attempts, job: entry.job)
+            if kept != attempts { savePipelineAttempts(kept) }
+            return
+        }
         let record = ReviewAttempt(requestedAt: entry.job.attemptStamp,
                                    lastDispatchedAt: Date(), attempts: entry.attemptNumber)
         func put(_ load: () -> [String: ReviewAttempt], _ save: ([String: ReviewAttempt]) -> Void) {

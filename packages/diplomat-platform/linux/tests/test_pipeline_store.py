@@ -20,7 +20,7 @@ import pytest
 from test_autofix import _spawn_recorder, fake_probes, store  # noqa: F401 — fixture
 
 from diplomat_app import bans, issues
-from diplomat_app.store import PIPELINE_ATTEMPTS, Store, app_settings
+from diplomat_app.store import PIPELINE_ATTEMPTS, PIPELINE_COUNTER, Store, app_settings
 from diplomat_runtime import activity, appconfig, autofix, pipeline, promptcore, review
 from diplomat_runtime.prref import LocalRepo, item_key_from_url
 
@@ -1883,6 +1883,46 @@ def test_a_starting_pipeline_ask_is_not_taken_over(pipe):
     assert not pipe.request_one(_asked(_fix()))
     assert pipe.queued_tasks == []
     assert [w.pipeline for w in pipe.requested_work] == [True]
+
+
+def _report(pipe, monkeypatch, task) -> None:
+    """``task`` dispatched, and its agent's turn reported over."""
+    from diplomat_runtime import agentregistry
+
+    pipe._execute_queued_task(task)
+    (run,) = agentregistry.load()
+    fake_probes(monkeypatch, activity={run.run_id: ("idle", time.time() - 5)})
+    pipe._settle_agents()
+    assert agentregistry.load() == [], "the run must retire, or this pins nothing"
+
+
+@pytest.mark.parametrize("effect", [_review(), _fix()])
+def test_the_run_of_an_ask_that_took_the_pipelines_place_answers_none_of_its_effects(
+        pipe, monkeypatch, effect):
+    """So the Pipeline asks for its own at the same stamp: a fast-track review's clean
+    marker comes from no other."""
+    _spawn_recorder(monkeypatch)
+    _sync(pipe, _result(effect))
+    other = _asked(effect)
+    assert pipe.request_one(other)
+    _report(pipe, monkeypatch, pipe.queued_tasks[0])
+    _sync(pipe, _result(effect))
+    assert [(t.id, t.job.counter) for t in pipe.queued_tasks] == [(other.key, PIPELINE_COUNTER)]
+
+
+def test_the_run_of_an_ask_after_a_pipeline_run_died_answers_none_of_its_effects(
+        pipe, monkeypatch):
+    calls = _spawn_recorder(monkeypatch)
+    _sync(pipe, _result(_review()))
+    pipe._execute_queued_task(pipe.queued_tasks[0])
+    with open(calls[0]["done"], "w") as fh:
+        fh.write("0")
+    fake_probes(monkeypatch)
+    pipe._settle_agents()
+    assert pipe.request_one(_asked(_review()))
+    _report(pipe, monkeypatch, pipe.queued_tasks[0])
+    pipe._apply_pipeline_effects(_result(_review()), time.time() + autofix.RETRY_MAX_BACKOFF)
+    assert [t.job.counter for t in pipe.queued_tasks] == [PIPELINE_COUNTER]
 
 
 def test_a_starting_fix_is_left_to_its_dispatch(pipe):

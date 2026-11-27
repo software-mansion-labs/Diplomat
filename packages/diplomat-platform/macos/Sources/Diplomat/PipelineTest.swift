@@ -1043,6 +1043,36 @@ enum PipelineTest {
         store.endStarting(fixKey)
         clearQueue()
         store.savePipelineAttempts([:])
+        /// `task` dispatched, and its agent's turn reported over.
+        func report(_ task: Store.QueuedAgentTask?) {
+            guard let task else { return check("a task to run", false) }
+            store.recordQueuedAttempt(task)
+            store.forgetRequested(task.id)
+            store.dropQueuedTask(task.id)
+            let run = AgentState.RunRecord(runID: "r-\(task.id)", dispatchedAt: now.timeIntervalSince1970,
+                                           prNumber: task.job.prNumber, prURL: task.job.prURL ?? "",
+                                           kind: task.job.kind)
+            store.savePipelineAttempts(Store.pipelineConcluded(store.loadPipelineAttempts(), runs: [run], at: now))
+        }
+        for (effect, other) in [(review, sweptReview), (fix, community)] {
+            await store.applyPipeline(result([effect]), now: now)
+            store.requestOne(other)
+            report(store.queuedTasks.first)
+            await store.applyPipeline(result([effect]), now: now)
+            check("the run of an ask that took the pipeline's place answers none of its effects: "
+                  + "it asks for its own (\(other.key))", store.queuedTasks.map(\.job.counter) == [.pipeline])
+            clearQueue()
+            store.savePipelineAttempts([:])
+        }
+        await store.applyPipeline(result([review]), now: now)
+        if let task = store.queuedTasks.first { store.recordQueuedAttempt(task) }
+        clearQueue()
+        store.requestOne(sweptReview)
+        report(store.queuedTasks.first)
+        await store.applyPipeline(result([review]), now: now.addingTimeInterval(ReviewReconcile.retryMaxBackoff))
+        check("…nor those of a pipeline run that died", store.queuedTasks.map(\.job.counter) == [.pipeline])
+        clearQueue()
+        store.savePipelineAttempts([:])
         check("a result dated in the second its sync began is that sync's",
               Store.pipelineRan(PipelineTickResult(at: Date(timeIntervalSince1970: 100)),
                                 started: Date(timeIntervalSince1970: 100.7))

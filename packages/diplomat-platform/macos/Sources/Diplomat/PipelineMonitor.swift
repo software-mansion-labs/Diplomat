@@ -636,6 +636,15 @@ extension Store {
         return out
     }
 
+    /// Drops the open record of `job`, just spawned for another asker, which its run would
+    /// otherwise conclude: once it is over, the pipeline asks for its own. Twin of
+    /// `pipeline.preempted`.
+    nonisolated static func pipelinePreempted(_ attempts: [String: ReviewAttempt],
+                                              job: AgentJob) -> [String: ReviewAttempt] {
+        let gone = Set(pipelineOpenKeys(attempts, kind: job.kind, url: job.prURL ?? ""))
+        return attempts.filter { !gone.contains($0.key) }
+    }
+
     /// Concludes the cancelled `job`'s record, so no sync asks for it again at that stamp.
     /// Twin of `pipeline.cancelled`.
     nonisolated static func pipelineCancelled(_ attempts: [String: ReviewAttempt], job: AgentJob,

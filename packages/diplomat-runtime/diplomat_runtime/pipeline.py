@@ -526,6 +526,14 @@ def spawned(attempts: dict, kind: str, url: str, now_ts: float) -> dict:
     return out
 
 
+def preempted(attempts: dict, kind: str, url: str) -> dict:
+    """``attempts`` without the open record of the job (``kind`` on ``url``) that just
+    spawned for another asker, which its run would otherwise conclude: once it is over,
+    the pipeline asks for its own. Twin of ``Store.pipelinePreempted``."""
+    gone = set(_open_keys(attempts, kind, url))
+    return {k: a for k, a in attempts.items() if k not in gone}
+
+
 def cancelled(attempts: dict, kind: str, url: str, now_ts: float) -> dict:
     """``attempts`` with the record of the ask (``kind`` on ``url``) the operator cancelled
     stamped concluded, so no sync asks for it again. Twin of ``Store.pipelineCancelled``."""

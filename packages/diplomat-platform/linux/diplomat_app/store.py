@@ -3516,11 +3516,13 @@ class Store(QObject):
         same per-monitor ledger that monitor writes itself: ``AgentJob.counter`` names
         the ledger, ``attempt_stamp`` is the stamp that monitor compares against. The
         Pipeline's records are its effects', written when asked for: the one this run
-        is the attempt of is dated now (:func:`pipeline.spawned`)."""
-        if entry.job.counter == PIPELINE_COUNTER:
+        is the attempt of is dated now (:func:`pipeline.spawned`), and one another ask's
+        run would answer is dropped (:func:`pipeline.preempted`)."""
+        if entry.job.counter in (PIPELINE_COUNTER, None):
             attempts = self._load_attempts(PIPELINE_ATTEMPTS)
-            dated = pipeline.spawned(attempts, entry.job.kind, entry.job.pr_url or "",
-                                     time.time())
+            url = entry.job.pr_url or ""
+            dated = (pipeline.spawned(attempts, entry.job.kind, url, time.time())
+                     if entry.job.counter else pipeline.preempted(attempts, entry.job.kind, url))
             if dated != attempts:
                 self._save_attempts(PIPELINE_ATTEMPTS, dated)
             return
