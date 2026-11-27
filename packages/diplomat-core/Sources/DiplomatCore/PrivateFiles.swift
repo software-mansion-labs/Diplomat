@@ -3,8 +3,8 @@ import Foundation
 /// Owner-only files guarded by an exclusive `flock`: the primitives under Comms' log and
 /// state. Directories 0700, files 0600.
 enum PrivateFiles {
-    /// `$HOME` first, as the Linux front-end's `Path.home()` reads it: off macOS Foundation
-    /// reads the password database, and the two could find different `~/.diplomat`s.
+    /// `$HOME` first, as the Linux front-end's `Path.home()` reads it: Foundation reads the
+    /// password database, and the two could find different `~/.diplomat`s.
     static var home: URL {
         if let env = ProcessInfo.processInfo.environment["HOME"], !env.isEmpty {
             return URL(fileURLWithPath: env, isDirectory: true)
