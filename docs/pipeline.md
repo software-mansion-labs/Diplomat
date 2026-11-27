@@ -103,8 +103,9 @@ a Linear team was not read whole, no issue in the repo it maps to is fixed, spli
 3. Low/low at its first rating (its timeline showed no rating or fast-track label before it) and
    closing only `candidate` issues (the fast track is for the fixes the pipeline asks for), it is
    labelled `diplomat:fast-track` (**Fast-track my PRs**); a PR rated while that is off, rated
-   anything else, or that the label could not be put on stays a person's, the last with a hold
-   saying so. A max-depth review run is queued for its head. It reviews the
+   anything else, that the label could not be put on, or that would also close an issue no read
+   judged stays a person's, the last two with a hold saying so. A max-depth review run is queued
+   for its head. It reviews the
    PR and fixes what it finds on the branch until a full pass at the head finds nothing, LOW
    findings included, then posts one COMMENT review whose body begins
    `Clean at <head sha>`: the **clean marker**. A marker counts only on your own review, submitted

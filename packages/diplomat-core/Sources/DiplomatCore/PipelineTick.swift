@@ -1351,12 +1351,17 @@ final class PipelineSync {
 
     /// Puts `fastTrack` on a PR rated low/low that closes only candidates, at its first rating
     /// only: one that wore a rating or fast-track label before (no `first` kept) is a person's.
-    /// One it could not be put on is recorded.
+    /// One it could not be put on, or that would also close what no read judged, is recorded.
     func trackFirst(_ i: Int, _ rating: PipelineRating) {
         let e = entries[i]
         guard e.item.kind == .pr, settings.fastTrack, rating.isFastTrack, cache[e.id]?.first == true,
-              closesHold(e) == nil else { return }
-        if add(i, model.labels.fastTrack, .fastTrack) {
+              fixesCandidate(e) else { return }
+        if let h = closesHold(e) {
+            let why = "off the fast track: it " + h.message
+            log(e.id, .held, why)
+            state.keptOff[e.id] = why
+            persist()
+        } else if add(i, model.labels.fastTrack, .fastTrack) {
             log(e.id, .fastTrack, "+\(model.labels.fastTrack): rated \(describe(rating))")
         } else if !state.untracked.contains(e.id) {
             state.untracked.append(e.id)
@@ -1534,6 +1539,7 @@ final class PipelineSync {
                 }
                 state.decided.removeAll { $0 == id }
                 state.untracked.removeAll { $0 == id }
+                state.keptOff[id] = nil
                 state.cleared[id] = nil
             }
             state.takenOver[id] = e.item.kind
@@ -1853,7 +1859,7 @@ final class PipelineSync {
                 if own(e), let r = e.item.rating, r.atLeast(floor).isFastTrack {
                     hold = e.unwritable.map { "off the fast track: \($0)" }
                         ?? (e.item.ratedBy != "label" ? "off the fast track: its rating labels could not be written"
-                            : !state.untracked.contains(e.id) ? nil
+                            : !state.untracked.contains(e.id) ? state.keptOff[e.id]
                             : "off the fast track: \(model.labels.fastTrack) could not be put on at its first rating")
                 }
             } else if let why = partial[e.item.repo] {

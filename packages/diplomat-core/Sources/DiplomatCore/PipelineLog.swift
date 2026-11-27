@@ -69,6 +69,9 @@ struct PipelineState: Codable, Equatable {
     var takenOver: [String: PipelineKind] = [:]
     /// PRs the fast-track label could not be put on at their first rating.
     var untracked: [String] = []
+    /// PRs kept off the fast track at their first rating for what they would close, and the
+    /// hold saying so.
+    var keptOff: [String: String] = [:]
     /// Issues that would not split, or whose split stopped part-way, and why: not tried
     /// again unless forced.
     var unsplit: [String: String] = [:]
@@ -107,7 +110,7 @@ struct PipelineState: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case labelsMade, decided, takenOver, untracked, unsplit, splitting, parts, rerated, cleared, retry, syncs,
-             lineage, seen, holds, clean, asked, rateAsks, rateSeq, declined, notices
+             lineage, seen, holds, clean, asked, rateAsks, rateSeq, declined, notices, keptOff
     }
 
     /// A field missing is empty; one there but not of its type fails the whole file.
@@ -117,6 +120,7 @@ struct PipelineState: Codable, Equatable {
         decided = try c.decodeIfPresent([String].self, forKey: .decided) ?? []
         takenOver = try c.decodeIfPresent([String: PipelineKind].self, forKey: .takenOver) ?? [:]
         untracked = try c.decodeIfPresent([String].self, forKey: .untracked) ?? []
+        keptOff = try c.decodeIfPresent([String: String].self, forKey: .keptOff) ?? [:]
         unsplit = try c.decodeIfPresent([String: String].self, forKey: .unsplit) ?? [:]
         splitting = try c.decodeIfPresent([String: [String]].self, forKey: .splitting) ?? [:]
         parts = try c.decodeIfPresent([String: PipelineParts].self, forKey: .parts) ?? [:]
@@ -162,6 +166,7 @@ struct PipelineState: Codable, Equatable {
         func live(_ id: String) -> Bool { seen[id] != nil }
         decided.removeAll { !live($0) }
         untracked.removeAll { !live($0) }
+        keptOff = keptOff.filter { live($0.key) }
         unsplit = unsplit.filter { live($0.key) }
         splitting = splitting.filter { live($0.key) }
         parts = parts.filter { live($0.key) }

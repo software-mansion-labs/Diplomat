@@ -5886,4 +5886,45 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
               "pushed to as it was applied, Fast track \(what): \(p1.writes) then \(p2.writes) \(p2.claude) "
                 + "then \(p3.claude) \(p3.writes)")
     }
+
+    // Kept off the fast track at its first rating for closing what no read judged, for good,
+    // with a hold saying so, logged once; closing nothing is no hold.
+    let lib = fix()
+    lib.others[40] = ("Lib bug", "OPEN", "acme/lib")
+    lib.prs[0].closes = [4, 40]
+    for (what, t, unread) in [("lib", lib, "https://github.com/acme/lib/issues/40"), ("linear", only([4, 11]), "ENG-3")] {
+        let why = "off the fast track: it would close \(unread), which Diplomat did not read or may not write to"
+        let k1 = sync(t, rateTrack, dir("closes-" + what), t0)
+        (t.prs[0].body, t.prs[0].closes) = ("Fixes #4.", [4])
+        let k2 = sync(t, rateTrack, dir("closes-" + what), later(5))
+        check(k1.writes == ["+risk:low #11", "+complexity:low #11"] && k2.writes.isEmpty
+              && (k1.result.effects + k2.result.effects).isEmpty
+              && (k1.events + k2.events).filter { $0.kind == .held }.map(\.detail) == [why]
+              && stageOf(k1.result, prURL(11)) == "human/human (\(why))" && stageOf(k2.result, prURL(11)) == "human/human (\(why))",
+              "first rated, closing \(unread) unread: \(k1.writes) \(k2.writes) \(stageOf(k2.result, prURL(11)))")
+    }
+    // Taken over, then revoked: a person's, with no hold for what it closed before.
+    var take = rateTrack, revoke = rateTrack
+    (take.force, revoke.force) = (.init(takeover: [prURL(11)]), .init(revoke: [prURL(11)]))
+    let tk = sync(lib, take, dir("closes-lib"), later(10))
+    let rv = sync(lib, revoke, dir("closes-lib"), later(15))
+    check(tk.writes.last == "+diplomat:fast-track #11" && rv.writes == ["-diplomat:fast-track #11"]
+          && stageOf(rv.result, prURL(11)) == "human/human",
+          "kept off, taken over, revoked: \(tk.writes) \(rv.writes) \(stageOf(rv.result, prURL(11)))")
+    let none = fix()
+    (none.prs[0].body, none.prs[0].closes) = ("", [])
+    let nc = sync(none, rateTrack, dir("closes-none"), t0)
+    check(nc.writes == ["+risk:low #11", "+complexity:low #11"] && !nc.events.contains { $0.kind == .held }
+          && stageOf(nc.result, prURL(11)) == "human/human",
+          "first rated, closing nothing: \(nc.writes) \(stageOf(nc.result, prURL(11)))")
+    let done = prURL(10), unread = issueURL(77)
+    try FileManager.default.createDirectory(at: dir("prune"), withIntermediateDirectories: true)
+    try Data("""
+        {"keptOff": {"\(done)": "x", "\(unread)": "x"},
+         "seen": {"\(done)": "2026-11-19T12:00:00Z", "\(unread)": "2026-11-19T12:00:00Z"}}
+        """.utf8).write(to: dir("prune").appendingPathComponent("state.json"))
+    _ = sync(fixture(), PipelineSettings(roots: [root]), dir("prune"), t0)
+    let pruned = (try? Data(contentsOf: dir("prune").appendingPathComponent("state.json")))
+        .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["keptOff"] as? [String: Any]
+    check(pruned?.keys.sorted() == [unread], "kept off, after \(done) is read merged: \(pruned ?? [:])")
 }
