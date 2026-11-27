@@ -56,15 +56,17 @@ public enum PipelineLog {
 /// logged once is not taken or logged again.
 ///
 /// An item missing from a read keeps its entries, which guard outward steps: they go once it
-/// is read merged or closed, or after `forgetDays` unseen. The log-only `holds`, `clean` and
-/// `asked` also go with an item missing from a read of every source.
+/// is read merged or closed, or after `forgetDays` unseen. `takenOver` and the log-only `holds`,
+/// `clean` and `asked` also go with an item missing from a read of every source.
 struct PipelineState: Codable, Equatable {
     static let forgetDays: Double = 90
 
     /// Per `owner/repo`, the labels known to exist there.
     var labelsMade: [String: [String]] = [:]
-    /// PRs Diplomat took off the fast track for good. Only a cache: the labels say it.
+    /// PRs Diplomat took off the fast track until taken over. Only a cache: the labels say it.
     var decided: [String] = []
+    /// The items the operator took over, and what each is.
+    var takenOver: [String: PipelineKind] = [:]
     /// PRs the fast-track label could not be put on at their first rating.
     var untracked: [String] = []
     /// Issues that would not split, or whose split stopped part-way, and why: not tried
@@ -104,8 +106,8 @@ struct PipelineState: Codable, Equatable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case labelsMade, decided, untracked, unsplit, splitting, parts, rerated, cleared, retry, syncs, lineage, seen,
-             holds, clean, asked, rateAsks, rateSeq, declined, notices
+        case labelsMade, decided, takenOver, untracked, unsplit, splitting, parts, rerated, cleared, retry, syncs,
+             lineage, seen, holds, clean, asked, rateAsks, rateSeq, declined, notices
     }
 
     /// A field missing is empty; one there but not of its type fails the whole file.
@@ -113,6 +115,7 @@ struct PipelineState: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         labelsMade = try c.decodeIfPresent([String: [String]].self, forKey: .labelsMade) ?? [:]
         decided = try c.decodeIfPresent([String].self, forKey: .decided) ?? []
+        takenOver = try c.decodeIfPresent([String: PipelineKind].self, forKey: .takenOver) ?? [:]
         untracked = try c.decodeIfPresent([String].self, forKey: .untracked) ?? []
         unsplit = try c.decodeIfPresent([String: String].self, forKey: .unsplit) ?? [:]
         splitting = try c.decodeIfPresent([String: [String]].self, forKey: .splitting) ?? [:]
@@ -169,6 +172,7 @@ struct PipelineState: Codable, Equatable {
         rateAsks = rateAsks.filter { live($0.key) }
         declined.removeAll { !live($0) }
         func keep(_ id: String) -> Bool { live(id) && (!readAll || read.contains(id)) }
+        takenOver = takenOver.filter { keep($0.key) }
         holds = holds.filter { keep($0.key) }
         clean = clean.filter { keep($0.key) }
         // An effect key is `<kind>:<item id>`.

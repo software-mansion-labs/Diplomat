@@ -215,6 +215,12 @@ struct PipelineView: View {
         item.kind == .issue && item.stage == .candidate && item.writable
     }
 
+    /// Twin of `pipelineview.can_take_over`.
+    static func canTakeOver(_ item: PipelineItem) -> Bool {
+        item.takenOver != true && item.writable && (item.state == "open" || item.state == "draft")
+            && [.unrated, .human].contains(item.stage)
+    }
+
     private var legend: some View {
         HStack(spacing: 10) {
             ForEach([PipelineGraph.EdgeKind.fixes, .child, .stacked], id: \.self) { kind in
@@ -275,6 +281,8 @@ struct PipelineView: View {
                            enabled: store.pipelineEnabled,
                            forcedRate: store.pipelineForce.rate.contains(id),
                            forcedFracture: store.pipelineForce.fracture.contains(id),
+                           forcedTakeover: store.pipelineForce.takeover.contains(id),
+                           forcedRevoke: store.pipelineForce.revoke.contains(id),
                            ban: store.pipelineBan(item),
                            banUnread: store.pipelineBanUnread,
                            canRate: store.pipelineCanRate(item),
@@ -286,6 +294,8 @@ struct PipelineView: View {
                            rate: { store.forcePipeline(rate: id) },
                            fracture: { store.forcePipeline(fracture: id) },
                            startFix: { actionError = store.startPipelineFix(item) },
+                           takeover: { store.forcePipeline(takeover: id) },
+                           revoke: { store.forcePipeline(revoke: id) },
                            close: { selected = nil })
         } else {
             VStack(alignment: .leading, spacing: 6) {
@@ -573,6 +583,8 @@ struct PipelineDetail: View {
     let enabled: Bool
     let forcedRate: Bool
     let forcedFracture: Bool
+    let forcedTakeover: Bool
+    let forcedRevoke: Bool
     let ban: String?
     let banUnread: String?
     let canRate: Bool
@@ -584,6 +596,8 @@ struct PipelineDetail: View {
     let rate: () -> Void
     let fracture: () -> Void
     let startFix: () -> Void
+    let takeover: () -> Void
+    let revoke: () -> Void
     let close: () -> Void
 
     var body: some View {
@@ -624,6 +638,10 @@ struct PipelineDetail: View {
             section("WHO MAY ACT") {
                 Text(PipelineTint.access(item)).font(.system(size: 10.5))
                     .fixedSize(horizontal: false, vertical: true)
+                if item.takenOver == true {
+                    Text(PipelineDetail.takenOverLine(item)).font(.system(size: 10)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Text(PipelineTint.people(item)).font(.system(size: 10)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let head = item.headSha {
@@ -692,8 +710,23 @@ struct PipelineDetail: View {
     var fractureTip: String {
         banUnread ?? item.fractureRefused ?? "Split it into low-complexity child issues in a sync started now"
     }
-    var fixEnabled: Bool { enabled && canStartFix && badge == nil && !forcedFracture && ban == nil }
+    var fixEnabled: Bool { enabled && canStartFix && badge == nil && !forcedFracture && !forcedRevoke && ban == nil }
     var fixTip: String { ban ?? (canStartFix ? "Queue its fix now, past its retry backoff" : fixUnknown) }
+    var takeoverEnabled: Bool { enabled && !forcedTakeover && banUnread == nil && item.takeoverRefused == nil }
+    var takeoverTip: String {
+        banUnread ?? item.takeoverRefused ?? (item.kind == .pr
+            ? "Hand it to Diplomat in a sync started now: reviewed until clean and merged, whatever its rating or diff floor"
+            : "Hand it to Diplomat in a sync started now: a fix candidate whatever its rating or triage")
+    }
+    var revokeEnabled: Bool { enabled && !forcedRevoke }
+
+    /// Twin of `pipelineview.taken_over_line`.
+    static func takenOverLine(_ item: PipelineItem) -> String {
+        "Taken over: neither its rating nor its " + (item.kind == .pr ? "diff floor" : "triage") + " holds it"
+    }
+    var revokeTip: String {
+        "Take it back from Diplomat in a sync started now" + (item.kind == .pr ? ": off the fast track" : "")
+    }
 
     private var actions: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -716,6 +749,17 @@ struct PipelineDetail: View {
                     PipelineActionChip(symbol: "wrench.and.screwdriver", text: "Start fix",
                                        tint: .green, enabled: fixEnabled, action: startFix)
                         .tooltip(fixTip)
+                }
+                if PipelineView.canTakeOver(item) {
+                    PipelineActionChip(symbol: "checkmark.shield",
+                                       text: forcedTakeover ? "Takeover asked" : "Authorize takeover",
+                                       tint: .pink, enabled: takeoverEnabled, action: takeover)
+                        .tooltip(takeoverTip)
+                } else if item.takenOver == true {
+                    PipelineActionChip(symbol: "xmark.shield",
+                                       text: forcedRevoke ? "Revoke asked" : "Revoke takeover",
+                                       tint: .pink, enabled: revokeEnabled, action: revoke)
+                        .tooltip(revokeTip)
                 }
             }
             if let error {
@@ -954,6 +998,7 @@ enum PipelineTint {
         case .merged, .fractured, .child: return .purple
         case .held: return .orange
         case .asked: return .teal
+        case .takeover: return .pink
         case .error: return .red
         }
     }

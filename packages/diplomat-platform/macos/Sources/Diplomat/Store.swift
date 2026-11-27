@@ -1009,7 +1009,7 @@ final class Store: ObservableObject {
     @Published var pipelineSyncing = false
     /// Why syncs are held, nil while they run (`runPipelineSyncOnce`).
     @Published var pipelineError: String?
-    /// What the screen asked for (Rate now, Fracture) that no sync has taken yet.
+    /// What the screen asked for (Rate now, Fracture, a takeover or its revoke) that no sync has taken yet.
     @Published var pipelineForce = PipelineSettings.Force()
     /// `LinearLogin.saved`, read at launch, after each sign-in and sign-out, and after each sync.
     @Published var linearLogin: LinearLogin.Saved?
@@ -1445,6 +1445,7 @@ final class Store: ObservableObject {
             // `finished` lines into it (`noteCommsRuns`).
             refreshComms()
             startCommsMonitor()
+            restorePipelineRevokes()
             startPipelineMonitor()
             refreshLinearLogin()
             refreshBanList()

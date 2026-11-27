@@ -46,19 +46,32 @@ CONTROL_KEYS = ("enabled", "rate", "fix", "fastTrack", "merge", "fracture")
 
 
 def write_control(switches: dict) -> None:
-    """Never raises: a sync that cannot read ``control.json`` goes by the settings it was
-    started with. Twin of ``Store.writePipelineControl``."""
+    """The switches, and the ``revoke`` asks (when any), which a running sync applies right
+    before each merge and its asks. Never raises: a sync that cannot read ``control.json`` goes by the
+    settings it was started with. Twin of ``Store.writePipelineControl``."""
     folder = pipeline_dir()
     tmp = folder / f"control.json.tmp-{os.getpid()}-{uuid.uuid4().hex}"
     try:
         folder.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({k: bool(switches.get(k)) for k in CONTROL_KEYS}, fh, sort_keys=True)
+            control: dict = {k: bool(switches.get(k)) for k in CONTROL_KEYS}
+            if switches.get("revoke"):
+                control["revoke"] = sorted(switches["revoke"])
+            json.dump(control, fh, sort_keys=True)
         os.replace(tmp, folder / "control.json")
     except OSError:
         with contextlib.suppress(OSError):
             tmp.unlink()
+
+
+def control_revokes() -> list[str]:
+    """The ``revoke`` asks ``control.json`` holds; none when it is missing or unreadable."""
+    try:
+        revoke = json.loads((pipeline_dir() / "control.json").read_text()).get("revoke")
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [r for r in revoke if isinstance(r, str)] if isinstance(revoke, list) else []
 
 
 def tunables() -> dict:
@@ -96,6 +109,9 @@ _GH_CALLS_PER_CLAUDE = 16
 #: Per split part: a re-read, the parts filed before (twice after a failed create), the
 #: create and its sub-issue link.
 _GH_CALLS_PER_PART = 5
+#: Per takeover or revoke asked: a re-read, then the fast-track label's create and add, or
+#: the fast-track labels' removal; and a PR's clear in the same sync, as `cleared`'s.
+_GH_CALLS_PER_TAKEOVER = 6
 #: A root's merges: each PR read twice before ``gh pr merge`` (once without Linear) and
 #: once after.
 _MERGES_PER_ROOT = 3
@@ -135,9 +151,11 @@ def tick_timeout(settings: dict) -> float:
     per_claude = float(rater.get("timeoutSecs", 300)) + 5 + _GH_CALLS_PER_CLAUDE * _GH_CALL_SECS
     per_split = (int((t.get("fracture") or {}).get("maxChildren", 6)) * _GH_CALLS_PER_PART
                  * _GH_CALL_SECS)
+    takeovers = len(force.get("takeover") or []) + len(force.get("revoke") or [])
     roots = max(1, len(settings.get("roots") or []))
     return min(MAX_SYNC_SECS, ratings * _GH_CALLS_PER_CLAUDE * _GH_CALL_SECS
                + splits * (per_claude + per_split)
+               + takeovers * _GH_CALLS_PER_TAKEOVER * _GH_CALL_SECS
                + roots * (_read_calls(t) + _MERGES_PER_ROOT * _GH_CALLS_PER_MERGE) * _GH_CALL_SECS
                + len(settings.get("queued") or []) * _GH_CALL_SECS
                + (_LINEAR_SECS if settings.get("linearTeams") else 0)
