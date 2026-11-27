@@ -1084,7 +1084,7 @@ struct SettingsView: View {
                 switchControl("Rate issues and PRs", $store.pipelineRate)
             }
             SettingRow(title: "Open fix PRs",
-                       summary: "Queues an agent that fixes each low-risk, low-complexity issue, and each you take over",
+                       summary: "Queues an agent that fixes each issue within its repo's fast-track limit, and each you take over",
                        detail: "Only an issue unassigned or assigned to you that no open PR fixes, "
                              + "in its repo root; a Linear issue is fixed in the root its team "
                              + "names below.") {
@@ -1095,6 +1095,7 @@ struct SettingsView: View {
                        detail: SettingsView.pipelineFastTrackDetail) {
                 switchControl("Fast-track my PRs", $store.pipelineFastTrack)
             }
+            pipelineLimitsRow
             SettingRow(title: "Merge cleared PRs",
                        summary: "Merges past the review requirement with admin rights "
                            + "(gh pr merge --admin): no person approves the PR first",
@@ -1102,7 +1103,8 @@ struct SettingsView: View {
                 switchControl("Merge cleared PRs", $store.pipelineMerge)
             }
             SettingRow(title: "Split big issues",
-                       summary: "One medium- or high-complexity issue a sync becomes low-complexity child issues",
+                       summary: "Each sync, one issue more complex than its repo's fast-track limit "
+                           + "becomes low-complexity child issues",
                        detail: SettingsView.pipelineFractureDetail) {
                 switchControl("Split big issues", $store.pipelineFracture)
             }
@@ -1158,6 +1160,57 @@ struct SettingsView: View {
         }
     }
 
+    /// The GitHub roots `pipelineSettings` hands a sync.
+    private var pipelineLimitsRow: some View {
+        let roots = store.roots.filter { !$0.isGitLab }
+        return SettingRow(title: "Fast-track limits",
+                          summary: "The highest rating each repo's fast track fixes, reviews and merges",
+                          detail: SettingsView.pipelineLimitsDetail,
+                          stacked: true) {
+            VStack(alignment: .leading, spacing: 8) {
+                if roots.isEmpty {
+                    Text("No GitHub repo root is set").font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+                ForEach(roots, id: \.key) { root in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(root.slug).font(.system(size: 10, weight: .semibold))
+                        pipelineLimitSlider("Complexity", root, \.complexity)
+                        pipelineLimitSlider("Risk", root, \.risk)
+                    }
+                }
+            }
+        }
+    }
+
+    private func pipelineLimitSlider(_ name: String, _ root: PRRef.LocalRepo,
+                                     _ dimension: WritableKeyPath<PipelineRating, PipelineLevel>) -> some View {
+        let levels = PipelineLevel.allCases.filter { $0 <= PipelineRating.maxLimit[keyPath: dimension] }
+        let at = levels.lastIndex { $0 <= store.pipelineLimit(root)[keyPath: dimension] } ?? 0
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(name).font(.system(size: 10)).frame(width: 58, alignment: .leading)
+            SliderSetting(label: "\(root.slug) \(name.lowercased()) limit",
+                          value: Binding(
+                              get: { Double(at) },
+                              set: {
+                                  var limit = store.pipelineLimit(root)
+                                  limit[keyPath: dimension] = levels[min(Int($0.rounded()), levels.count - 1)]
+                                  store.pipelineLimits[root.key] = limit
+                              }
+                          ),
+                          range: 0...Double(levels.count - 1),
+                          step: 1,
+                          badge: levels[at].rawValue,
+                          minLabel: levels[0].rawValue,
+                          maxLabel: levels[levels.count - 1].rawValue,
+                          tint: .green)
+        }
+    }
+
+    private static let pipelineLimitsDetail = """
+        Low/low unless set. Risk stops at medium: a high-risk item goes down the fast track \
+        only taken over. A Linear team's issues go by the repo it maps to.
+        """
+
     static func linearTeamsSummary(_ parsed: (teams: [PipelineSettings.LinearTeam], bad: [String])) -> String {
         if !parsed.bad.isEmpty { return "Not KEY=owner/repo, so not tracked: " + parsed.bad.joined(separator: ", ") }
         if parsed.teams.isEmpty { return "None: GitHub only" }
@@ -1198,16 +1251,16 @@ struct SettingsView: View {
         written; a PR's diff can only raise one.
         """
 
-    static let pipelineFastTrackSummary = "Labels diplomat:fast-track each low/low PR of yours that closes "
-        + "a candidate issue, or that you take over, and reviews it until clean"
+    static let pipelineFastTrackSummary = "Labels diplomat:fast-track each PR of yours within its repo's limit "
+        + "that closes a candidate issue, or that you take over, and reviews it until clean"
 
     static let pipelineFastTrackDetail = """
         Only your own PRs from the repo itself into its default branch that close only \
         candidate issues: the fixes the pipeline asks for. Reviews of it are queued until one \
-        finds nothing at its head; at that clean head it is rated again: still low/low, it is \
-        labelled diplomat:cleared, else it leaves the fast track; one you took over is labelled \
-        so with no second rating. A PR rated while this is \
-        off stays a person's.
+        finds nothing at its head; at that clean head it is rated again: still within its \
+        repo's limit, it is labelled diplomat:cleared, else it leaves the fast track; one you \
+        took over is labelled so with no second rating. A PR rated while this is off stays a \
+        person's.
         """
 
     static let pipelineMergeDetail = """

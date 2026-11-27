@@ -40,7 +40,8 @@ extension Store {
                                            revoke: pipelineForce.revoke.sorted())
         return PipelineSettings(
             roots: roots.filter { !$0.isGitLab }.map {
-                PipelineSettings.Root(owner: $0.owner, repo: $0.repo, path: $0.path, me: knownMe(for: $0))
+                PipelineSettings.Root(owner: $0.owner, repo: $0.repo, path: $0.path, me: knownMe(for: $0),
+                                      limit: pipelineLimit($0))
             },
             linearTeams: Store.pipelineTeams(pipelineLinearTeamsRaw),
             rate: pipelineRate, fix: pipelineFix, fastTrack: pipelineFastTrack,
@@ -56,9 +57,9 @@ extension Store {
             + attempts.keys.map { String($0.drop { $0 != ":" }.dropFirst()) }).sorted()
     }
 
-    /// The switches as they stand, which a running sync re-reads before each of its writes,
-    /// merges and ratings (one that cannot read them keeps those it started with), and the
-    /// revokes asked, which it applies right before each merge and its asks. Headless
+    /// The switches and limits as they stand, which a running sync re-reads before each of
+    /// its writes, merges and ratings (one that cannot read them keeps those it started with),
+    /// and the revokes asked, which it applies right before each merge and its asks. Headless
     /// only into a `DIPLOMAT_PIPELINE_DIR`, so a render or self-test never steers the live
     /// app's sync. Twin of `pipeline.write_control`.
     func writePipelineControl() {
@@ -67,7 +68,7 @@ extension Store {
         let revoke = pipelineForce.revoke.sorted()
         PipelineControl(enabled: pipelineEnabled, rate: pipelineRate, fix: pipelineFix,
                         fastTrack: pipelineFastTrack, merge: pipelineMerge, fracture: pipelineFracture,
-                        revoke: revoke.isEmpty ? nil : revoke).save()
+                        revoke: revoke.isEmpty ? nil : revoke, limits: pipelineLimits).save()
     }
 
     /// The revokes `control.json` holds that no sync answered before the app quit, asked
@@ -82,6 +83,26 @@ extension Store {
 
     nonisolated static func pipelineTeams(_ raw: String) -> [PipelineSettings.LinearTeam] {
         PipelineSettings.LinearTeam.parse(raw).teams
+    }
+
+    func pipelineLimit(_ root: PRRef.LocalRepo) -> PipelineRating { pipelineLimits[root.key] ?? .low }
+
+    /// `pipelineLimits` as stored, the Linux store's shape:
+    /// `{"owner/repo": {"complexity": "medium", "risk": "low"}}`.
+    nonisolated static func pipelineLimitsJSON(_ limits: [String: PipelineRating]) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return (try? encoder.encode(limits)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+    }
+
+    /// Absent or unreadable, every root is low/low.
+    nonisolated static func pipelineLimits(_ json: String?) -> [String: PipelineRating] {
+        json.flatMap { try? JSONDecoder().decode([String: PipelineRating].self, from: Data($0.utf8)) } ?? [:]
+    }
+
+    nonisolated static func pipelineLimitLowered(from old: [String: PipelineRating],
+                                                 to new: [String: PipelineRating]) -> Bool {
+        Set(old.keys).union(new.keys).contains { !(old[$0] ?? .low).fits(new[$0] ?? .low) }
     }
 
     // MARK: the loop
