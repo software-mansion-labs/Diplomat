@@ -57,10 +57,10 @@ def _ledger_lines() -> list[str]:
     events: list[dict] = []
 
     # --- quota samples -------------------------------------------------------
-    # Four intervals. Two are ordinary burn-downs and price the window; the third
-    # spans a RESET (session left goes UP), which must be skipped by both sides or
-    # the window comes out negative; the fourth has no quota reading at all, which
-    # still carries token counters for the repo/other split.
+    # Nine samples, so eight intervals. The first and last each touch a sample with no
+    # quota reading at all, which still carries token counters for the repo/other
+    # split; the fourth spans a RESET (session left goes UP), which must be skipped by
+    # both sides or the window comes out negative; the rest are ordinary burn-downs.
     events += [
         # OUTSIDE the range, and the token counters have already moved by the time
         # the range opens. The split is measured from here, so an implementation
@@ -74,7 +74,7 @@ def _ledger_lines() -> list[str]:
         {"at": NOW - 5 * DAY + 7200, "ev": "sample", "sessionLeft": 0.75,
          "weekLeft": 0.95, "repoTokens": 1_000_000.0, "otherTokens": 500_000.0},
         # The 5-hour window rolled: more left than before, so this interval prices
-        # nothing.
+        # only the week.
         {"at": NOW - 5 * DAY + 10800, "ev": "sample", "sessionLeft": 1.0,
          "weekLeft": 0.94, "repoTokens": 1_200_000.0, "otherTokens": 600_000.0},
         {"at": NOW - 4 * DAY, "ev": "sample", "sessionLeft": 0.5, "weekLeft": 0.9,

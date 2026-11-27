@@ -12,6 +12,7 @@ ledger nobody wrote to looks the same as a screen drawn from a quiet fortnight.
 
 from __future__ import annotations
 
+import inspect
 import json
 import math
 import os
@@ -23,6 +24,7 @@ import pytest
 
 from diplomat_runtime import core, quota, telemetry, usagescan
 from test_opencode_v2 import quiet_shell
+from test_telemetry_parity import _ledger_lines
 
 
 @pytest.fixture
@@ -1515,3 +1517,22 @@ def test_the_assets_readme_counts_every_metric():
     readme = (core.assets_dir() / "README.md").read_text(encoding="utf-8")
     row = next(r for r in readme.splitlines() if r.startswith("| `telemetry.json` |"))
     assert re.findall(r"the (\w+) metrics", row) == [str(len(core.telemetry()["metrics"]))]
+
+
+# MARK: - The parity ledger
+
+
+def test_the_parity_ledgers_quota_comment_maps_its_samples():
+    samples = telemetry.fold(_ledger_lines()).samples
+    pairs = list(zip(samples, samples[1:]))
+    unread = [i for i, pair in enumerate(pairs, 1)
+              if any(s.session_left is None and s.week_left is None for s in pair)]
+    resets = [i for i, (a, b) in enumerate(pairs, 1)
+              if None not in (a.session_left, b.session_left)
+              and b.session_left > a.session_left]
+    assert (len(samples), unread, resets) == (9, [1, 8], [4])
+    block = inspect.getsource(_ledger_lines).split("# --- quota samples")[1]
+    comment = " ".join(re.findall(r"# (.+)", block.split("events +=")[0]))
+    assert comment.startswith("Nine samples, so eight intervals. The first and last each "
+                              "touch a sample with no quota reading at all")
+    assert "the fourth spans a RESET" in comment
