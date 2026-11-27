@@ -267,7 +267,9 @@ DIPLOMAT_NETWORK_TEST=1  ...                     # self-test: the Diplomacy Netw
                                                      #   Starts no daemon, opens no terminal; exit code = verdict
 DIPLOMAT_APIWATCH_TEST=1 ...                     # self-test: who a scan may type into (an agent's session,
                                                      #   including one a terminal only shows through tmux;
-                                                     #   never a plain shell). Reads no terminal, sends nothing
+                                                     #   never a plain shell), and reading and reaping a Ghostty
+                                                     #   run's own tmux server.
+                                                     #   Reads no terminal; types only into tmux servers of its own
 DIPLOMAT_SELF_UPDATE=1   ...                     # the unattended 06:00 update: merge if the build is behind,
                                                      #   rebuild, relaunch a running instance, launch a dead one
 DIPLOMAT_WATCHDOG=1      ...                     # the 5-minute check: launch the app if no instance is up

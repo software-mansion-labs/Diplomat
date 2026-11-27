@@ -292,7 +292,8 @@ enum ApiWatchTest {
                 return p.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil
             }
             func alive(_ session: String, on server: String? = nil) -> Bool {
-                tmux((server.map { ["-L", $0] } ?? []) + ["has-session", "-t", "=" + session]) != nil
+                tmux((server.map { ["-L", $0] } ?? [])
+                     + ["has-session", "-t", "=" + session]) != nil
             }
 
             // The operator's own session on the default server, and two runs opened as a
