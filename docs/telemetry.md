@@ -84,13 +84,6 @@ Two gatherers fill in what GitHub doesn't know:
   the same three fields, so one ledger holds every runner in one unit. Hermes' row
   also carries what the provider **charged**, and the model it charged for, which is
   the unit the [spending budget](automation.md#the-spending-budget) holds that machine to.
-- **Balance** (`spend.py` / `Spend.swift`) - the money twin of the quota probe, and
-  what the spending budget reads when the runner is billed by a provider rather than
-  out of a rate-limit window. One GET each against OpenRouter's `/api/v1/key` and
-  `/api/v1/credits`, keyed from `~/.hermes/.env`, giving dollars left on the key's own
-  cap and on the account's credit balance. Cached and degraded exactly as the quota
-  probe is; `DIPLOMAT_SPEND_PROBE=0` turns it off and `DIPLOMAT_HERMES_ENV` moves
-  where the key is read from.
 
 The probe reports **what is left of the 7-day window** on every sample, and that
 reading is what *rate limit left* draws - measured, not derived. What Anthropic never
@@ -112,3 +105,11 @@ The arithmetic is shared: [`Telemetry.swift`](../packages/diplomat-core/Sources/
 and `diplomat_runtime/telemetry.py` are diffed field-for-field over one ledger by
 `tests/test_telemetry_parity.py`, so the two screens cannot disagree about what a
 ledger means.
+
+**Balance** (`spend.py` / `Spend.swift`), the money twin of the quota probe, writes
+nothing to the ledger: it is what the spending budget reads when the runner is billed
+by a provider rather than out of a rate-limit window. One GET each against OpenRouter's
+`/api/v1/key` and `/api/v1/credits`, keyed from `~/.hermes/.env`, giving dollars left
+on the key's own cap and on the account's credit balance. Cached and degraded exactly
+as the quota probe is; `DIPLOMAT_SPEND_PROBE=0` turns it off and `DIPLOMAT_HERMES_ENV`
+moves where the key is read from.

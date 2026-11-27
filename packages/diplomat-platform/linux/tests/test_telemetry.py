@@ -18,6 +18,7 @@ import os
 import re
 import shlex
 import time
+from pathlib import Path
 
 import pytest
 
@@ -1515,3 +1516,13 @@ def test_the_assets_readme_counts_every_metric():
     readme = (core.assets_dir() / "README.md").read_text(encoding="utf-8")
     row = next(r for r in readme.splitlines() if r.startswith("| `telemetry.json` |"))
     assert re.findall(r"the (\w+) metrics", row) == [str(len(core.telemetry()["metrics"]))]
+
+
+# MARK: - docs/telemetry.md
+
+
+def test_the_telemetry_doc_lists_the_two_gatherers_it_counts():
+    doc = (Path(__file__).resolve().parents[4] / "docs" / "telemetry.md").read_text(encoding="utf-8")
+    head = "Two gatherers fill in what GitHub doesn't know:\n\n"
+    listed = doc[doc.index(head) + len(head):].split("\n\n", 1)[0]
+    assert re.findall(r"^- \*\*(.+?)\*\*", listed, re.M) == ["Quota", "Token attribution"]
