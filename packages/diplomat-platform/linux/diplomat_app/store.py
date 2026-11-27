@@ -1349,7 +1349,7 @@ class Store(QObject):
 
     @property
     def pipeline_fix(self) -> bool:
-        """Queue a fix PR for each low/low issue."""
+        """Queue a fix PR for each issue within its root's limit."""
         return self._settings.value("pipelineFix", False, bool)
 
     @pipeline_fix.setter
@@ -1363,7 +1363,8 @@ class Store(QObject):
 
     @property
     def pipeline_fast_track(self) -> bool:
-        """Label my low/low PRs fast-track and queue their reviews until clean."""
+        """Label my PRs within their root's limit fast-track and queue their reviews until
+        clean."""
         return self._settings.value("pipelineFastTrack", False, bool)
 
     @pipeline_fast_track.setter
@@ -1387,12 +1388,27 @@ class Store(QObject):
 
     @property
     def pipeline_fracture(self) -> bool:
-        """Split writable medium/high-complexity issues into low-complexity children."""
+        """Split writable issues more complex than their root's limit into low-complexity
+        children."""
         return self._settings.value("pipelineFracture", False, bool)
 
     @pipeline_fracture.setter
     def pipeline_fracture(self, value: bool) -> None:
         self._settings.setValue("pipelineFracture", bool(value))
+        self._write_pipeline_control()
+
+    @property
+    def pipeline_limits(self) -> dict:
+        """Each GitHub root's fast-track limit by its ``owner/repo`` lowercased, a root
+        missing from it at low/low (:func:`pipeline.read_limits`)."""
+        return pipeline.read_limits(str(self._settings.value("pipelineLimits", "", str) or ""))
+
+    def set_pipeline_limit(self, slug: str, limit: dict) -> None:
+        old = self.pipeline_limits
+        key, new = slug.lower(), pipeline.limit(limit)
+        if pipeline.lowered(pipeline.limit(old.get(key)), new):
+            self._pipeline_cut()
+        self._settings.setValue("pipelineLimits", json.dumps({**old, key: new}, sort_keys=True))
         self._write_pipeline_control()
 
     def _pipeline_cut(self, *, master: bool = False) -> None:
@@ -1403,10 +1419,12 @@ class Store(QObject):
                 self._pipeline_stale = {w.key for w in self.requested_work if w.pipeline}
 
     def pipeline_control(self) -> dict:
-        """``control.json``'s switches as they stand (:func:`pipeline.write_control`)."""
+        """``control.json``'s switches and limits as they stand
+        (:func:`pipeline.write_control`)."""
         return {"enabled": self.pipeline_enabled, "rate": self.pipeline_rate,
                 "fix": self.pipeline_fix, "fastTrack": self.pipeline_fast_track,
-                "merge": self.pipeline_merge, "fracture": self.pipeline_fracture}
+                "merge": self.pipeline_merge, "fracture": self.pipeline_fracture,
+                "limits": self.pipeline_limits}
 
     def _write_pipeline_control(self) -> None:
         """Headless only into a ``DIPLOMAT_PIPELINE_DIR``, so a render never steers the
@@ -5093,9 +5111,11 @@ class Store(QObject):
         teams, _ = pipeline.parse_linear_teams(self.pipeline_linear_teams_raw)
         with self._pipeline_lock:
             force = {kind: sorted(ids) for kind, ids in self._pipeline_force.items()}
+        limits = self.pipeline_limits
         return {
             "roots": [{"owner": r.owner, "repo": r.repo, "path": r.path,
-                       "me": self.known_me(r)}
+                       "me": self.known_me(r),
+                       "limit": pipeline.limit(limits.get(r.slug.lower()))}
                       for r in review.repo_roots() if not r.is_gitlab],
             "linearTeams": teams,
             "rate": self.pipeline_rate,

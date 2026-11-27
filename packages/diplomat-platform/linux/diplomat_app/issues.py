@@ -86,7 +86,7 @@ class IssueConfig(RepoConfig):
     #: A Linear issue (``LinearIssue``: ``identifier``, ``url``, ``text``) worked in place
     #: of ``specific_issue``: the Pipeline read its text, which the run cannot.
     linear: dict | None = None
-    #: A Pipeline fast-track candidate, rated low risk and low complexity.
+    #: A Pipeline fast-track candidate, rated within its repo's limit.
     pipeline: bool = False
 
     def __post_init__(self) -> None:

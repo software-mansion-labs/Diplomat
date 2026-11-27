@@ -43,8 +43,38 @@ def pipeline_dir() -> Path:
 #: The switches a running sync re-reads from ``control.json`` before each outward action.
 CONTROL_KEYS = ("enabled", "rate", "fix", "fastTrack", "merge", "fracture")
 
+#: ``PipelineLevel``, lowest first.
+LEVELS = ("low", "medium", "high")
+#: ``PipelineRating.maxLimit``.
+MAX_LIMIT = {"risk": "medium", "complexity": "high"}
 
-def write_control(switches: dict) -> None:
+
+def limit(value: object) -> dict:
+    """A root's fast-track limit, ``{"risk", "complexity"}``, from what was stored: a
+    dimension missing or not a level reads low, and each is held to :data:`MAX_LIMIT`."""
+    value = value if isinstance(value, dict) else {}
+    out = {}
+    for dim, cap in MAX_LIMIT.items():
+        level = value.get(dim)
+        out[dim] = min(level if level in LEVELS else "low", cap, key=LEVELS.index)
+    return out
+
+
+def read_limits(raw: str) -> dict:
+    """The ``pipelineLimits`` setting's JSON, each root's :func:`limit` by its ``owner/repo``
+    lowercased; text that is no JSON object reads as none."""
+    try:
+        obj = json.loads(raw)
+    except ValueError:
+        return {}
+    return {slug.lower(): limit(v) for slug, v in obj.items()} if isinstance(obj, dict) else {}
+
+
+def lowered(old: dict, new: dict) -> bool:
+    return any(LEVELS.index(new[dim]) < LEVELS.index(old[dim]) for dim in MAX_LIMIT)
+
+
+def write_control(control: dict) -> None:
     """Never raises: a sync that cannot read ``control.json`` goes by the settings it was
     started with. Twin of ``Store.writePipelineControl``."""
     folder = pipeline_dir()
@@ -53,7 +83,8 @@ def write_control(switches: dict) -> None:
         folder.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({k: bool(switches.get(k)) for k in CONTROL_KEYS}, fh, sort_keys=True)
+            json.dump({**{k: bool(control.get(k)) for k in CONTROL_KEYS},
+                       "limits": control["limits"]}, fh, sort_keys=True)
         os.replace(tmp, folder / "control.json")
     except OSError:
         with contextlib.suppress(OSError):

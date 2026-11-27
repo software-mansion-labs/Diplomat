@@ -716,7 +716,7 @@ _RATED_BY = {"label": "Read off its labels.",
 
 
 def can_start_fix(item: dict) -> bool:
-    """A candidate issue: low/low, writable, no open PR fixing it. Twin of
+    """A candidate issue: within its root's limit, writable, no open PR fixing it. Twin of
     ``PipelineView.canStartFix``."""
     return (item.get("kind") == "issue" and item.get("stage") == "candidate"
             and bool(item.get("writable")))

@@ -130,11 +130,74 @@ def test_a_sync_is_handed_the_github_roots_the_teams_and_the_switches(pipe, monk
     pipe.pipeline_force_now("rate", PR)
     pipe.pipeline_force_now("fracture", ISSUE)
     assert pipe.pipeline_settings_payload() == {
-        "roots": [{"owner": "o", "repo": "r", "path": "/src/r", "me": "alice"}],
+        "roots": [{"owner": "o", "repo": "r", "path": "/src/r", "me": "alice",
+                   "limit": {"risk": "low", "complexity": "low"}}],
         "linearTeams": [{"key": "ENG", "repo": "o/r"}, {"key": "OPS", "repo": "o/other"}],
         "rate": False, "fix": True, "fastTrack": True, "merge": False, "fracture": False,
         "force": {"rate": [ISSUE, PR], "fracture": [ISSUE]}, "queued": [],
     }
+
+
+LOW = {"risk": "low", "complexity": "low"}
+
+
+def test_each_repos_fast_track_limit_persists_by_its_lowercased_slug():
+    st = Store()
+    assert st.pipeline_limits == {}
+    st.set_pipeline_limit("Acme/App", {"risk": "medium", "complexity": "high"})
+    st.set_pipeline_limit("o/r", {"risk": "low", "complexity": "medium"})
+    assert json.loads(app_settings().value("pipelineLimits", "", str)) == {
+        "acme/app": {"risk": "medium", "complexity": "high"},
+        "o/r": {"risk": "low", "complexity": "medium"}}
+    assert Store().pipeline_limits == {"acme/app": {"risk": "medium", "complexity": "high"},
+                                       "o/r": {"risk": "low", "complexity": "medium"}}
+
+
+@pytest.mark.parametrize("raw, limits", [
+    ("not json", {}),
+    ("[]", {}),
+    ('{"O/R": {"risk": "high", "complexity": "high"}}',
+     {"o/r": {"risk": "medium", "complexity": "high"}}),
+    ('{"o/r": {"risk": "severe", "complexity": 2}, "a/b": "medium", "c/d": {}}',
+     {"o/r": LOW, "a/b": LOW, "c/d": LOW}),
+    ('{"o/r": {"complexity": "medium", "extra": "high"}}',
+     {"o/r": {"risk": "low", "complexity": "medium"}}),
+])
+def test_a_hand_edited_limit_reads_low_where_it_is_no_level_and_risk_stops_at_medium(
+        raw, limits):
+    app_settings().setValue("pipelineLimits", raw)
+    assert Store().pipeline_limits == limits
+
+
+def test_a_sync_is_handed_each_github_roots_limit(pipe, monkeypatch):
+    """By its slug lowercased; a root never set is low/low."""
+    monkeypatch.setattr(review, "repo_roots",
+                        lambda: [ROOT, LocalRepo("Acme", "App", "/src/app"), LAB])
+    app_settings().setValue("pipelineLimits", json.dumps({
+        "acme/app": {"risk": "medium", "complexity": "high"},
+        "group/sub/r": {"risk": "medium", "complexity": "medium"}}))
+    assert [r["limit"] for r in pipe.pipeline_settings_payload()["roots"]] == [
+        LOW, {"risk": "medium", "complexity": "high"}]
+
+
+@pytest.mark.parametrize("before, after, cut", [
+    (LOW, {"risk": "low", "complexity": "medium"}, False),
+    ({"risk": "low", "complexity": "medium"}, {"risk": "medium", "complexity": "medium"}, False),
+    ({"risk": "medium", "complexity": "medium"}, {"risk": "low", "complexity": "medium"}, True),
+    ({"risk": "low", "complexity": "high"}, {"risk": "low", "complexity": "medium"}, True),
+    ({"risk": "low", "complexity": "high"}, {"risk": "medium", "complexity": "low"}, True),
+])
+def test_a_limit_lowered_in_either_dimension_cuts_off_the_running_sync(pipe, before, after,
+                                                                         cut):
+    """Its result neither withdraws nor prunes, as after Fix or Fast track turned off; a
+    raise leaves it be. Neither withdraws an ask."""
+    pipe.set_pipeline_limit("o/r", before)
+    pipe._request([pipe.pipeline_work(_fix())])
+    epoch = pipe._pipeline_epoch
+    pipe.set_pipeline_limit("O/R", after)
+    assert pipe._pipeline_epoch == epoch + cut
+    assert pipe.pipeline_limits == {"o/r": after}
+    assert _keys(pipe) == ["issues:o/r#12"]
 
 
 # MARK: - Effects to asks
@@ -1258,7 +1321,7 @@ def test_each_switch_is_written_where_a_running_sync_reads_it(pipe):
     """``control.json``: the core reads it before each write, so a switch turned off
     stops the sync already running."""
     assert _control() == {"enabled": True, "rate": False, "fix": True, "fastTrack": True,
-                          "merge": False, "fracture": False}
+                          "merge": False, "fracture": False, "limits": {}}
     for name, key in [("pipeline_merge", "merge"), ("pipeline_fracture", "fracture"),
                       ("pipeline_rate", "rate")]:
         setattr(pipe, name, True)
@@ -1268,6 +1331,37 @@ def test_each_switch_is_written_where_a_running_sync_reads_it(pipe):
     mode = stat.S_IMODE(os.stat(pipeline.pipeline_dir() / "control.json").st_mode)
     assert mode == 0o600
     assert [f.name for f in pipeline.pipeline_dir().iterdir()] == ["control.json"]
+
+
+def test_each_limit_is_written_where_a_running_sync_reads_it(pipe):
+    """Every repo's, a hand-edited one as a sync would be handed it."""
+    app_settings().setValue("pipelineLimits", '{"A/B": {"risk": "high"}}')
+    pipe.set_pipeline_limit("o/r", {"risk": "medium", "complexity": "high"})
+    assert _control()["limits"] == {"a/b": {"risk": "medium", "complexity": "low"},
+                                    "o/r": {"risk": "medium", "complexity": "high"}}
+
+
+@pytest.mark.skipif(not os.environ.get("DIPLOMAT_CORE_BIN"), reason="DIPLOMAT_CORE_BIN not set")
+@pytest.mark.parametrize("now, stopped", [
+    ({"risk": "low", "complexity": "medium"}, ["fix", "fast track"]),
+    ({"risk": "medium", "complexity": "medium"}, []),
+    ({"risk": "medium", "complexity": "high"}, []),
+])
+def test_the_core_stops_the_steps_of_a_sync_whose_limit_was_lowered_since(pipe, tmp_path,
+                                                                          monkeypatch, now,
+                                                                          stopped):
+    """The real ``pipeline-tick``, reading the settings and ``control.json`` as written
+    here: one it cannot decode would go by the settings, and stop nothing."""
+    gh = tmp_path / "gh"
+    gh.write_text("#!/bin/sh\nexit 1\n")
+    gh.chmod(0o755)
+    monkeypatch.setenv("DIPLOMAT_GH", str(gh))
+    pipe.set_pipeline_limit("o/r", {"risk": "medium", "complexity": "medium"})
+    settings = pipe.pipeline_settings_payload()
+    pipe.set_pipeline_limit("o/r", now)
+    assert [n for n in pipeline.tick(settings)["notices"] if "limit" in n] == [
+        f"o/r's fast-track limit was lowered, so this sync took no {step} step past that"
+        for step in stopped]
 
 
 def test_a_switch_flipped_while_a_sync_writes_the_switches_is_the_one_left(pipe,
@@ -1298,7 +1392,7 @@ def test_a_sync_writes_the_switches_before_it_starts(pipe, monkeypatch):
     (pipeline.pipeline_dir() / "control.json").unlink()
     pipe._pipeline_sync_once()
     assert seen == [{"enabled": True, "rate": False, "fix": True, "fastTrack": True,
-                     "merge": False, "fracture": False}]
+                     "merge": False, "fracture": False, "limits": {}}]
 
 
 def test_a_headless_store_writes_the_switches_only_into_a_named_dir(pipe, tmp_path,
