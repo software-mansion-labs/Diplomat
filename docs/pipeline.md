@@ -356,7 +356,8 @@ team's repo, and each group with no card in any root, whole.
   risk and complexity (green low, orange medium, red high, `?` unrated) and the stage. A mark flags
   a hold, a lock an item Diplomat may not write to, **agent** or **queued** the queue's work on it;
   merged and closed cards are dimmed.
-- **The selected card** - its link; its rating, whether it came from labels or was rated here and not
+- **The selected card** - a click picks it, an arrow key the nearest card that way; its link; its
+  rating, whether it came from labels or was rated here and not
   labelled, the rater's sentence and the diff floor; its hold; who may act on it, who opened it and
   who it is assigned to, and for a PR its head and whether a clean marker names it; its
   **traversal**, newest first: each step the sync took or saw (`rated`, `labelled`, `fast-track`,

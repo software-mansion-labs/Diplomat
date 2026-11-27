@@ -15,11 +15,13 @@ from PySide6.QtGui import (
     QDesktopServices,
     QFont,
     QFontMetricsF,
+    QKeySequence,
     QPainter,
     QPainterPath,
     QPalette,
     QPen,
     QPolygonF,
+    QShortcut,
     QTextLayout,
     QTextOption,
 )
@@ -80,6 +82,8 @@ EVENT_TINT = {"rated": _GREY, "labelled": _GREY, "fast-track": TINT, "clean": TI
 CARD_W, CARD_H, RADIUS = 170, 88, 5
 COL_GAP, ROW_GAP = 48, 16
 MARGIN_X, MARGIN_Y = 28, 12
+#: Kept in view around the card an arrow selects. Twin of ``PipelineView.scrollMargin``.
+SCROLL_MARGIN = 20
 ARROW = 7
 DETAIL_W = 290
 
@@ -151,6 +155,8 @@ def _clear(layout) -> None:
         item = layout.takeAt(0)
         w = item.widget()
         if w is not None:
+            # Hidden first: a show its layout queued this turn would open it as a window of its own.
+            w.hide()
             w.setParent(None)
             w.deleteLater()
         elif item.layout() is not None:
@@ -253,6 +259,28 @@ def in_root(result: dict, root: str, roots: set[str], teams: list[dict]) -> dict
             "items": [i for i in result.get("items") or [] if shown(str(i.get("id")))],
             "graph": {**graph, "nodes": [n for n in nodes if shown(str(n.get("id")))],
                       "edges": [e for e in edges if all(map(shown, _ends(e)))]}}
+
+
+ARROWS = {Qt.Key.Key_Left: (-1, 0), Qt.Key.Key_Right: (1, 0), Qt.Key.Key_Up: (0, -1),
+          Qt.Key.Key_Down: (0, 1)}
+
+
+def step(cards: dict[str, QRectF], selected: str | None, dx: int, dy: int) -> str | None:
+    """The card an arrow ``dx``/``dy`` moves the selection to: of the cards that way, the
+    one in the nearest row, then column. None that way keeps ``selected``; none selected
+    among the cards picks the first. Twin of ``PipelineLayout.step``."""
+    at = cards.get(selected or "")
+    origin = at or QRectF()
+
+    def key(item_id: str) -> tuple[float, float, float, float]:
+        r = cards[item_id]
+        return abs(r.top() - origin.top()), abs(r.left() - origin.left()), r.top(), r.left()
+
+    if at is None:
+        return min(cards, key=key, default=None)
+    ahead = [i for i, r in cards.items()
+             if ((r.top() - at.top()) * dy if dy else (r.left() - at.left()) * dx) > 0]
+    return min(ahead, key=key, default=selected)
 
 
 def lane_counts(items: list[dict]) -> dict[str, int]:
@@ -803,7 +831,11 @@ class PipelineView(QWidget):
         body = QHBoxLayout()
         body.setSpacing(12)
         self.canvas = GraphCanvas()
+        self.canvas.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.canvas.clicked.connect(self.select)
+        for key, (dx, dy) in ARROWS.items():
+            QShortcut(QKeySequence(key), self, activated=lambda dx=dx, dy=dy: self._step(dx, dy),
+                      context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.graph_scroll = QScrollArea()
         self.graph_scroll.setWidgetResizable(True)
         self.graph_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -885,6 +917,7 @@ class PipelineView(QWidget):
         self.selected = None
         self._fix_answers.clear()
         self.rebuild()
+        self.canvas.setFocus()
 
     def set_lane(self, lane: str) -> None:
         self.lane = lane
@@ -894,6 +927,17 @@ class PipelineView(QWidget):
         self.selected = item_id or None
         self.rebuild()
         self.detail_scroll.verticalScrollBar().setValue(0)
+
+    def _step(self, dx: int, dy: int) -> None:
+        item_id = step(self.canvas.cards, self.selected, dx, dy)
+        if item_id is None:
+            return
+        if item_id != self.selected:
+            self.select(item_id)
+        rect = self.canvas.cards[item_id]
+        self.graph_scroll.ensureVisible(round(rect.center().x()), round(rect.center().y()),
+                                        round(rect.width() / 2) + SCROLL_MARGIN,
+                                        round(rect.height() / 2) + SCROLL_MARGIN)
 
     def _start_fix(self, item: dict) -> None:
         item_id = str(item.get("id") or "")

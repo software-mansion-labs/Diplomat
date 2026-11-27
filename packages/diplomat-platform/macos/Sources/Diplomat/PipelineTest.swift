@@ -874,6 +874,24 @@ enum PipelineTest {
               zip(out100, out100.dropFirst()).allSatisfy { $1 - $0 >= 10 }
                   && port(stack, gh(11), gh(12), end: true) + 10 <= port(stack, eng10, gh(12), end: true))
 
+        print("\npipeline: arrow keys")
+        let grid = graph([(gh(1), 0, 0), (gh(2), 1, 0), (gh(3), 2, 0), (gh(4), 0, 1), (gh(5), 1, 1),
+                          (gh(6), 1, 2), (gh(7), 0, 3), (gh(8), 0, 4), (gh(9), 1, 4)],
+                         [(gh(1), gh(2), .fixes), (gh(2), gh(3), .stacked), (gh(1), gh(3), .fixes),
+                          (gh(4), gh(5), .child), (gh(4), gh(6), .child), (gh(8), gh(9), .fixes)])
+        var at: String?
+        let walked = [(1, 0), (1, 0), (1, 0), (1, 0), (0, 1), (0, 1), (-1, 0), (0, -1), (0, 1), (0, 1),
+                      (0, 1), (0, 1), (1, 0), (0, 1), (0, -1), (-1, 0)].map { dx, dy in
+            at = grid.step(from: at, dx: dx, dy: dy)
+            return name(at ?? "")
+        }
+        let walk = ["1", "2", "3", "3", "5", "6", "4", "1", "4", "6", "7", "8", "9", "9", "7", "7"]
+        check("each arrow to the nearest row that way, then the nearest column; past an edge, nowhere",
+              walked == walk)
+        if walked != walk { print("  walked \(walked)") }
+        check("a selection off the graph starts at its first card; an empty graph has none",
+              grid.step(from: gh(99), dx: 0, dy: -1) == gh(1) && PipelineLayout().step(from: gh(1), dx: 1, dy: 0) == nil)
+
         print("\npipeline: identity")
         check("a Linear link by its identifier, a GitHub one by its item key, anything else as it is",
               Store.pipelineIdentity(linear) == "linear:ENG-90010"
