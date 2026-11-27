@@ -1297,13 +1297,16 @@ def test_the_case_for_the_bound_never_puts_half_the_tasks_above_the_mean():
              "packages/diplomat-runtime/diplomat_runtime/autofix.py",
              "packages/diplomat-platform/linux/tests/test_autobudget.py"]
 
-    def prose(rel: str) -> str:
-        lines = (root / rel).read_text(encoding="utf-8").splitlines()
+    def prose(text: str) -> str:
+        lines = text.splitlines()
         return " ".join(re.sub(r"^\s*(/{2,}|#:?)?\s*", "", ln) for ln in lines).lower()
 
     claim = re.compile(
         r"(?<!fewer than )(?<!less than )\bhalf\b[^.]*\bcost more than(?! the median)")
-    found = {rel: m.group(0) for rel in homes if (m := claim.search(prose(rel)))}
+    assert claim.search(prose("/// Half of all tasks cost more\n/// than the mean.")), \
+        "the pattern no longer sees the claim it guards against"
+    found = {rel: m.group(0) for rel in homes
+             if (m := claim.search(prose((root / rel).read_text(encoding="utf-8"))))}
     assert found == {}
 
 
