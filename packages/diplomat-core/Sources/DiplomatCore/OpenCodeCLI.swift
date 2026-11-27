@@ -62,7 +62,7 @@ public enum OpenCodeCLI {
         var environment = ProcessInfo.processInfo.environment
         if let state = current(now: now).stateHome { environment["XDG_STATE_HOME"] = state }
         return OpenCodeAPI.serviceFile(environment: environment,
-                                       home: FileManager.default.homeDirectoryForCurrentUser)
+                                       home: PrivateFiles.home)
     }
 
     private static func current(now: Date) -> Resolution {
