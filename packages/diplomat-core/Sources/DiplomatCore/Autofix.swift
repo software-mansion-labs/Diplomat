@@ -377,7 +377,7 @@ public enum AgentDispatchGate {
     /// uncertainty in where their average sits, and so stops narrowing as the ledger
     /// fills. (The interval the Telemetry screen draws is the other one, `z·sd/√n`,
     /// and converges on the mean — a gate built from it would end up approving the
-    /// average task, which by construction half of them cost more than.)
+    /// average task and waving the expensive tail through.)
     ///
     /// nil when the ledger cannot answer: fewer finished-and-priced tasks than the
     /// caller's minimum, or a non-finite figure from an unusable one. The caller

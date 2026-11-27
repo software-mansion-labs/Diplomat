@@ -1298,9 +1298,9 @@ def test_the_case_for_the_bound_never_puts_half_the_tasks_above_the_mean():
 
     def prose(rel: str) -> str:
         lines = (root / rel).read_text(encoding="utf-8").splitlines()
-        return " ".join(re.sub(r"^\s*(//|#)?\s*", "", ln) for ln in lines).lower()
+        return " ".join(re.sub(r"^\s*(/{2,}|#:?)?\s*", "", ln) for ln in lines).lower()
 
-    claim = re.compile(r"half [^.]*more than the mean")
+    claim = re.compile(r"(?<!than )\bhalf\b[^.]*\bcost more than")
     assert [rel for rel in homes if claim.search(prose(rel))] == []
 
 
