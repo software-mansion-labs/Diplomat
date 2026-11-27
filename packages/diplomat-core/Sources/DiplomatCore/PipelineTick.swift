@@ -1178,7 +1178,7 @@ final class PipelineSync {
 
     /// Writes the rating kept for `entries[i]` while its labels could not be written, never
     /// lower than the labels on it now, with no new rating asked for. A PR's is dropped once
-    /// its diff at the head this sync read allows less.
+    /// it was pushed to, or its diff at the head this sync read allows less.
     func rewrite(_ i: Int) {
         let id = entries[i].id
         guard let kept = cache[id]?.rating, may(.rate) else { return }
@@ -1194,6 +1194,10 @@ final class PipelineSync {
             guard rating.atLeast(floor) == rating else {
                 cache[id] = nil
                 notice("\(entries[i].item.label): the rating kept for it is below what its diff allows now, so it was dropped")
+                return persist()
+            }
+            guard cache[id]?.head == head else {
+                cache[id] = nil
                 return persist()
             }
         }
@@ -1327,7 +1331,8 @@ final class PipelineSync {
         }
         log(e.id, again ? .rerated : .rated, detail, head: head, rating: rating)
         cache[e.id] = PipelineCachedRating(rating: rating, why: why, updatedAt: e.item.updatedAt,
-                                           unwritten: unwritten ? true : nil, first: settings.fastTrack ? false : nil)
+                                           unwritten: unwritten ? true : nil, first: settings.fastTrack ? false : nil,
+                                           head: head)
         entries[i].item.why = why
         entries[i].item.rating = rating
         entries[i].item.ratedBy = "local"

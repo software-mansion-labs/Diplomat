@@ -216,6 +216,8 @@ struct PipelineCachedRating: Codable, Equatable {
     /// written; then true for a PR's first rating, its timeline showing no rating or fast-track
     /// label, whatever labels that write leaves on it.
     var first: Bool?
+    /// The head a PR was rated at.
+    var head: String?
 
     static func url(in dir: URL) -> URL { dir.appendingPathComponent("ratings.json") }
 

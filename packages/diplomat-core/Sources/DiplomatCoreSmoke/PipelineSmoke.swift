@@ -5818,7 +5818,8 @@ private func pipelineRatingPass1(base: URL, root: PipelineSettings.Root, team: P
           "cleared taken off, gh failing: \(lost.writes) \(stageOf(cl.result, prURL(15)))")
 }
 
-/// A first rating's fast track as decided when its answer is applied.
+/// A first rating's fast track as decided when its answer is applied, and a rating kept for
+/// a head the PR has left.
 private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Date) throws {
     section("pipeline rating pass 2")
     func dir(_ name: String) -> URL { base.appendingPathComponent("rating2-" + name) }
@@ -5871,4 +5872,18 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
     let pl = sync(person, rateTrack, dir("on-labelled"), t0)
     check(pl.writes == ["+complexity:low #11"] && pl.result.effects.isEmpty && stageOf(pl.result, prURL(11)) == "human/human",
           "labelled by a person as it was applied: \(pl.writes) \(stageOf(pl.result, prURL(11)))")
+
+    // Pushed to as its rating is applied, inside its floor: no label at the new head before a
+    // rating there, which decides the fast track.
+    for (what, first) in [("on", rateTrack), ("off", rateOnly)] {
+        let t = fix()
+        applying(t) { $0.prs[0].head = sha("a2") }
+        let p1 = sync(t, first, dir("pushed-" + what), t0)
+        let p2 = sync(t, rateTrack, dir("pushed-" + what), later(5))
+        let p3 = sync(t, rateTrack, dir("pushed-" + what), later(10))
+        check(p1.claude == ["opus Fix the docs link"] && (p1.writes + p2.writes).isEmpty && p2.result.effects.isEmpty
+              && p3.claude == ["opus Fix the docs link"] && p3.writes == tracked && p3.result.effects == [reviewFX(11, sha("a2"))],
+              "pushed to as it was applied, Fast track \(what): \(p1.writes) then \(p2.writes) \(p2.claude) "
+                + "then \(p3.claude) \(p3.writes)")
+    }
 }
