@@ -112,7 +112,7 @@ public enum PipelineTick {
 final class PipelineSync {
     /// What a switch allows: `forced` is the operator's own request, which needs only
     /// the pipeline enabled; `undo` takes back Diplomat's own claim, which no switch stops.
-    enum Step { case rate, fix, fastTrack, merge, fracture, forced, undo }
+    enum Step { case rate, mirror, fix, fastTrack, merge, fracture, forced, undo }
 
     let settings: PipelineSettings
     /// `settings.roots`, each with the name its `Repo` read answered.
@@ -231,6 +231,7 @@ final class PipelineSync {
         takeOver()
         if settings.fastTrack { dropStaleClears() }
         rate()
+        mirror()
         // With Fast track off too: a `cleared` not recorded could not be told from one a person put on.
         for i in entries.indices { track(i) }
         fracture()
@@ -294,10 +295,12 @@ final class PipelineSync {
             notice(Self.banNotice)
             return false
         }
-        let c = PipelineControl.read(in: dir) ?? PipelineControl(settings: settings)
+        let c = control()
         let (set, now, name): (Bool, Bool, String)
         switch step {
         case .rate: (set, now, name) = (settings.rate, c.rate, "Rate")
+        case .mirror: (set, now, name) = (settings.mirrorGitHub || settings.mirrorLinear,
+                                          c.mirrorGitHub || c.mirrorLinear, "Mirror")
         case .fix: (set, now, name) = (settings.fix, c.fix, "Fix")
         case .fastTrack: (set, now, name) = (settings.fastTrack, c.fastTrack, "Fast track")
         case .merge: (set, now, name) = (settings.merge, c.merge, "Merge")
@@ -314,6 +317,20 @@ final class PipelineSync {
             return false
         }
         return true
+    }
+
+    func control() -> PipelineControl { PipelineControl.read(in: dir) ?? PipelineControl(settings: settings) }
+
+    /// Whether `e`'s rating goes on it as labels: Diplomat may write to it, and its tracker's
+    /// mirror is on and the scope takes it in, in the settings and in `c`.
+    func mirrors(_ e: PipelineEntry, _ c: PipelineControl) -> Bool {
+        let on = e.item.source == .github ? settings.mirrorGitHub && c.mirrorGitHub : settings.mirrorLinear && c.mirrorLinear
+        guard e.item.writable, on else { return false }
+        switch min(settings.mirrorScope, c.mirrorScope) {
+        case .prs: return e.item.kind == .pr
+        case .mine: return e.item.kind == .pr || e.mine
+        case .all: return true
+        }
     }
 
     /// The prompt-injection ban list the front-ends read, lowercased. Empty when there is
@@ -595,17 +612,11 @@ final class PipelineSync {
     }
 
     func annotate(_ e: inout PipelineEntry) {
-        if let labelled = labelRating(e.labels) {
-            let r = raised(labelled, e.id)
+        if let r = rating(e) {
+            let kept = cache[e.id]
             e.item.rating = r
-            e.item.ratedBy = r == labelled ? "label" : "local"
-            if let c = cache[e.id], c.rating == r { e.item.why = c.why }
-        } else if let c = cache[e.id], c.unwritten == true
-                    // ratings.json keeps whole seconds; Linear's `updatedAt` has milliseconds.
-                    || !e.item.writable && c.updatedAt.map(CommsLog.isoString) == e.item.updatedAt.map(CommsLog.isoString) {
-            e.item.rating = c.rating
-            e.item.ratedBy = "local"
-            e.item.why = c.why
+            e.item.ratedBy = kept?.rating == r ? "local" : "label"
+            if kept?.rating == r { e.item.why = kept?.why }
         }
         if e.item.kind == .pr, open(e) {
             let floor = PipelineGate.floorWithReasons(files: e.files, changedFiles: e.changedFiles)
@@ -633,10 +644,17 @@ final class PipelineSync {
         return PipelineRating(risk: risk, complexity: complexity)
     }
 
-    /// `r` raised to the rating kept for `id` while its labels could not be written.
-    func raised(_ r: PipelineRating, _ id: String) -> PipelineRating {
-        guard let c = cache[id], c.unwritten == true else { return r }
-        return r.atLeast(c.rating)
+    /// The rating kept for `e`, raised by its labels; else theirs, when they rate both.
+    func rating(_ e: PipelineEntry) -> PipelineRating? {
+        cache[e.id].map { atLeastLabels($0.rating, e.labels) } ?? labelRating(e.labels)
+    }
+
+    /// Each dimension wears `r`'s label and no other.
+    func wears(_ labels: [String], _ r: PipelineRating) -> Bool {
+        [(model.labels.risk, r.risk), (model.labels.complexity, r.complexity)].allSatisfy { names, level in
+            let all = Set(PipelineLevel.allCases.map { names[$0].lowercased() })
+            return labels.map { $0.lowercased() }.filter(all.contains) == [names[level].lowercased()]
+        }
     }
 
     func atLeastLabels(_ r: PipelineRating, _ labels: [String]) -> PipelineRating {
@@ -757,6 +775,7 @@ final class PipelineSync {
         entries[i].triageState = fresh.triageState
         entries[i].parent = fresh.parent
         entries[i].children = fresh.children
+        entries[i].mine = fresh.mine
         entries[i].isPart = fresh.isPart
         entries[i].lineage = fresh.lineage
         // A PR's `Item` read lists no closing references.
@@ -873,7 +892,7 @@ final class PipelineSync {
     /// `lifted`: whatever its rating or triage, as when taken over.
     func isCandidate(_ x: PipelineEntry, lifted: Bool = false) -> Bool {
         x.item.kind == .issue && x.item.writable
-            && (lifted || takenOver(x) || labelRating(x.labels).map { raised($0, x.id).isFastTrack } == true && triaged(x) == nil)
+            && (lifted || takenOver(x) || rating(x)?.isFastTrack == true && triaged(x) == nil)
             && stops(x).isEmpty && onGitHub(x) == nil && twinHold(x) == nil && twinsUnread(x) == nil
             && !has(x, model.labels.fractured) && x.children.isEmpty && banHold(x) == nil && x.root != nil
     }
@@ -1034,7 +1053,7 @@ final class PipelineSync {
     func awaitingRerate(_ e: PipelineEntry) -> Bool {
         guard !takenOver(e), own(e), open(e), e.item.writable, has(e, model.labels.fastTrack),
               let head = e.item.headSha, !head.isEmpty, e.item.cleanAt == head, rerates[e.id]?[head] == nil,
-              e.item.ratedBy == "label", let r = e.item.rating, r.atLeast(e.item.floor ?? r).isFastTrack,
+              let r = e.item.rating, r.atLeast(e.item.floor ?? r).isFastTrack,
               offTrack(e) == nil else { return false }
         return closesHold(e) == nil
     }
@@ -1092,14 +1111,14 @@ final class PipelineSync {
             }
         }
         let idx = settings.rate ? entries.indices.filter { eligible(entries[$0]) && !backingOff(entries[$0].id) } : []
-        let kept = idx.filter {
-            cache[entries[$0].id]?.unwritten == true && entries[$0].item.writable && open(entries[$0])
+        let pending = idx.filter {
+            cache[entries[$0].id]?.pending == true && entries[$0].item.writable && open(entries[$0])
         }
         let bands = [0, 1, 2, 3].map { band in
             idx.filter { self.band(entries[$0]) == band && !state.declined.contains(entries[$0].id) }.sorted(by: newer)
         }
         for i in forced { ask(i, forced: true) }
-        for i in kept where !forced.contains(i) { rewrite(i) }
+        for i in pending where !forced.contains(i) { finish(i) }
         // With Rate off nothing is wanted: each ask of an item read whole is dropped.
         let wanted = Set(bands.joined())
         var waiting = 0
@@ -1176,10 +1195,10 @@ final class PipelineSync {
         }
     }
 
-    /// Writes the rating kept for `entries[i]` while its labels could not be written, never
-    /// lower than the labels on it now, with no new rating asked for. A PR's is dropped once
-    /// its diff at the head this sync read allows less.
-    func rewrite(_ i: Int) {
+    /// Finishes the rating kept pending for `entries[i]`, never lower than the labels on it
+    /// now, with no new rating asked for. A PR's is dropped once its diff at the head this sync
+    /// read allows less.
+    func finish(_ i: Int) {
         let id = entries[i].id
         guard let kept = cache[id]?.rating, may(.rate) else { return }
         let head = entries[i].item.headSha
@@ -1197,16 +1216,47 @@ final class PipelineSync {
                 return persist()
             }
         }
-        if unworn(entries[i].labeled) { cache[id]?.first = true }
-        writeRating(i, rating, .rate)
-        guard labelRating(entries[i].labels) == rating else { return failed(id) }
+        if !unworn(entries[i].labeled) { cache[id]?.first = nil }
         cache[id]?.rating = rating
-        cache[id]?.unwritten = nil
         state.retry[id] = nil
         entries[i].item.rating = rating
-        entries[i].item.ratedBy = "label"
+        entries[i].item.ratedBy = "local"
+        apply(i, rating)
+    }
+
+    /// What a finished rating leads to: its labels where mirrored, then the fast-track label
+    /// at a PR's first rating.
+    func apply(_ i: Int, _ rating: PipelineRating) {
+        cache[entries[i].id]?.pending = nil
         persist()
+        if mirrors(entries[i], control()), !writeRating(i, rating, .mirror) { failed(entries[i].id) }
         trackFirst(i, rating)
+    }
+
+    /// Writes the kept ratings as labels where they are mirrored and the labels do not say so
+    /// yet, the PRs first, then the newest: `labels.mirrorPerSync` a sync.
+    func mirror() {
+        guard may(.mirror) else { return }
+        let c = control()
+        let owed = entries.indices.filter {
+            let e = entries[$0]
+            guard let kept = cache[e.id], kept.pending != true, mirrors(e, c), banHold(e) == nil,
+                  stops(e).isEmpty, !backingOff(e.id), e.root.map({ partial[$0.slug] == nil }) ?? true
+            else { return false }
+            return !wears(e.labels, atLeastLabels(kept.rating, e.labels))
+        }.sorted { a, b in
+            entries[a].item.kind == entries[b].item.kind ? newer(a, b) : entries[a].item.kind == .pr
+        }
+        for i in owed.prefix(model.labels.mirrorPerSync) {
+            let id = entries[i].id
+            guard recheck(i) else {
+                failed(id)
+                continue
+            }
+            guard let kept = cache[id]?.rating, mirrors(entries[i], control()), stops(entries[i]).isEmpty else { continue }
+            if writeRating(i, atLeastLabels(kept, entries[i].labels), .mirror) { state.retry[id] = nil } else { failed(id) }
+            persist()
+        }
     }
 
     /// `e`'s three-dot diff against its base, as `gh pr diff` reads it but pinned to `head`;
@@ -1274,7 +1324,9 @@ final class PipelineSync {
             (said, why) = answer
         }
         state.retry[e.id] = nil
-        var rating = raised(atLeastLabels(said, e.labels), e.id)
+        let fresh = cache[e.id] == nil
+        // Never below its labels, nor the rating kept for it before.
+        var rating = atLeastLabels(said.atLeast(cache[e.id]?.rating ?? said), e.labels)
         var detail = describe(rating) + (why.isEmpty ? "" : ": " + why)
         var floor = e.item.floor ?? PipelineRating(risk: .low, complexity: .low)
         var reasons = floorWhy[e.id] ?? []
@@ -1288,46 +1340,39 @@ final class PipelineSync {
                 + (why.isEmpty ? "" : ": " + why)
         }
         let allowed = e.item.writable && may(step) && banHold(e) == nil
-        // Saved before the labels it leads to: a sync stopped there does not ask again.
-        record(i, rating, why, detail, head: head, again: again, unwritten: allowed)
+        let first = allowed && fresh && e.item.kind == .pr
+        // Saved before what it leads to: a sync stopped there does not ask again.
+        record(i, rating, why, detail, head: head, again: again, pending: allowed, first: first)
         guard allowed else { return }
         guard recheck(i), entries[i].item.headSha == e.item.headSha else {
             guard entries[i].item.writable else {
-                cache[e.id]?.unwritten = nil
-                cache[e.id]?.updatedAt = entries[i].item.updatedAt
+                cache[e.id]?.pending = nil
                 return persist()
             }
             return failed(e.id)
         }
-        // Kept unwritten, for `rewrite` once the stop label is off.
+        // Left pending, for `finish` once the stop label is off.
         guard stops(entries[i]).isEmpty else { return }
         // A label put on meanwhile.
         if atLeastLabels(rating, entries[i].labels) != rating {
             rating = atLeastLabels(rating, entries[i].labels)
-            record(i, rating, why, describe(rating) + ", as labelled meanwhile", head: head, again: again, unwritten: true)
+            record(i, rating, why, describe(rating) + ", as labelled meanwhile", head: head, again: again, pending: true,
+                   first: first)
         }
-        if unworn(entries[i].labeled) { cache[e.id]?.first = true }
-        writeRating(i, rating, step)
-        guard labelRating(entries[i].labels) == rating else {
-            notice("\(e.item.label): its rating labels could not be written, so the rating is kept here")
-            return failed(e.id)
-        }
-        cache[e.id]?.unwritten = nil
-        entries[i].item.ratedBy = "label"
-        persist()
-        trackFirst(i, rating)
+        if !unworn(entries[i].labeled) { cache[e.id]?.first = nil }
+        apply(i, rating)
     }
 
     func record(_ i: Int, _ rating: PipelineRating, _ why: String, _ detail: String, head: String?, again: Bool,
-                unwritten: Bool) {
+                pending: Bool, first: Bool) {
         let e = entries[i]
         if again, let head {
             state.rerated[e.id, default: [:]][head] = rating
             rerates[e.id, default: [:]][head] = rating
         }
         log(e.id, again ? .rerated : .rated, detail, head: head, rating: rating)
-        cache[e.id] = PipelineCachedRating(rating: rating, why: why, updatedAt: e.item.updatedAt,
-                                           unwritten: unwritten ? true : nil)
+        cache[e.id] = PipelineCachedRating(rating: rating, why: why, pending: pending ? true : nil,
+                                           first: first ? true : nil)
         entries[i].item.why = why
         entries[i].item.rating = rating
         entries[i].item.ratedBy = "local"
@@ -1342,7 +1387,7 @@ final class PipelineSync {
     }
 
     /// Puts `fastTrack` on a PR rated low/low that closes only candidates, at its first rating
-    /// only: one that wore a rating or fast-track label before (no `first` kept) is a person's.
+    /// only: one rated before, or that wore a rating or fast-track label, is a person's.
     /// One it could not be put on is recorded.
     func trackFirst(_ i: Int, _ rating: PipelineRating) {
         let e = entries[i]
@@ -1838,13 +1883,12 @@ final class PipelineSync {
             let atHead = !head.isEmpty && e.item.cleanAt == head
             var hold: String?
             let stage: PipelineStage
-            let labelled = e.item.ratedBy == "label" ? e.item.rating : nil
             let floor = e.item.floor ?? PipelineRating(risk: .low, complexity: .low)
             if !own(e) || !has(e, model.labels.fastTrack) {
                 stage = e.item.rating == nil ? .unrated : .human
                 if own(e), let r = e.item.rating, r.atLeast(floor).isFastTrack {
                     hold = e.unwritable.map { "off the fast track: \($0)" }
-                        ?? (e.item.ratedBy != "label" ? "off the fast track: its rating labels could not be written"
+                        ?? (cache[e.id]?.pending == true ? "off the fast track until a sync reads it again"
                             : !state.untracked.contains(e.id) ? nil
                             : "off the fast track: \(model.labels.fastTrack) could not be put on at its first rating")
                 }
@@ -1856,10 +1900,9 @@ final class PipelineSync {
             } else if let why = offTrack(e) {
                 stage = .human
                 hold = "off the fast track until taken over: \(why)"
-            } else if !takenOver(e), labelled == nil {
-                stage = e.item.rating == nil ? .unrated : .human
-                if e.item.rating != nil { hold = "off the fast track: its rating labels could not be written" }
-            } else if !takenOver(e), let r = labelled, !r.isFastTrack {
+            } else if !takenOver(e), e.item.rating == nil {
+                stage = .unrated
+            } else if !takenOver(e), let r = e.item.rating, !r.isFastTrack {
                 stage = .human
                 hold = "off the fast track: it is " + PipelineGate.Hold.rated(r).message
             } else if !takenOver(e), !floor.isFastTrack {
@@ -1974,7 +2017,7 @@ final class PipelineSync {
         guard let root = e.root else { return "Linear team \(e.item.repo) has no root to fix it in" }
         if let why = incomplete[root.slug] { return "\(why), so a PR fixing it might not be seen" }
         if let why = partial[root.slug] ?? twinsUnread(e) { return why }
-        if e.item.ratedBy != "label" && !takenOver(e) { return "its rating labels could not be written" }
+        if cache[e.id]?.pending == true && !takenOver(e) { return "its rating waits for a sync that reads it again" }
         if state.rateAsks[e.id] != nil { return Self.ratingAsked }
         if e.item.source == .linear, e.item.repo.uppercased() == "GH" {
             return "GitHub reads Linear team GH's `Fixes \(e.item.label)` as closing #\(e.item.label.dropFirst(3))"
@@ -2001,7 +2044,7 @@ final class PipelineSync {
             state: e.item.state, author: e.item.author ?? "", isCrossRepository: e.isCrossRepository,
             baseRef: e.baseRef, defaultBranch: e.defaultBranch, participants: e.participants,
             participantsUnseen: e.participantsUnseen, reviewDecision: e.reviewDecision,
-            unresolvedThreads: e.unresolvedThreads, rating: e.item.ratedBy == "label" ? e.item.rating : nil,
+            unresolvedThreads: e.unresolvedThreads, rating: e.item.rating,
             floor: e.item.floor ?? PipelineRating(risk: .high, complexity: .high),
             mergeable: e.mergeable, headSha: e.item.headSha ?? "", ciCommit: e.ciCommit,
             ciState: e.ciState, operatorUntagged: e.operatorUntagged, reviewRequests: e.reviewRequests,

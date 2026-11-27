@@ -337,7 +337,7 @@ public enum PipelineGate {
             case .offTrack: return "lacks a fast-track label"
             case .notAFix: return "closes no issue, or one that is not a candidate Diplomat may act on"
             case .closesUnwritable(let what): return "would close \(what), which Diplomat did not read or may not write to"
-            case .rated(let r): return "rated \(pair(r)) on the tracker"
+            case .rated(let r): return "rated \(pair(r))"
             case .floor(let r): return "its diff allows no less than \(pair(r))"
             case .conflicting: return "conflicts with its base"
             case .mergeabilityUnknown: return "mergeability not computed yet"
