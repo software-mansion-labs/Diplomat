@@ -1049,6 +1049,8 @@ enum Render {
         store.communityIssuesEnabled = true
         store.pipelineEnabled = true   // the pipeline's switches and Linear rows, merge's warning
         store.pipelineLinearTeamsRaw = "ENG=software-mansion/argent"
+        store.pipelineLimits = store.roots.first { !$0.isGitLab }
+            .map { [$0.key: PipelineRating(risk: .medium, complexity: .medium)] } ?? [:]
         store.settingsExplain = explain
     }
 
