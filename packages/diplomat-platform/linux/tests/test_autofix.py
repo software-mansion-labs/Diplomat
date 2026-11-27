@@ -1085,8 +1085,10 @@ def test_banned_author_blocks_both_interfaces(store, monkeypatch):
         "Review · #9 - the PR's author is banned (un-ban to review)", asked, asked]
 
 
-def test_an_unreadable_ban_list_refuses_every_author_on_both_interfaces(store, monkeypatch):
-    """It could be banning anyone. A job with no author is nobody's text, and runs."""
+def test_an_unreadable_ban_list_holds_every_author_on_both_interfaces(store, monkeypatch):
+    """It could be banning anyone, so an author's job waits as a deferral does, a find
+    queued again, and no one is said to be banned. A job with no author is nobody's
+    text, and runs."""
     from diplomat_app import bans, widgets
     from diplomat_runtime import activity
 
@@ -1094,16 +1096,17 @@ def test_an_unreadable_ban_list_refuses_every_author_on_both_interfaces(store, m
     bans.banned_path().parent.mkdir(parents=True)
     bans.banned_path().write_text("{")
     for src in (autofix.SOURCE_PANEL, autofix.SOURCE_AUTO):
-        assert store.dispatch_agent(_job(author="alice"), src) == autofix.VERDICT_BANNED
-    store.dispatch_agent(_job(author="alice", action="review-req"), autofix.SOURCE_AUTO)
+        assert store.dispatch_agent(_job(author="alice"), src) == bans.VERDICT_UNREADABLE
+    find = _job(number=11, author="alice", counter="my_reviews")
+    assert store.dispatch_agent(find, autofix.SOURCE_AUTO) == bans.VERDICT_UNREADABLE
     assert calls == []
-    unread = "the prompt-injection ban list could not be read"
-    asked = f"Review · #9 - {unread} (the ask is dropped, sweep again to re-queue it)"
-    assert [e.detail for e in activity.read() if e.action == "ban-skip"] == [
-        f"Review · #9 - {unread}", asked, asked]
-    assert widgets.dispatch_status_text(autofix.VERDICT_BANNED, "T") == (
+    assert [e.job for e in store._staged_queue] == [find]
+    assert [e for e in activity.read() if e.action == "ban-skip"] == []
+    assert widgets.dispatch_status_text(bans.VERDICT_UNREADABLE, "T") == (
         "The prompt-injection ban list could not be read.")
-    assert store.dispatch_agent(_job(number=10), autofix.SOURCE_AUTO) == "spawned"
+    assert widgets.dispatch_status_text(autofix.VERDICT_BANNED, "T") == (
+        "Author is banned for prompt injection - un-ban to review.")
+    assert store.dispatch_agent(_job(number=10, author=""), autofix.SOURCE_AUTO) == "spawned"
 
 
 def test_allowlist_holds_a_review_monitor_find_whoever_asks(store, monkeypatch):

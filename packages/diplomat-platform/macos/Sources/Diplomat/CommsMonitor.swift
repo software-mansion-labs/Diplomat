@@ -683,9 +683,8 @@ extension Store {
         let owners = commsItems.filter { $0.queueKey == entry.id && Store.commsUnstarted($0) }
         guard !owners.isEmpty else { return }
         if outcome == .banned {
-            let banned = "\(BanList.refusedWho(entry.job.authorLogin ?? "")) \(Store.commsBanRefusal)"
-            let why = Store.commsLeftQueueOutcome
-                + " (\(BanList.readFile().isUnreadable ? BanList.unreadReason : banned))"
+            let who = BanList.refusedWho(entry.job.authorLogin ?? "")
+            let why = Store.commsLeftQueueOutcome + " (\(who) \(Store.commsBanRefusal))"
             recordComms(owners.filter { !Store.commsLeftQueue($0) }.map {
                 CommsEvent(kind: .action, id: $0.message.id, outcome: why)
             })

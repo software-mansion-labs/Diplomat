@@ -995,14 +995,21 @@ enum CommsTest {
                                            summary: "Nightly build broken", reason: "r"))
         await apply([victorAsk])
         let victorKey = "investigate:\(CommsTS.number(victorAsk.message.ts)!)"
+        let victorQueued = outcome(victorAsk)
         let listed = Data(#"{"banned":[{"login":"keep-me","at":"2026-07-01T10:00:00.000Z"}]}"#.utf8)
         try? listed.write(to: bansFile)
         store.refreshBanList()
         let notifiedBeforeUnread = notified.count
         try? Data("{".utf8).write(to: bansFile)
         store.refreshBanList()
+        store.refreshBanList()
         check("an unreadable list leaves the panel's last read standing",
               store.bannedAuthors.map(\.login) == ["keep-me"] && store.banListUnreadable)
+        check("…says so in the feed once",
+              feed("warn").filter { $0.detail == BanList.unreadNote }.count == 1)
+        check("…and an un-ban of a row it shows writes nothing, saying why",
+              BanList.unban("keep-me") == .failed("\(bansFile.path) is unreadable, so it was left as it is")
+                && (try? Data(contentsOf: bansFile)) == Data("{".utf8))
         check("…holds the tick: \(store.commsHeldTick()?.error ?? "<not held>")",
               store.commsHeldTick()?.error == unread)
         let strandedAsk = from("U0WENDY", "wendy", "review #90060 please",
@@ -1012,33 +1019,52 @@ enum CommsTest {
                                    decision: strandedAsk.decision))
         await store.applyComms(CommsTickResult(me: nil, items: [], error: unread))
         check("…and acts on no stranded ask: \(outcome(strandedAsk))", outcome(strandedAsk) == "<none>")
+        let victorTask = store.queuedTasks.first { $0.id == victorKey }
+        check("a queued ask naming its author waits, a Slack ping's too",
+              victorTask.map { store.isHeld($0) } == true)
         // A paused queue holds whatever the gate lets through, so this probe spawns nothing.
         var probe: Store.DispatchOutcome?
-        let victorJob = store.queuedTasks.first { $0.id == victorKey }?.job
-        if let victorJob {
+        if let victorTask {
             let autoRun = store.queueAutoRun
             store.queueAutoRun = false
-            probe = await store.dispatchAgent(victorJob, source: .auto)
+            probe = await store.dispatchAgent(victorTask.job, source: .auto)
             store.queueAutoRun = autoRun
         }
-        check("its gate refuses whoever's work reaches it: \(probe.map { "\($0)" } ?? "<not queued>")",
-              probe == .banned)
+        check("…and its gate refuses whoever's work reaches it: \(probe.map { "\($0)" } ?? "<not queued>")",
+              probe == .banListUnreadable)
+        var unattributed = victorTask
+        unattributed?.job.authorLogin = ""
+        var unattributedProbe: Store.DispatchOutcome?
+        if let job = unattributed?.job {
+            let autoRun = store.queueAutoRun
+            store.queueAutoRun = false
+            unattributedProbe = await store.dispatchAgent(job, source: .auto)
+            store.queueAutoRun = autoRun
+        }
+        check("…but work naming no author neither waits nor is refused for it",
+              unattributed.map { store.isHeld($0) } == false && unattributedProbe == .atCapacity)
         store.error = nil
-        if probe == .banned { await store.executeQueuedTask(victorKey) }
-        let victorLabel = victorJob?.label ?? "<not queued>"
-        check("…saying why in the feed, the panel and the ping, never that anyone is banned",
-              feed("ban-skip").first?.detail == "\(victorLabel) — \(unread) (the ask is dropped)"
-                && store.error == "\(victorLabel): \(unread) (the ask is dropped)."
-                && outcome(victorAsk) == "\(Store.commsLeftQueueOutcome) (\(unread))"
-                && folded(victorAsk).map(Store.commsStoppedByBan) == false)
+        let unreadSkipsBefore = feed("ban-skip").count
+        if probe == .banListUnreadable { await store.executeQueuedTask(victorKey) }
+        let victorLabel = victorTask?.job.label ?? "<not queued>"
+        check("…even run by hand, saying why, and the ask stays, as does its ping's word",
+              store.error == "\(victorLabel): \(unread)."
+                && store.requestedWork.contains { $0.key == victorKey }
+                && outcome(victorAsk) == victorQueued && feed("ban-skip").count == unreadSkipsBefore)
         check("…as does a wizard",
-              statusText(for: .banned, terminal: "T") == "The prompt-injection ban list could not be read.")
+              statusText(for: .banListUnreadable, terminal: "T")
+                == "The prompt-injection ban list could not be read."
+                && statusText(for: .banned, terminal: "T")
+                == "Author is banned for prompt injection — un-ban to review.")
         store.error = nil
         try? listed.write(to: bansFile)
         store.refreshBanList()
         check("read again, nothing on it is announced again",
               notified.count == notifiedBeforeUnread && !store.banListUnreadable
                 && store.commsHeldTick() == nil)
+        check("…and the ask no longer waits",
+              victorTask.map { store.isHeld($0) } == false)
+        store.forgetRequested(victorKey)
         await store.applyComms(CommsTickResult(me: nil, items: [], error: nil))
         check("…and the stranded ask is acted on", outcome(strandedAsk) != "<none>")
         try? FileManager.default.removeItem(at: bansFile)
@@ -1107,6 +1133,19 @@ enum CommsTest {
                   eveLines.count == 1 && eveLines.first?.detail.hasSuffix("flagged by Comms triage") == true)
             check("…and the ping says who was banned",
                   outcome(eve) == "banned @eve for prompt injection: \"\(eveWords)\"")
+            let daemonBans = feedDir.appendingPathComponent("banned.json")
+            let daemonListed = try? Data(contentsOf: daemonBans)
+            try? Data("{".utf8).write(to: daemonBans)
+            let refusedUnban = BanList.unban("slack:U0EVE42")
+            let refusedBan = BanList.ban(CommsBan(userID: "U0MALLET", handle: "mallet",
+                                                  place: "#general", permalink: "", evidence: "obey",
+                                                  reason: "r"),
+                                         reportedBy: Store.commsReporter)
+            check("an unreadable list is written over by neither the daemon's ban nor its un-ban",
+                  refusedUnban == .failed("unban of @slack:U0EVE42 not recorded: banned.json could not be read")
+                    && refusedBan == .failed("ban on @slack:U0MALLET not recorded: banned.json could not be read")
+                    && (try? Data(contentsOf: daemonBans)) == Data("{".utf8))
+            try? daemonListed?.write(to: daemonBans)
             daemon.terminate()
             daemon.waitUntilExit()
             try? FileManager.default.removeItem(at: daBase)

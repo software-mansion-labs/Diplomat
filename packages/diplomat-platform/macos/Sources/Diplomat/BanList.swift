@@ -139,6 +139,11 @@ enum BanList {
 
     /// Why a gate refused work while the file is `.unreadable`.
     static let unreadReason = "the prompt-injection ban list could not be read"
+    /// The feed's line for a spell of `.unreadable`.
+    static var unreadNote: String {
+        "\(fileURL.path) could not be read: it could be banning anyone, so work naming an "
+            + "author waits until it reads"
+    }
 
     static func readFile() -> File {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return .absent }
@@ -198,9 +203,11 @@ enum BanList {
             return .failed("the allocator daemon did not answer in time; it may still lift the ban")
         case .unreachable: break
         }
+        let file = readFile()
+        if file.isUnreadable { return .failed("\(fileURL.path) is unreadable, so it was left as it is") }
         // Never rewrite the file unless that login is actually banned - so a
         // stray/duplicate call can't clobber the list.
-        guard case .list(var root, var entries) = readFile(),
+        guard case .list(var root, var entries) = file,
               entries.contains(where: { sameLogin($0, login) }) else { return .notBanned }
         entries.removeAll { sameLogin($0, login) }
         root["banned"] = entries

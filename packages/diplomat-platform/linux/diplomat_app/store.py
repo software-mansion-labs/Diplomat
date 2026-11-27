@@ -2067,19 +2067,14 @@ class Store(QObject):
     @staticmethod
     def ban_refusal(job: autofix.AgentJob) -> str:
         """Who a dispatch refused for a ban is about, and what follows (macOS
-        ``banRefusal``). A monitor's find comes back on its own once the ban lifts; an ask
-        is retired (:meth:`_settle_requested`), and only a sweep re-asks for one, never for
-        a Comms investigation. While the list cannot be read it says so, and a monitor's
-        find comes back once it reads."""
+        ``refusedWho`` and ``banRemedy``). A monitor's find comes back on its own once the
+        ban lifts; an ask is retired (:meth:`_settle_requested`), and only a sweep re-asks
+        for one, never for a Comms investigation."""
         if (job.author_login or "").startswith(bans.SLACK_PREFIX):
-            who, remedy = "the sender", "the ask is dropped"
-        else:
-            who = "the PR's author"
-            remedy = ("the ask is dropped, sweep again to re-queue it"
-                      if job.requested else "un-ban to review")
-        if not bans.unreadable():
-            return f"{who} is banned ({remedy})"
-        return f"{bans.UNREADABLE} ({remedy})" if job.requested else bans.UNREADABLE
+            return "the sender is banned (the ask is dropped)"
+        remedy = ("the ask is dropped, sweep again to re-queue it"
+                  if job.requested else "un-ban to review")
+        return f"the PR's author is banned ({remedy})"
 
     def dispatch_agent(self, job: autofix.AgentJob, source: str, attempt: int = 1,
                        bypass_capacity: bool = False,
@@ -2134,8 +2129,9 @@ class Store(QObject):
                 self._dispatching_prs.add(item)
         try:
             # An unreadable list could be banning anyone.
+            unreadable = bans.unreadable()
             banned = bool(job.author_login) and (
-                bans.unreadable() or bans.is_banned(job.author_login, bans.read()))
+                unreadable or bans.is_banned(job.author_login, bans.read()))
             # The allowlist speaks for the review monitor's work and nothing else, so
             # the counter - which is what makes a job that monitor's - is the whole
             # test. A sweep, a wizard press and both reconcilers over my own PRs carry
@@ -2220,6 +2216,9 @@ class Store(QObject):
                 self._log_unaffordable(budget, claude)
                 self._stage_queued(job, attempt)
                 return verdict
+            if verdict == autofix.VERDICT_BANNED and unreadable:
+                self._stage_queued(job, attempt)
+                return bans.VERDICT_UNREADABLE
             if verdict == autofix.VERDICT_BANNED:
                 activity.log(source, "ban-skip", f"{job.label} - {self.ban_refusal(job)}")
                 self.refresh_activity()
@@ -3423,11 +3422,13 @@ class Store(QObject):
                 owned: dict[str, frozenset[str]] | None = None) -> bool:
         """Paused, or a pipeline ask still stale (:attr:`_pipeline_stale`) or held by an
         unreadable ban list, unless a Slack ping took it as its ask: then it is
-        asked-for work, which switching a monitor off never stops (:meth:`is_paused`)."""
+        asked-for work, which switching a monitor off never stops (:meth:`is_paused`).
+        Work naming an author waits while that list cannot be read, whoever asked for it."""
         held = task.job.counter == PIPELINE_COUNTER and (
             self.ban_list_unreadable or task.id in self._pipeline_stale)
-        return ((self.is_paused(task.job.counter) or held)
-                and task.id not in (self._comms_owned if owned is None else owned))
+        return (self.ban_list_unreadable and bool(task.job.author_login)) or (
+            (self.is_paused(task.job.counter) or held)
+            and task.id not in (self._comms_owned if owned is None else owned))
 
     def _begin_starting(self, entry: autofix.QueuedTask) -> None:
         """Move one task out of the queue and into the starting band, where it stays
@@ -3573,6 +3574,8 @@ class Store(QObject):
             self.error = f"{label}: an agent is already on this PR."
         elif verdict == autofix.VERDICT_BANNED:
             self.error = f"{label}: {self.ban_refusal(entry.job)}."
+        elif verdict == bans.VERDICT_UNREADABLE:
+            self.error = f"{label}: {bans.UNREADABLE}."
         elif verdict == autofix.VERDICT_NOT_ALLOWED:
             self.error = (f"{label}: the PR's author is not on the auto-review list "
                           "(add them, or review it from the wizard).")
@@ -5045,14 +5048,14 @@ class Store(QObject):
         (:meth:`_settle_requested`): each ping that owned it says so, and why."""
         who = ("the sender" if (entry.job.author_login or "").startswith(bans.SLACK_PREFIX)
                else "the PR's author")
-        why = bans.UNREADABLE if bans.unreadable() else f"{who} {self.COMMS_BAN_REFUSAL}"
         with self._comms_feed_lock:
             owners = self._comms_owned.get(entry.id)
             if not owners:
                 return
             self._comms_owned = {k: v for k, v in self._comms_owned.items() if k != entry.id}
             for msg_id in sorted(owners):
-                comms.append_event("action", msg_id, outcome=f"{comms.LEFT_QUEUE} ({why})")
+                comms.append_event("action", msg_id, outcome=(
+                    f"{comms.LEFT_QUEUE} ({who} {self.COMMS_BAN_REFUSAL})"))
             self.refresh_comms_feed()
         self.comms_changed.emit()
 
@@ -6581,12 +6584,14 @@ class Store(QObject):
     def refresh_activity(self) -> None:
         """Re-read the shared activity feed (audit.jsonl) and ban list (cheap tail /
         small-file reads) and signal on change. Runs on the panel's 8s poll. An unreadable
-        ban list leaves the last read standing."""
+        ban list leaves the last read standing, and the feed says so once per spell."""
         from diplomat_runtime import activity
         from . import bans
 
-        new_audit = activity.read()
         unreadable = bans.unreadable()
+        if unreadable and not self.ban_list_unreadable:
+            activity.log("auto", "warn", bans.unreadable_note())
+        new_audit = activity.read()
         new_bans = self.banned_authors if unreadable else bans.read()
         if not unreadable:
             self._notice_new_bans(new_bans)

@@ -8,6 +8,7 @@ one, so :func:`bans.report_comms_ban` meets "no daemon" by default.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import time
@@ -150,12 +151,14 @@ def test_a_ban_with_no_daemon_is_written_here_with_the_daemons_line(audit):
     assert again["at"] != first
 
 
-def test_an_unreadable_list_is_never_written_over(audit):
+@pytest.mark.parametrize("text", ['{"banned": [{"login": "bob"}', '{"banned": {"bob": {}}}'])
+def test_an_unreadable_list_is_never_written_over(audit, text):
     bans.banned_path().parent.mkdir(parents=True)
-    bans.banned_path().write_text('{"banned": [{"login": "bob"}')
-    done = bans.report_comms_ban(BAN)
-    assert not done.by_daemon and "is unreadable" in done.error
-    assert bans.banned_path().read_text() == '{"banned": [{"login": "bob"}'
+    bans.banned_path().write_text(text)
+    left = f"{bans.banned_path()} is unreadable, so it was left as it is"
+    assert bans.report_comms_ban(BAN) == bans.Reported(False, left)
+    assert bans.unban("bob") == bans.Reported(False, left)
+    assert bans.banned_path().read_text() == text
     assert audit == []
 
 
@@ -580,7 +583,7 @@ def test_an_investigations_sender_is_its_ban_dimension(comms_store, monkeypatch)
 
 
 @needs_core
-def test_an_ask_dispatched_while_the_list_is_unreadable_is_refused_and_says_so(
+def test_an_ask_queued_while_the_list_is_unreadable_waits_even_run_by_hand(
         comms_store, monkeypatch):
     sent = _spawn_recorder(monkeypatch)
     m = _mallory("the screenshot tool hangs on Android 14")
@@ -591,13 +594,19 @@ def test_an_ask_dispatched_while_the_list_is_unreadable_is_refused_and_says_so(
     monkeypatch.setattr(bans, "read", _REAL_READ)
     bans.banned_path().parent.mkdir(parents=True, exist_ok=True)
     bans.banned_path().write_text("{")
-    assert comms_store._run_queued_task(entry, forced=True) == autofix.VERDICT_BANNED
-    unread = "the prompt-injection ban list could not be read"
-    assert sent == []
-    assert _feed_lines()[-1]["detail"] == f"{entry.job.label} - {unread} (the ask is dropped)"
-    assert _events()[-1]["outcome"] == f"{comms.LEFT_QUEUE} ({unread})"
+    comms_store.refresh_activity()
+    unattributed = dataclasses.replace(entry, job=dataclasses.replace(entry.job, author_login=""))
+    assert (comms_store.is_held(entry), comms_store.is_held(unattributed)) == (True, False)
+    events, lines = _events(), _feed_lines()
+    assert comms_store._run_queued_task(entry, forced=True) == bans.VERDICT_UNREADABLE
     comms_store._execute_queued_task(entry)
-    assert comms_store.error == f"{entry.job.label}: {unread} (the ask is dropped)."
+    assert sent == []
+    assert comms_store.error == f"{entry.job.label}: the prompt-injection ban list could not be read."
+    assert [r.key for r in comms_store.requested_work] == [key]
+    assert (_events(), _feed_lines()) == (events, lines)
+    bans.banned_path().unlink()
+    comms_store.refresh_activity()
+    assert not comms_store.is_held(entry)
 
 
 # MARK: - every new ban is announced
@@ -632,12 +641,23 @@ def test_an_unreadable_list_keeps_the_last_one_read_and_announces_none_again(
         store):  # noqa: F811
     shown = []
     store.ban_noticed.connect(lambda t, b: shown.append(t))
+    bans.banned_path().parent.mkdir(parents=True, exist_ok=True)
+    bans.banned_path().write_text("{")
+    store.refresh_activity()
+    store.refresh_activity()
+
+    def warned() -> list[str]:
+        return [e.detail for e in activity.read() if e.action == "warn"]
+
+    assert warned() == [bans.unreadable_note()]
     bob = {"login": "bob", "at": "2026-10-01T00:00:00.000Z"}
     _seed(bob)
     store.refresh_activity()
+    assert shown == [], "on the list before its first read"
     bans.banned_path().write_text("{")
     store.refresh_activity()
     assert ([b.login for b in store.banned_authors], store.ban_list_unreadable) == (["bob"], True)
+    assert warned() == [bans.unreadable_note()] * 2
     _seed(bob)
     store.refresh_activity()
     assert (shown, store.ban_list_unreadable) == ([], False)

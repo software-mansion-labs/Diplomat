@@ -138,6 +138,15 @@ def unreadable() -> bool:
 
 #: Why a gate refused work while the list is :func:`unreadable`.
 UNREADABLE = "the prompt-injection ban list could not be read"
+#: The dispatch verdict for that refusal: the job waits as a deferral does, a find
+#: queued again and an ask kept (macOS ``DispatchOutcome.banListUnreadable``).
+VERDICT_UNREADABLE = "ban-list-unreadable"
+
+
+def unreadable_note() -> str:
+    """The feed's line for a spell of :func:`unreadable` (macOS ``unreadNote``)."""
+    return (f"{banned_path()} could not be read: it could be banning anyone, so work "
+            "naming an author waits until it reads")
 
 
 def is_banned(login: str, banned: list[BannedAuthor]) -> bool:
@@ -265,15 +274,13 @@ def report_comms_ban(ban: dict, *, timeout_secs: float = 10) -> Reported:
 def _write_directly(login: str, handle: str, place: str, permalink: str,
                     evidence: str) -> str | None:
     """The daemon's write, minus its evidence dir; returns why it failed, or None. A
-    file that is present but unreadable is left for the daemon to set aside: writing
-    over it would lift every ban in it."""
+    file that is :func:`unreadable` is left as it is: writing over it would lift every
+    ban in it."""
     path = banned_path()
-    data = atomicjson.read_object(path)
-    if data is None and path.exists():
+    if unreadable():
         return f"{path} is unreadable, so it was left as it is"
-    data = data or {}
-    if not isinstance(data.get("banned"), list):
-        data["banned"] = []
+    data = atomicjson.read_object(path) or {}
+    data.setdefault("banned", [])
     at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     entry = {"login": login, "reason": "prompt injection", "pr": permalink or None,
              "evidence": evidence[:800], "evidenceDir": None, "reportedBy": COMMS_REPORTER,
@@ -316,12 +323,10 @@ def _unban_directly(login: str) -> str | None:
     """The daemon's ``handleUnban``; returns why it failed, or None. A list that does
     not hold ``login`` is left unwritten."""
     path = banned_path()
-    data = atomicjson.read_object(path)
-    if data is None:
-        return f"{path} is unreadable, so it was left as it is" if path.exists() else None
-    listed = data.get("banned")
-    if not isinstance(listed, list):
-        return None
+    if unreadable():
+        return f"{path} is unreadable, so it was left as it is"
+    data = atomicjson.read_object(path) or {}
+    listed = data.get("banned", [])
     low = login.lower()
     kept = [b for b in listed
             if not (isinstance(b, dict) and str(b.get("login", "")).lower() == low)]

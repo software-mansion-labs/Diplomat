@@ -3363,10 +3363,17 @@ final class Store: ObservableObject {
 
     /// Re-read the prompt-injection ban list (cheap local file). Publishes on change, and
     /// posts a notification for each ban not seen by an earlier read: a new login, or a
-    /// repeat offence (a new `at`). An unreadable list leaves the last read standing.
+    /// repeat offence (a new `at`). An unreadable list leaves the last read standing, and
+    /// the feed says so once per spell.
     func refreshBanList() {
         let file = BanList.readFile()
-        if file.isUnreadable != banListUnreadable { banListUnreadable = file.isUnreadable }
+        if file.isUnreadable != banListUnreadable {
+            banListUnreadable = file.isUnreadable
+            if file.isUnreadable {
+                AuditLog.log("auto", "warn", BanList.unreadNote)
+                refreshAudit()
+            }
+        }
         guard !file.isUnreadable else { return }
         let next = BanList.read(file)
         let keys = next.map { "\($0.login.lowercased())@\($0.at ?? "")" }
@@ -4197,7 +4204,7 @@ final class Store: ObservableObject {
         // never draw it, since the allowlist answers for the review monitor's own
         // finds and an ask is not one (`AgentJob.counter`).
         case .inFlight, .atCapacity, .unaffordable, .lowDisk, .failed, .notAllowed,
-             .offering, .networkRefused, .networkDown: break
+             .offering, .networkRefused, .networkDown, .banListUnreadable: break
         }
     }
 
@@ -4281,11 +4288,13 @@ final class Store: ObservableObject {
 
     /// Paused, or a pipeline ask still stale (`pipelineStale`) or held by an unreadable ban
     /// list (`banListUnreadable`), unless a Slack ping took it as its ask: then it is
-    /// asked-for work, which switching a monitor off never stops (`isPaused`).
+    /// asked-for work, which switching a monitor off never stops (`isPaused`). Work naming
+    /// an author waits for that list to read whoever asked for it.
     func isHeld(_ task: QueuedAgentTask, owned: Set<String>? = nil) -> Bool {
-        (isPaused(task.job.counter)
-            || (task.job.counter == .pipeline && (banListUnreadable || pipelineStale.contains(task.id))))
-            && !(owned ?? commsOwnedKeys).contains(task.id)
+        (banListUnreadable && !(task.job.authorLogin ?? "").isEmpty)
+            || ((isPaused(task.job.counter)
+                || (task.job.counter == .pipeline && (banListUnreadable || pipelineStale.contains(task.id))))
+                && !(owned ?? commsOwnedKeys).contains(task.id))
     }
 
     /// Dispatch one queued task past the capacity check its caller already made, and
@@ -4423,7 +4432,10 @@ final class Store: ObservableObject {
         case .inFlight:
             error = "\(entry.job.label): an agent is already on this PR."
         case .banned:
-            error = "\(entry.job.label): \(Store.banRefusal(entry.job))."
+            let who = BanList.refusedWho(entry.job.authorLogin ?? "")
+            error = "\(entry.job.label): \(who) is banned (\(Store.banRemedy(entry.job)))."
+        case .banListUnreadable:
+            error = "\(entry.job.label): \(BanList.unreadReason)."
         case .notAllowed:
             error = "\(entry.job.label): the PR's author is not on the auto-review list "
                   + "(add them, or review it from the wizard)."
@@ -4554,16 +4566,6 @@ final class Store: ObservableObject {
             : "the ask is dropped, sweep again to re-queue it"
     }
 
-    /// Why the ban gate refused `job`, and what follows. While the list cannot be read it
-    /// says so, and a monitor's find comes back by itself once it reads. Twin of
-    /// `Store.ban_refusal`.
-    static func banRefusal(_ job: AgentJob) -> String {
-        guard BanList.readFile().isUnreadable else {
-            return "\(BanList.refusedWho(job.authorLogin ?? "")) is banned (\(banRemedy(job)))"
-        }
-        return job.requested ? "\(BanList.unreadReason) (\(banRemedy(job)))" : BanList.unreadReason
-    }
-
     /// One unit of automatic work nothing has started yet: the whole job, held by the
     /// device's task cap, by the spending budget, by the disk floor, or by a switch the
     /// operator set (its own monitor, or the queue itself), until a slot frees or the
@@ -4584,6 +4586,9 @@ final class Store: ObservableObject {
         case spawned(terminal: String)
         case inFlight
         case banned
+        /// The ban list could not be read, so the job waits as a deferral does: a find is
+        /// queued again and an ask stays.
+        case banListUnreadable
         case notAllowed
         case atCapacity
         case unaffordable
@@ -4739,7 +4744,13 @@ final class Store: ObservableObject {
             stageQueued(job, attemptNumber: attemptNumber)
             return .unaffordable
         case .banned:
-            AuditLog.log(source.rawValue, "ban-skip", "\(job.label) — \(Store.banRefusal(job))")
+            if bans.isUnreadable {
+                stageQueued(job, attemptNumber: attemptNumber)
+                return .banListUnreadable
+            }
+            let who = BanList.refusedWho(job.authorLogin ?? "")
+            AuditLog.log(source.rawValue, "ban-skip",
+                         "\(job.label) — \(who) is banned (\(Store.banRemedy(job)))")
             refreshAudit()
             return .banned
         case .notAllowed:
@@ -5219,8 +5230,8 @@ final class Store: ObservableObject {
             self.error = "Resolve \(label): an agent is already on this PR."
         case .networkRefused(let why), .networkDown(let why):
             self.error = "Resolve \(label) was not offered: \(why)."
-        case .spawned, .offered, .offering, .banned, .atCapacity, .unaffordable, .lowDisk,
-             .notAllowed:
+        case .spawned, .offered, .offering, .banned, .banListUnreadable, .atCapacity,
+             .unaffordable, .lowDisk, .notAllowed:
             // `.atCapacity`, `.unaffordable` and `.lowDisk` are answers only a monitor
             // gets - none of the automatic-task cap, the spending budget and the disk
             // floor applies to a click - and `.notAllowed` speaks for the review

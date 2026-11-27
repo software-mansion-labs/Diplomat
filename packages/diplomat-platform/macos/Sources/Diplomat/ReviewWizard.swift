@@ -1182,7 +1182,7 @@ struct ReviewWizardView: View {
     /// each ask it queues carries its own PR's author. So this is the wizard's
     /// debounced poll, which may still be unknown — and nil for my own PR, which has
     /// no ban dimension to check.
-    private var reviewedAuthorLogin: String? { specificAuthorLogin }
+    private var reviewedAuthorLogin: String? { specificAuthor == .mine ? nil : specificAuthorLogin }
 }
 
 /// The wizard status line for one dispatch outcome — shared by all four wizards
@@ -1198,9 +1198,8 @@ func statusText(for outcome: Store.DispatchOutcome, terminal: String) -> String 
     switch outcome {
     case .spawned: return "Launched \(terminal) · \(Fmt.clock(Date()))"
     case .inFlight: return "An agent is already on this PR — see its session above."
-    case .banned:
-        return BanList.readFile().isUnreadable ? "The prompt-injection ban list could not be read."
-            : "Author is banned for prompt injection — un-ban to review."
+    case .banned: return "Author is banned for prompt injection — un-ban to review."
+    case .banListUnreadable: return "The prompt-injection ban list could not be read."
     case .notAllowed: return "Author is outside the auto-review list."
     case .atCapacity: return "This machine is at its cap of concurrent automatic tasks."
     case .unaffordable: return "Too little rate limit left for automatic work."
