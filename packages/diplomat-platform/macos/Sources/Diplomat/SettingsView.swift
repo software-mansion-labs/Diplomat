@@ -1377,6 +1377,13 @@ struct SettingsView: View {
                         Image(systemName: "arrow.clockwise")
                     }
                     .buttonStyle(.borderless).controlSize(.small).tooltip("Re-check for updates")
+                    if let error = updateError {
+                        Button("Copy error") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(error, forType: .string)
+                        }
+                        .controlSize(.small)
+                    }
                     Spacer(minLength: 0)
                 }
             }
@@ -1401,6 +1408,15 @@ struct SettingsView: View {
                 return StatusPill(text: "up to date", tint: .green, symbol: "checkmark.seal.fill")
             }
             return StatusPill(text: "\(behind) behind", tint: .blue, symbol: "arrow.down.circle.fill")
+        }
+    }
+
+    /// What the line under the button shows when an update or a check failed.
+    private var updateError: String? {
+        switch store.updateState {
+        case .failed(let err): return err
+        case .idle(let r): return r.error
+        default: return nil
         }
     }
 
