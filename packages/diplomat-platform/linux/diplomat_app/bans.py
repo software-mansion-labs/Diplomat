@@ -13,7 +13,6 @@ straight to the file only when no daemon is reachable.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from dataclasses import dataclass
@@ -106,14 +105,8 @@ class BannedAuthor:
 def read() -> list[BannedAuthor]:
     """The current banned authors; empty when the file is absent or malformed, which a
     gate tells apart (:func:`unreadable`): a malformed list could be banning anyone."""
-    try:
-        obj = json.loads(banned_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    if not isinstance(obj, dict):
-        return []
     out: list[BannedAuthor] = []
-    for b in obj.get("banned", []) or []:
+    for b in (_listed() or {}).get("banned", []):
         if not isinstance(b, dict) or not b.get("login"):
             continue
 
@@ -129,8 +122,8 @@ def read() -> list[BannedAuthor]:
 
 
 def unreadable() -> bool:
-    """Whether the file is present but no JSON object whose ``banned`` is a list or
-    absent. Twin of ``BanList.readFile``'s ``unreadable``."""
+    """Whether the file is not known absent but is no JSON object whose ``banned`` is a
+    list or absent. Twin of ``BanList.readFile``'s ``unreadable``."""
     return _listed() is None
 
 
@@ -139,7 +132,13 @@ def _listed() -> dict | None:
     path = banned_path()
     data = atomicjson.read_object(path)
     if data is None:
-        return None if os.path.exists(path) else {}
+        try:
+            os.stat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            return {}
+        except OSError:  # e.g. a directory it cannot search, which may hold one
+            pass
+        return None
     return data if isinstance(data.get("banned", []), list) else None
 
 

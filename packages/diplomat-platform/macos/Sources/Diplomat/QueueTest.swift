@@ -1693,6 +1693,11 @@ enum QueueTest {
         check("…and the ledger and owed count stand as a ban on its author left them",
               !TelemetryLog.load().tasks.contains { $0.key == heldReqLedger }
                   && store.unaddressedReviews == owedBanned)
+        try? Data(#"{"banned":[{"login":"qt-outsider"}]}"#.utf8).write(to: BanList.fileURL)
+        chmod(BanList.dir.path, 0o600)
+        let unsearchable = BanList.readFile().isUnreadable
+        chmod(BanList.dir.path, 0o700)
+        check("a ban list in a directory that cannot be searched cannot be read, not empty", unsearchable)
         try? FileManager.default.removeItem(at: BanList.fileURL)
         await store.runAutofixPollOnce()
         check("a root's review request queues while it reads",

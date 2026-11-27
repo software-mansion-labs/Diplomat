@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Glibc)
+import Glibc
+#endif
 
 /// What a sync reaches outside the process; tests stub it.
 public struct PipelineIO {
@@ -320,7 +323,8 @@ final class PipelineSync {
         let file = (env.isEmpty
             ? PrivateFiles.home.appendingPathComponent(".diplomat/pr-monitor")
             : URL(fileURLWithPath: PrivateFiles.expandingTilde(env))).appendingPathComponent("banned.json")
-        guard FileManager.default.fileExists(atPath: file.path) else { return [] }
+        var info = stat()
+        if stat(file.path, &info) != 0, errno == ENOENT || errno == ENOTDIR { return [] }
         guard let data = try? Data(contentsOf: file),
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
         switch obj["banned"] {

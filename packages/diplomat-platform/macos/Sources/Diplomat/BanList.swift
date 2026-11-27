@@ -127,7 +127,7 @@ enum BanList {
 
     enum File {
         case absent
-        /// Present, but not a JSON object whose `banned` is an array (or absent): never
+        /// Not known absent, but not a JSON object whose `banned` is an array (or absent): never
         /// written over, since that would lift every ban in it.
         case unreadable
         /// The whole object, and its `banned` entries as stored, including any `read`
@@ -146,7 +146,8 @@ enum BanList {
     }
 
     static func readFile() -> File {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return .absent }
+        var info = stat()
+        if stat(fileURL.path, &info) != 0, errno == ENOENT || errno == ENOTDIR { return .absent }
         guard let data = try? Data(contentsOf: fileURL),
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { return .unreadable }

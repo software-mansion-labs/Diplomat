@@ -689,9 +689,11 @@ def test_a_review_request_runs_at_the_default_depth_unless_its_author_has_a_row(
     assert [c["prompt"] for c in calls] == ["PROMPT:8:max"]
 
 
-def test_an_unreadable_ban_list_holds_each_review_request_in_the_queue(store, monkeypatch):
+@pytest.mark.parametrize("spoil", ["{", '{"banned": 5}', None], ids=["torn", "scalar", "unsearchable"])
+def test_an_unreadable_ban_list_holds_each_review_request_in_the_queue(store, monkeypatch, spoil):
     """Held where it stands, with no attempt record, and nothing that leaves a banned
-    author out (the ledger, the owed count) is changed until the list reads."""
+    author out (the ledger, the owed count) is changed until the list reads. ``None``
+    leaves the list readable in a directory that cannot be searched."""
     from diplomat_app import bans
     from diplomat_runtime import activity
 
@@ -716,11 +718,15 @@ def test_an_unreadable_ban_list_holds_each_review_request_in_the_queue(store, mo
     store.move_queued_task(autofix.queue_key("review-req", item(4)),
                            autofix.queue_key("review-req", item(3)))
     ledger = telemetry.load().tasks
-    bans.banned_path().write_text("{")
+    if spoil is None:
+        bans.banned_path().parent.chmod(0o600)
+    else:
+        bans.banned_path().write_text(spoil)
     store.queue_auto_run = True
     assert (cycle(), calls, store._load_attempts("reviewReqAttempts")) == ([4, 3, 5], [], {})
     assert (telemetry.load().tasks, store.unaddressed_reviews) == (ledger, 2)
     assert [e.detail for e in activity.read() if e.action == "ban-skip"] == []
+    bans.banned_path().parent.chmod(0o700)
     bans.banned_path().unlink()
     assert cycle() == []
     assert sorted(c["prompt"][-2:] for c in calls) == [":3", ":4", ":5"]
