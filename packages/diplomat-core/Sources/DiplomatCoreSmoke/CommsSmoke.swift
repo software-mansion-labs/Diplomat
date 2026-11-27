@@ -2201,8 +2201,8 @@ private func classifierSmoke() throws {
         try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
         try FileManager.default.copyItem(at: stub, to: d.appendingPathComponent("claude"))
     }
-    // The login stage puts its own dirs first (path_helper's /etc/paths.d, Homebrew's
-    // shellenv), so the stub goes on PATH from the rc read after it, as nvm's install does.
+    // The profile stands in for the login stage, which puts its own dirs first (path_helper,
+    // Homebrew's shellenv); the stub goes on PATH from the rc read after it, as nvm does.
     let profile = "export PATH=\(profileBin.path):$PATH\n"
     try profile.write(to: dir.appendingPathComponent(".zprofile"), atomically: true, encoding: .utf8)
     try profile.write(to: dir.appendingPathComponent(".bash_profile"), atomically: true, encoding: .utf8)
