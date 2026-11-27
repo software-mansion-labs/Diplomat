@@ -283,20 +283,24 @@ enum AllocatorSetupTest {
         let calls = pkg.appendingPathComponent("calls.log")
         let replies = pkg.appendingPathComponent("replies.json")
         try? fm.createDirectory(at: pkg.appendingPathComponent("src"), withIntermediateDirectories: true)
-        // Prints the reply set for its argument, after the delay set for it, and records
-        // that it was asked.
+        // Records that it was asked once the start delay set for its argument is up, as
+        // a node slowed by a loaded machine would, then prints the reply set for it after
+        // the delay set for that.
         try? #"""
         const fs = require('fs'), path = require('path');
         const arg = process.argv[2];
-        fs.appendFileSync(path.join(__dirname, '..', 'calls.log'), arg + '\n');
         const replies = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'replies.json'), 'utf8'));
-        setTimeout(() => process.stdout.write(JSON.stringify(replies[arg] || {})),
-                   (replies.delayMs || {})[arg] || 0);
+        const after = (delays, then) => setTimeout(then, (replies[delays] || {})[arg] || 0);
+        after('startMs', () => {
+            fs.appendFileSync(path.join(__dirname, '..', 'calls.log'), arg + '\n');
+            after('delayMs', () => process.stdout.write(JSON.stringify(replies[arg] || {})));
+        });
         """#.write(to: pkg.appendingPathComponent("src/install.js"), atomically: true, encoding: .utf8)
-        func answer(_ byArg: [String: String], delayMs: [String: Int] = [:]) {
+        func answer(_ byArg: [String: String], delayMs: [String: Int] = [:], startMs: [String: Int] = [:]) {
             var fields = byArg.map { "\"\($0.key)\":\($0.value)" }
-            let delays = delayMs.map { "\"\($0.key)\":\($0.value)" }.joined(separator: ",")
-            fields.append("\"delayMs\":{\(delays)}")
+            for (name, delays) in [("delayMs", delayMs), ("startMs", startMs)] {
+                fields.append("\"\(name)\":{\(delays.map { "\"\($0.key)\":\($0.value)" }.joined(separator: ","))}")
+            }
             try? "{\(fields.joined(separator: ","))}".write(to: replies, atomically: true, encoding: .utf8)
             try? fm.removeItem(at: calls)
         }
@@ -353,9 +357,9 @@ enum AllocatorSetupTest {
             let running = #"{"action":"restart-daemon",\#(parts),"daemonRunning":true,"installed":true}"#
             let notRunning = #"{"action":"check",\#(parts),"daemonRunning":false,"installed":true}"#
             answer(["--restart-daemon": running, "--check": notRunning, "--start-daemon": startReply],
-                   delayMs: ["--restart-daemon": 1500])
+                   delayMs: ["--restart-daemon": 1500], startMs: ["--restart-daemon": 600])
             let restart = Task { await store.restartAllocatorDaemon() }
-            try? await Task.sleep(nanoseconds: 400_000_000)
+            for _ in 0..<500 where asked().isEmpty { try? await Task.sleep(nanoseconds: 20_000_000) }
             check("a restart in flight marks the allocator busy", store.allocatorBusy)
             await store.refreshAllocatorInstall()
             await store.startAllocatorDaemon()
@@ -491,7 +495,7 @@ enum AllocatorSetupTest {
         // ---- the --check poll runs only while the screen's window is on screen ----
 
         if DeviceAllocator.nodeAvailable, let screen = NSScreen.main {
-            answer(["--check": checkReply])
+            answer(["--check": checkReply], startMs: ["--check": 1200])
             let view = DevicesScreen(isPresented: .constant(true), live: true, pollNanoseconds: 150_000_000)
                 .environmentObject(store)
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
@@ -500,23 +504,33 @@ enum AllocatorSetupTest {
             // Two points of it on screen: enough to count as visible, too little to notice.
             window.setFrameOrigin(NSPoint(x: screen.frame.maxX - 2, y: screen.frame.minY))
             window.isReleasedWhenClosed = false
-            func polls(within secs: Double) async -> Int {
+            /// The --check polls over the next `secs`, stopping early once there are `n`.
+            func polls(within secs: Double, until n: Int = .max) async -> Int {
                 let before = asked().count
-                try? await Task.sleep(nanoseconds: UInt64(secs * 1e9))
+                let deadline = Date().addingTimeInterval(secs)
+                while asked().count - before < n, Date() < deadline {
+                    try? await Task.sleep(nanoseconds: 20_000_000)
+                }
                 return asked().count - before
             }
             window.orderFrontRegardless()
-            let shown = await polls(within: 1.5)
+            let shown = await polls(within: 10, until: 2)
             if shown == 0 && !window.occlusionState.contains(.visible) {
                 print("  skip  the poll's visibility: no window is ever visible here")
             } else {
                 check("the screen polls --check while its window is up", shown >= 2, "polled \(shown)")
                 window.orderOut(nil)
                 _ = await polls(within: 0.5)
-                let hidden = await polls(within: 1.0)
+                // A poll started before the hide landed records only once its slow start is up.
+                for _ in 0..<500 where AppLog.inFlight().contains("devicesPoll") {
+                    try? await Task.sleep(nanoseconds: 20_000_000)
+                }
+                // Longer than a poll takes to record, so one made while hidden shows up here.
+                let hidden = await polls(within: 2.5)
                 check("…and not once it is hidden", hidden == 0, "polled \(hidden) times")
                 window.orderFrontRegardless()
-                check("…and again once it is back", await polls(within: 1.0) >= 1)
+                let back = await polls(within: 10, until: 1)
+                check("…and again once it is back", back >= 1, "polled \(back)")
             }
             window.orderOut(nil)
             window.contentView = nil
