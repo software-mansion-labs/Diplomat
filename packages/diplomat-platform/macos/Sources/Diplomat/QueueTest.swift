@@ -820,10 +820,12 @@ enum QueueTest {
         //     at the top of one. Never sooner than the floor after the last poll started,
         //     and one poll for every bay that frees while it waits. `gh` is a stand-in
         //     that logs each call and names no login, so a poll stops at its viewer
-        //     read and every line it logs is one poll.
+        //     read and every line it logs is one poll. The last poll, the fourth, it
+        //     answers half a second late, as a loaded runner's `gh` does, so that poll
+        //     outlives the check that saw it start.
         let ghLog = feed.appendingPathComponent("gh.log")
         let ghStub = feed.appendingPathComponent("gh")
-        try? "#!/bin/sh\necho call >> '\(ghLog.path)'\necho '{\"data\":{\"viewer\":{\"login\":\"\"}}}'\n"
+        try? "#!/bin/sh\necho call >> '\(ghLog.path)'\n[ $(wc -l < '\(ghLog.path)') -lt 4 ] || sleep 0.5\necho '{\"data\":{\"viewer\":{\"login\":\"\"}}}'\n"
             .write(to: ghStub, atomically: true, encoding: .utf8)
         chmod(ghStub.path, 0o755)
         let realGH = ProcessInfo.processInfo.environment["DIPLOMAT_GH"]
@@ -910,6 +912,8 @@ enum QueueTest {
               forLimit.map { $0.timeIntervalSince(raised) < floor + 2 } == true)
 
         store.pollsEarly = false
+        // Its last poll would otherwise run on into the next section's roots and `gh`.
+        while store.secondsUntilPoll(gap: 0) > 0 { try? await Task.sleep(nanoseconds: 50_000_000) }
         emptyBook()
         store.requestedWork = []
         store.queuedTasks = []
@@ -955,19 +959,14 @@ enum QueueTest {
         store.autoTaskLimit = 1
         bookAgent(90, ahead: 86_400)
         _ = await store.settleAgents()
-        // A poll the early-poll section above brought forward may still be finishing;
-        // this one only counts once the stand-in has been asked.
-        for _ in 0..<50 {
-            await store.runAutofixPollOnce()
-            if FileManager.default.fileExists(atPath: multiLog.path) { break }
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
+        await store.runAutofixPollOnce()
         let multiAsked = ((try? String(contentsOf: multiLog, encoding: .utf8)) ?? "")
         check("one poll asks every root for my PRs, closed PRs and review requests",
-              ["o1/alpha author:alice", "o2/beta author:alice",
-               "o1/alpha is:pr", "o2/beta is:pr",
-               "o1/alpha review-requested:alice", "o2/beta review-requested:alice"]
-                  .allSatisfy { multiAsked.contains("q=repo:" + $0) })
+              multiAsked.split(separator: "\n").map(String.init).sorted()
+                  == ["o1/alpha author:alice", "o2/beta author:alice",
+                      "o1/alpha is:pr", "o2/beta is:pr",
+                      "o1/alpha review-requested:alice", "o2/beta review-requested:alice"]
+                      .map { "q=repo:" + $0 }.sorted())
         let rows = Dictionary(store.queuedTasks.map { ($0.id, $0.job) },
                               uniquingKeysWith: { a, _ in a })
         let conflictA = AgentTaskQueue.key(auditAction: "conflicts", item: "o1/alpha#90007")
@@ -1472,11 +1471,7 @@ enum QueueTest {
         let configuredRoot = PRRef.LocalRepo(owner: cfgOwner.uppercased(), repo: cfgRepo,
                                              path: feed.appendingPathComponent("configured").path)
         store.pinRoots([configuredRoot], complete: false, primary: false, guessed: true)
-        for _ in 0..<50 {
-            await store.runAutofixPollOnce()
-            if store.autofixPollError == guessedMessage { break }
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
+        await store.runAutofixPollOnce()
         let guessedAsked = (try? String(contentsOf: rootsLog, encoding: .utf8)) ?? ""
         check("no root path resolving stands the monitor poll down, fetching nothing",
               store.autofixPollError == guessedMessage && !guessedAsked.contains("q=repo:")
