@@ -44,7 +44,8 @@ extension Store {
                 PipelineSettings.Root(owner: $0.owner, repo: $0.repo, path: $0.path, me: knownMe(for: $0))
             },
             linearTeams: Store.pipelineTeams(pipelineLinearTeamsRaw),
-            rate: pipelineRate, fix: pipelineFix, fastTrack: pipelineFastTrack,
+            rate: pipelineRate, mirrorGitHub: pipelineMirrorGitHub, mirrorLinear: pipelineMirrorLinear,
+            mirrorScope: pipelineMirrorScope, fix: pipelineFix, fastTrack: pipelineFastTrack,
             merge: pipelineMerge, fracture: pipelineFracture,
             force: force.isEmpty ? nil : force,
             queued: Store.pipelineQueued(requestedWork, attempts: loadPipelineAttempts()))
@@ -66,7 +67,8 @@ extension Store {
         let env = ProcessInfo.processInfo.environment["DIPLOMAT_PIPELINE_DIR"] ?? ""
         guard !Headless.active || !env.isEmpty else { return }
         let revoke = pipelineForce.revoke.sorted()
-        PipelineControl(enabled: pipelineEnabled, rate: pipelineRate, fix: pipelineFix,
+        PipelineControl(enabled: pipelineEnabled, rate: pipelineRate, mirrorGitHub: pipelineMirrorGitHub,
+                        mirrorLinear: pipelineMirrorLinear, mirrorScope: pipelineMirrorScope, fix: pipelineFix,
                         fastTrack: pipelineFastTrack, merge: pipelineMerge, fracture: pipelineFracture,
                         revoke: revoke.isEmpty ? nil : revoke).save()
     }
