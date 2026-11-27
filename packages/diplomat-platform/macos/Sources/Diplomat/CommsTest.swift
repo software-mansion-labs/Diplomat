@@ -1047,10 +1047,12 @@ enum CommsTest {
               unattributedHeld == [false, false] && unattributed == [.atCapacity, .atCapacity])
         store.error = nil
         let unreadSkipsBefore = feed("ban-skip").count
+        let rowsBefore = store.queuedTasks.map(\.id)
         if probe == .banListUnreadable { await store.executeQueuedTask(victorKey) }
         let victorLabel = victorTask?.job.label ?? "<not queued>"
-        check("…even run by hand, saying why, and the ask stays, as does its ping's word",
+        check("…even run by hand, saying why, its row staying where it is, as do its ask and its ping's word",
               store.error == "\(victorLabel): \(unread)."
+                && store.queuedTasks.map(\.id) == rowsBefore && store.startingTasks.isEmpty
                 && store.requestedWork.contains { $0.key == victorKey }
                 && outcome(victorAsk) == victorQueued && feed("ban-skip").count == unreadSkipsBefore)
         check("…as does a wizard",

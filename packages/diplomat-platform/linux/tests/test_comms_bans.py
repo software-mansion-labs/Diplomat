@@ -20,7 +20,7 @@ from test_autofix import _spawn_recorder, store  # noqa: F401 — fixture
 from test_comms_core import PROFILES, _Slack, _stub_claude, slack  # noqa: F401 — fixture
 from test_comms_core import _message as _posted
 from test_comms_store import (  # noqa: F401 — fixture
-    _decision, _events, _feed_lines, _logged, _message, _tick, comms_store, needs_core, qkey)
+    ME, _decision, _events, _feed_lines, _logged, _message, _tick, comms_store, needs_core, qkey)
 
 from diplomat_app import bans, deviceallocator
 from diplomat_app.store import Store
@@ -519,6 +519,22 @@ def test_an_unreadable_list_holds_the_tick_and_every_stranded_ask(comms_store, m
     assert comms_store.comms_error == "the prompt-injection ban list could not be read"
 
 
+@needs_core
+def test_a_list_that_stops_reading_during_the_tick_replays_no_stranded_ask(
+        comms_store, monkeypatch):
+    monkeypatch.setattr(bans, "read", _REAL_READ)
+    _logged((_mallory("review #12 please"), _decision("review", 12)))
+    _seed({"login": "slack:UMAL123", "source": "slack"})
+
+    def tick(settings):
+        bans.banned_path().write_text("{")
+        return {"me": ME, "pings": [], "items": [], "error": None, "notices": []}
+
+    monkeypatch.setattr(comms, "tick", tick)
+    comms_store._apply_comms_tick(comms_store._comms_poll_once())
+    assert ([e for e in _events() if e["kind"] == "action"], _asks(comms_store)) == ([], [])
+
+
 def test_the_tick_is_handed_the_slack_senders_on_the_list(comms_store, monkeypatch):
     monkeypatch.setattr(bans, "read", _REAL_READ)
     _seed({"login": "bob"}, {"login": "slack:UMAL123", "source": "slack"},
@@ -598,10 +614,16 @@ def test_an_ask_queued_while_the_list_is_unreadable_waits_even_run_by_hand(
     unattributed = dataclasses.replace(entry, job=dataclasses.replace(entry.job, author_login=""))
     assert (comms_store.is_held(entry), comms_store.is_held(unattributed)) == (True, False)
     events, lines = _events(), _feed_lines()
+    unread = f"{entry.job.label}: the prompt-injection ban list could not be read."
+    rows = [t.id for t in comms_store.queued_tasks]
+    comms_store.execute_queued_task_async(key)
+    assert ([t.id for t in comms_store.queued_tasks], comms_store.starting_tasks,
+            comms_store.error) == (rows, [], unread)
+    comms_store.error = None
     assert comms_store._run_queued_task(entry, forced=True) == bans.VERDICT_UNREADABLE
     comms_store._execute_queued_task(entry)
     assert sent == []
-    assert comms_store.error == f"{entry.job.label}: the prompt-injection ban list could not be read."
+    assert comms_store.error == unread
     assert [r.key for r in comms_store.requested_work] == [key]
     assert (_events(), _feed_lines()) == (events, lines)
     bans.banned_path().unlink()

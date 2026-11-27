@@ -3553,6 +3553,12 @@ class Store(QObject):
         entry = next((e for e in self.queued_tasks if e.id == task_id), None)
         if entry is None:
             return
+        # Refused before it leaves the queue, where it would be missing until the next poll.
+        self.refresh_activity()
+        if self.held_by_ban_list(entry):
+            self.error = f"{entry.job.label}: {bans.UNREADABLE}."
+            self.changed.emit()
+            return
         self._begin_starting(entry)
 
         def work() -> None:
@@ -4560,8 +4566,10 @@ class Store(QObject):
         result = comms.tick(settings)
         toggles = self.comms_toggles()
         fresh = list(result.get("items") or [])
+        # Nor is anything logged replayed if the list stopped reading during the tick.
+        stranded = [] if bans.unreadable() else self._comms_stranded(fresh)
         items = []
-        for it in self._comms_stranded(fresh) + fresh:
+        for it in stranded + fresh:
             message, decision = it.get("message") or {}, it.get("decision") or {}
             try:
                 effect = comms.effect(decision, message, toggles, settings)

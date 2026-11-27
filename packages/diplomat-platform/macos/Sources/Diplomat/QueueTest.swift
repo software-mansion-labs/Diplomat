@@ -1044,6 +1044,18 @@ enum QueueTest {
                                    root: rootB, me: store.effectiveMe)
         check("a root whose path failed to resolve for a poll keeps its mark: what it filed meanwhile is queued",
               store.requestedWork.map(\.key) == [AgentTaskQueue.key(auditAction: "issues", item: "o2/beta#86")])
+        store.requestedWork = []
+        store.queuedTasks = []
+        try? Data("{".utf8).write(to: BanList.fileURL)
+        store.pinRoots([rootA])
+        store.queueCommunityIssues([filedIn(rootA, 81, minutes: 12)], root: rootA, me: store.effectiveMe)
+        store.pinRoots([rootA, rootB])
+        let spellIssues = [filedIn(rootB, 87, minutes: 18), filedIn(rootB, 88, minutes: 19)]
+        store.queueCommunityIssues(spellIssues, root: rootB, me: store.effectiveMe)
+        try? FileManager.default.removeItem(at: BanList.fileURL)
+        store.queueCommunityIssues(spellIssues, root: rootB, me: store.effectiveMe)
+        check("…and one removed and added back while the ban list cannot be read queues none of it",
+              store.requestedWork.isEmpty)
         store.communityIssuesEnabled = false
         store.requestedWork = []
         store.queuedTasks = []

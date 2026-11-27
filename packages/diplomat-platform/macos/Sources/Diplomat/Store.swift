@@ -3206,7 +3206,16 @@ final class Store: ObservableObject {
         let bans = BanList.readFile()
         let key = root.key
         let since = communityIssuesSince[key]
-        guard !bans.isUnreadable || since == nil else { return }
+        var marks = communityIssuesSince
+        if rootsResolved {
+            let current = Set(roots.map(\.key))
+            marks = marks.filter { current.contains($0.key) }
+        }
+        defer { communityIssuesSince = marks }
+        guard !bans.isUnreadable || since == nil else {
+            marks[key] = since
+            return
+        }
         let scan = Filters.newCommunityIssues(found, since: since, now: Date())
         let banned = BanList.read(bans)
         for issue in scan.fresh {
@@ -3226,13 +3235,7 @@ final class Store: ObservableObject {
                 AuditLog.log("auto", "community-issue", "\(who) — fix queued")
             }
         }
-        var marks = communityIssuesSince
-        if rootsResolved {
-            let current = Set(roots.map(\.key))
-            marks = marks.filter { current.contains($0.key) }
-        }
         marks[key] = scan.since
-        communityIssuesSince = marks
         if !scan.fresh.isEmpty { refreshAudit() }
     }
 
@@ -4428,6 +4431,12 @@ final class Store: ObservableObject {
     /// in both.
     func executeQueuedTask(_ id: String) async {
         guard let entry = queuedTasks.first(where: { $0.id == id }) else { return }
+        // Refused before it leaves the queue, where it would be missing until the next poll.
+        refreshBanList()
+        if heldByBanList(entry) {
+            error = "\(entry.job.label): \(BanList.unreadReason)."
+            return
+        }
         switch await runQueuedTask(entry, forced: true) {
         case .spawned:
             AuditLog.log("panel", "queue-run",
