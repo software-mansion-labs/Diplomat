@@ -820,11 +820,12 @@ enum QueueTest {
         //     at the top of one. Never sooner than the floor after the last poll started,
         //     and one poll for every bay that frees while it waits. `gh` is a stand-in
         //     that logs each call and names no login, so a poll stops at its viewer
-        //     read and every line it logs is one poll. It answers half a second late, as
-        //     a loaded runner's `gh` does, so a poll outlives the check that saw it start.
+        //     read and every line it logs is one poll. The last poll, the fourth, it
+        //     answers half a second late, as a loaded runner's `gh` does, so that poll
+        //     outlives the check that saw it start.
         let ghLog = feed.appendingPathComponent("gh.log")
         let ghStub = feed.appendingPathComponent("gh")
-        try? "#!/bin/sh\necho call >> '\(ghLog.path)'\nsleep 0.5\necho '{\"data\":{\"viewer\":{\"login\":\"\"}}}'\n"
+        try? "#!/bin/sh\necho call >> '\(ghLog.path)'\n[ $(wc -l < '\(ghLog.path)') -lt 4 ] || sleep 0.5\necho '{\"data\":{\"viewer\":{\"login\":\"\"}}}'\n"
             .write(to: ghStub, atomically: true, encoding: .utf8)
         chmod(ghStub.path, 0o755)
         let realGH = ProcessInfo.processInfo.environment["DIPLOMAT_GH"]
