@@ -75,8 +75,10 @@ check "…stamped with the commit it was compiled from" \
 check "…with the native build system, which stamps the binary with its real SDK" \
   bash -c 'n=$(grep -c "^swift build " "$1"); [ "$n" -gt 0 ] && [ "$n" = "$(grep -c "^swift build .*--build-system native" "$1")" ]' \
   _ "$SCRATCH/calls"
-check "the login agent starts the bundle beside the package" \
-  grep -qF "<string>$BIN</string>" "$AGENTS/com.ignacy.diplomat.plist"
+check "install/Diplomat, which the agents start, is a link to /usr/bin/env" \
+  test "$(readlink "$PKG/install/Diplomat")" = /usr/bin/env
+check "the login agent starts the bundle beside the package, through install/Diplomat" \
+  grep -qF "<string>$PKG/install/Diplomat</string><string>$BIN</string>" "$AGENTS/com.ignacy.diplomat.plist"
 check "the login agent marks its start unattended, so it opens no window" \
   grep -qF "<key>DIPLOMAT_BACKGROUND</key><string>1</string>" "$AGENTS/com.ignacy.diplomat.plist"
 check "…so the installer's own start, the operator's, opens the window once the app is up" \
@@ -84,12 +86,12 @@ check "…so the installer's own start, the operator's, opens the window once th
   _ "$SCRATCH/calls" "$PKG/Diplomat.app"
 check "the bundle starts with no Dock tile, so a relaunch takes the kept-in-Dock one" \
   test "$(plutil -extract LSUIElement raw "$PKG/Diplomat.app/Contents/Info.plist")" = true
-check "the auto-update agent runs that same bundle" \
-  grep -qF "<string>$BIN</string>" "$AGENTS/com.ignacy.diplomat.autoupdate.plist"
+check "the auto-update agent runs that same bundle, through install/Diplomat" \
+  grep -qF "<string>$PKG/install/Diplomat</string><string>$BIN</string>" "$AGENTS/com.ignacy.diplomat.autoupdate.plist"
 check "…in self-update mode" \
   grep -qF "<key>DIPLOMAT_SELF_UPDATE</key><string>1</string>" "$AGENTS/com.ignacy.diplomat.autoupdate.plist"
-check "the watchdog agent runs that same bundle" \
-  grep -qF "<string>$BIN</string>" "$AGENTS/com.ignacy.diplomat.watchdog.plist"
+check "the watchdog agent runs that same bundle, through install/Diplomat" \
+  grep -qF "<string>$PKG/install/Diplomat</string><string>$BIN</string>" "$AGENTS/com.ignacy.diplomat.watchdog.plist"
 check "…in watchdog mode" \
   grep -qF "<key>DIPLOMAT_WATCHDOG</key><string>1</string>" "$AGENTS/com.ignacy.diplomat.watchdog.plist"
 for label in com.ignacy.diplomat com.ignacy.diplomat.autoupdate com.ignacy.diplomat.watchdog; do
@@ -101,11 +103,11 @@ echo "installers: the auto-update installer on its own"
 /bin/rm -f "$AGENTS/com.ignacy.diplomat.autoupdate.plist"
 check "install-autoupdate.sh runs with no argument" run install-autoupdate.sh
 check "…and defaults to the bundle beside the package" \
-  grep -qF "<string>$BIN</string>" "$AGENTS/com.ignacy.diplomat.autoupdate.plist"
+  grep -qF "<string>$PKG/install/Diplomat</string><string>$BIN</string>" "$AGENTS/com.ignacy.diplomat.autoupdate.plist"
 
 echo "installers: the watchdog installer on its own"
 /bin/rm -f "$AGENTS/com.ignacy.diplomat.watchdog.plist"
 check "install-watchdog.sh runs with no argument" run install-watchdog.sh
 check "…and defaults to the bundle beside the package" \
-  grep -qF "<string>$BIN</string>" "$AGENTS/com.ignacy.diplomat.watchdog.plist"
+  grep -qF "<string>$PKG/install/Diplomat</string><string>$BIN</string>" "$AGENTS/com.ignacy.diplomat.watchdog.plist"
 echo "installers: all passed"

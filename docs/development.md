@@ -145,6 +145,16 @@ frontmost app in front. Click the Dock icon to open the window. Any other launch
 answers before AppKit starts, so it never registers as an app. A login agent an
 older installer wrote, without `DIPLOMAT_BACKGROUND`, gets it at the next GUI launch.
 
+launchd starts each of the three as `install/Diplomat <the bundle's binary>`, where
+`install/Diplomat` is a link to `/usr/bin/env`. macOS ties an agent loaded at login to
+its program's code signature and kills a start whose signature has changed since
+(`Launch Constraint Violation`, with a crash report), and every build re-signs the
+ad-hoc-signed binary; env never changes. Login Items lists each agent by the link's
+name. An agent an older installer wrote, starting the binary itself, gets the link at
+the next GUI launch, which also loads the updater and the watchdog again once neither
+is running: until the next login, launchd refuses to start an agent loaded at login
+whose plist has changed since.
+
 ### Logs
 
 `~/Library/Logs/diplomat.log` records what the app did, when, and how long it took, one
@@ -285,7 +295,9 @@ DIPLOMAT_RELAUNCH_TEST=1 ...                     # self-test: a relaunch is judg
 DIPLOMAT_REPOPATHS_TEST=1 ...                    # self-test: which checkout the bundle names, from inside
                                                      #   it or from a copy; scratch dirs; exit code = verdict
 DIPLOMAT_WINDOW_TEST=1 ...                       # self-test: the launch mode and the window's shape, with
-                                                     #   no window ordered in; exit code = verdict
+                                                     #   no window ordered in; older agent plists rewritten,
+                                                     #   on scratch copies, and reloaded, against a stand-in
+                                                     #   launchctl; exit code = verdict
 DIPLOMAT_REOPEN_TEST=1 ...                       # self-test: a window closed on Settings reopens on the
                                                      #   panel; no window ordered in; exit code = verdict
 DIPLOMAT_APPLOG_TEST=1 ...                       # self-test: the diagnostic log's lines and rotation, a busy

@@ -6,10 +6,15 @@ import Foundation
 /// for non-interactive launches (`open`, launchd) and headless self-tests.
 enum Daemon {
     static let label = "com.ignacy.diplomat"
+    /// Every agent the installers write: the login one, the 06:00 updater, the watchdog.
+    static let agentLabels = [label] + scheduledAgents
+    /// The ones launchd starts between logins.
+    static let scheduledAgents = ["\(label).autoupdate", "\(label).watchdog"]
 
-    static var plistPath: String {
-        (NSHomeDirectory() as NSString).appendingPathComponent("Library/LaunchAgents/\(label).plist")
+    static func plist(_ label: String) -> URL {
+        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/LaunchAgents/\(label).plist")
     }
+    static var plistPath: String { plist(label).path }
     static var isInstalled: Bool {
         FileManager.default.fileExists(atPath: plistPath)
     }
@@ -69,14 +74,94 @@ enum Daemon {
     /// re-runs the installer. Returns whether it wrote.
     @discardableResult
     static func markLoginStartUnattended(plist url: URL = URL(fileURLWithPath: plistPath)) -> Bool {
-        guard let data = try? Data(contentsOf: url),
-              var dict = try? PropertyListSerialization.propertyList(from: data, format: nil)
-                  as? [String: Any] else { return false }
-        var env = dict["EnvironmentVariables"] as? [String: String] ?? [:]
-        guard env[LaunchMode.backgroundVar] != "1" else { return false }
-        env[LaunchMode.backgroundVar] = "1"
-        dict["EnvironmentVariables"] = env
-        guard let out = try? PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0)
+        rewrite(url) { dict in
+            var env = dict["EnvironmentVariables"] as? [String: String] ?? [:]
+            guard env[LaunchMode.backgroundVar] != "1" else { return false }
+            env[LaunchMode.backgroundVar] = "1"
+            dict["EnvironmentVariables"] = env
+            return true
+        }
+    }
+
+    /// What the agents start: a link to `/usr/bin/env` named for Login Items to list them by.
+    static var launcher: String { RepoPaths.installDir.appendingPathComponent("Diplomat").path }
+
+    /// Has an agent plist an older installer wrote start its binary through `launcher`:
+    /// macOS kills an agent loaded at login whose program's signature has changed since,
+    /// and every build re-signs Diplomat, so each update costs such an agent its next
+    /// start. Returns whether it wrote.
+    @discardableResult
+    static func startThroughLauncher(plist url: URL, launcher: String = launcher) -> Bool {
+        guard FileManager.default.fileExists(atPath: launcher) else { return false }
+        return rewrite(url) { dict in
+            guard let args = dict["ProgramArguments"] as? [String], let first = args.first,
+                  first != launcher else { return false }
+            dict["ProgramArguments"] = [launcher] + args
+            return true
+        }
+    }
+
+    /// Loads an agent again from its plist when launchd still holds the program the plist
+    /// named before a rewrite: until the next login, launchd refuses (EX_CONFIG) to start
+    /// an agent loaded at login whose plist has changed since. Waits up to `wait` for a
+    /// run in progress, which a reload would stop: the updater and the watchdog stay up
+    /// for seconds after starting the app that calls this. Returns whether it reloaded.
+    @discardableResult
+    static func reloadIfStale(_ label: String, plist url: URL, wait: TimeInterval = 60,
+                              launchctl: ([String]) -> (status: Int32, out: String) = launchctl) -> Bool {
+        guard let program = (read(url)?["ProgramArguments"] as? [String])?.first else { return false }
+        let domain = "gui/\(getuid())"
+        let deadline = Date().addingTimeInterval(wait)
+        while true {
+            let job = launchctl(["print", "\(domain)/\(label)"])
+            let fields = fields(job.out)
+            guard job.status == 0, let loaded = fields["\tprogram"], loaded != program,
+                  let state = fields["\tstate"] else { return false }
+            if state != "running" { break }
+            guard Date() < deadline else { return false }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        _ = launchctl(["bootout", "\(domain)/\(label)"])
+        let result = launchctl(["bootstrap", domain, url.path])
+        AppLog.log("app", result.status == 0 ? "reloaded \(label)"
+                                             : "reload of \(label) failed: \(result.out)")
+        return result.status == 0
+    }
+
+    /// `launchctl print`'s `key = value` lines, keyed with their indent: the job's own
+    /// are indented once (`\tstate`), a nested block's further.
+    private static func fields(_ printed: String) -> [String: String] {
+        var fields: [String: String] = [:]
+        for line in printed.split(separator: "\n") {
+            guard let eq = line.range(of: " = ") else { continue }
+            fields[String(line[..<eq.lowerBound])] = String(line[eq.upperBound...])
+        }
+        return fields
+    }
+
+    private static func launchctl(_ args: [String]) -> (status: Int32, out: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        do { try p.run() } catch { return (-1, "\(error)") }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return (p.terminationStatus, String(decoding: data, as: UTF8.self))
+    }
+
+    private static func read(_ url: URL) -> [String: Any]? {
+        (try? Data(contentsOf: url)).flatMap {
+            try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any]
+        }
+    }
+
+    /// Writes the plist at `url` back when `edit` changed it.
+    private static func rewrite(_ url: URL, _ edit: (inout [String: Any]) -> Bool) -> Bool {
+        guard var dict = read(url), edit(&dict),
+              let out = try? PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0)
         else { return false }
         // To the file a symlink names: an atomic write replaces the link itself.
         return (try? out.write(to: url.resolvingSymlinksInPath(), options: .atomic)) != nil

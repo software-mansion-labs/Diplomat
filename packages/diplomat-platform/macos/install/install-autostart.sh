@@ -33,8 +33,11 @@ cat > "$PLIST" <<PL
 <plist version="1.0">
 <dict>
   <key>Label</key><string>$LABEL</string>
+  <!-- install/Diplomat, a link to /usr/bin/env, runs the binary: macOS kills an agent
+       loaded at login whose program's signature has changed since, and every build
+       re-signs Diplomat. Login Items lists the agent by the link's name. -->
   <key>ProgramArguments</key>
-  <array><string>$BIN</string></array>
+  <array><string>$PKG_DIR/install/Diplomat</string><string>$BIN</string></array>
   <!-- An unattended start: no window, and the frontmost app keeps focus. -->
   <key>EnvironmentVariables</key>
   <dict><key>DIPLOMAT_BACKGROUND</key><string>1</string></dict>
