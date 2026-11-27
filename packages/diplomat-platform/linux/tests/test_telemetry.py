@@ -1515,7 +1515,8 @@ def test_a_logged_out_machine_never_rounds(credentials):
 def test_the_telemetry_doc_lists_the_two_gatherers_it_counts():
     doc = (Path(__file__).resolve().parents[4] / "docs" / "telemetry.md").read_text(encoding="utf-8")
     head = "Two gatherers fill in what GitHub doesn't know:\n\n"
-    listed = doc[doc.index(head) + len(head):].split("\n\n", 1)[0]
+    # Markdown ends a list at an unindented non-bullet line, not at a blank one.
+    listed = re.split(r"\n\n+(?!- |\s)", doc[doc.index(head) + len(head):], maxsplit=1)[0]
     assert re.findall(r"^- \*\*(.+?)\*\*", listed, re.M) == ["Quota", "Token attribution"]
 
 
