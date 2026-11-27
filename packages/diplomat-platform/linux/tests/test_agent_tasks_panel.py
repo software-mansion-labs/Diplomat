@@ -259,15 +259,18 @@ def test_a_row_an_unreadable_ban_list_holds_says_so(panel):
     from diplomat_app import bans
 
     panel.store.queued_tasks = [_queued(512, author="octocat"), _queued(508)]
+    panel._rebuild_agent_tasks()
     bans.banned_path().parent.mkdir(parents=True, exist_ok=True)
     bans.banned_path().write_text("{")
     panel.store.refresh_activity()
-    panel._rebuild_agent_tasks()
     rows = _rows(panel, QueuedTaskRow)
     run = next(b for b in rows[0].findChildren(QPushButton) if b.text() == "execute now")
     assert ("ban list unreadable" in _row_text(rows[0]), "monitor off" in _row_text(rows[0]),
             "ban list cannot be read" in run.toolTip(), _row_text(rows[1]).endswith("queued")) == (
         True, False, True, True)
+    bans.banned_path().unlink()
+    panel.store.refresh_activity()
+    assert "ban list unreadable" not in _row_text(_rows(panel, QueuedTaskRow)[0])
 
 
 def test_a_row_the_network_refused_says_why(panel):

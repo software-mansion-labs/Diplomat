@@ -6619,9 +6619,12 @@ class Store(QObject):
             self.audit_entries = new_audit
             self.banned_authors = new_bans
             self.activity_changed.emit()
-        if bans_changed or unreadable != self.ban_list_unreadable:
+        flipped = unreadable != self.ban_list_unreadable
+        if bans_changed or flipped:
             self.ban_list_unreadable = unreadable
             self.pipeline_changed.emit()
+        if flipped:
+            self.tasks_changed.emit()  # a queued row says whether the list holds it
 
     def unban_async(self, login: str) -> None:
         """The panel's un-ban, off the GUI thread: the daemon may take seconds."""
