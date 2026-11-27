@@ -115,14 +115,17 @@ extension Store {
     }
 
     /// Until the loop's next sync: an interval after the last timed one ended, by the clock,
-    /// which runs on while the Mac sleeps.
+    /// which runs on while the Mac sleeps; a whole interval while one runs.
     var pipelineSyncWait: TimeInterval {
         let interval = Store.pipelineSyncInterval
+        if pipelineTimedSyncing { return interval }
         return pipelineTimedSyncEnded.map { min(interval, interval + $0.timeIntervalSinceNow) } ?? 0
     }
 
     private func runTimedPipelineSync() async {
+        pipelineTimedSyncing = true
         await runPipelineSyncOnce()
+        pipelineTimedSyncing = false
         pipelineTimedSyncEnded = Date()
     }
 
