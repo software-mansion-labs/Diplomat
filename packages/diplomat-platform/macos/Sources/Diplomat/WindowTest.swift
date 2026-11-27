@@ -166,6 +166,32 @@ enum WindowTest {
               },
               "\(beside.map { $0.convert($0.bounds, to: nil) })")
 
+        print("Pipeline: arrow keys step the selection across the graph, kept in view")
+        let keyed = MainWindow(store: wide, screen: .pipeline).window
+        keyed.setContentSize(NSSize(width: MainRoot.fullWidth, height: 500))
+        settle(keyed)
+        let frames = Dictionary(uniqueKeysWithValues: PipelineLayout.make(wide.pipelineResult!, lane: nil)
+            .cards.map { ($0.item.id, $0.frame) })
+        let graphScroll = scrollViews(in: keyed.contentView).dropFirst().first
+        // As with a mouse attached: scrollers that take room from the view.
+        graphScroll?.scrollerStyle = .legacy
+        settle(keyed)
+        func shown(_ i: Int) -> Bool { graphScroll.map { $0.contentView.bounds.contains(frames[ids[i]]!) } == true }
+        // The detail pane's id line is the only tooltip that is a bare item URL.
+        func picked() -> [String] { ids.filter(toolTips(in: keyed.contentView).contains) }
+        check("the chain's end and the last card start out of the graph's view", !shown(4) && !shown(ids.count - 1),
+              "\(graphScroll.map { "\($0.contentView.bounds)" } ?? "no graph scroll")")
+        for (key, want) in [(rightArrow, 0), (rightArrow, 1), (rightArrow, 2), (rightArrow, 3),
+                            (rightArrow, 4), (rightArrow, 4), (downArrow, 5), (upArrow, 0),
+                            (leftArrow, 0), (upArrow, 0), (downArrow, 5), (downArrow, 6)] {
+            press(keyed, key)
+            check("\(key.name) selects card \(want), in view", picked() == [ids[want]] && shown(want),
+                  "picked \(picked()), view \(graphScroll.map { "\($0.contentView.bounds)" } ?? "none")")
+        }
+        let rest = (7..<ids.count).filter { i in press(keyed, downArrow); return !(picked() == [ids[i]] && shown(i)) }
+        check("down through the rest of the column, each card in view", rest.isEmpty, "missed \(rest)")
+        keyed.close()
+
         let busy = Store()
         let panel = MainWindow(store: busy).window
         panel.setContentSize(NSSize(width: MainRoot.width - 300, height: 500))
@@ -229,6 +255,31 @@ enum WindowTest {
     /// Lets a switch's animation finish.
     private static func settle(_ w: NSWindow) {
         RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        w.contentView?.layoutSubtreeIfNeeded()
+    }
+
+    private struct Arrow {
+        let name: String
+        let code: UInt16
+        let char: Int
+    }
+
+    private static let leftArrow = Arrow(name: "left", code: 123, char: NSLeftArrowFunctionKey)
+    private static let rightArrow = Arrow(name: "right", code: 124, char: NSRightArrowFunctionKey)
+    private static let downArrow = Arrow(name: "down", code: 125, char: NSDownArrowFunctionKey)
+    private static let upArrow = Arrow(name: "up", code: 126, char: NSUpArrowFunctionKey)
+
+    private static func press(_ w: NSWindow, _ key: Arrow) {
+        let chars = String(Character(UnicodeScalar(key.char)!))
+        for type in [NSEvent.EventType.keyDown, .keyUp] {
+            guard let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [.numericPad, .function],
+                                               timestamp: ProcessInfo.processInfo.systemUptime,
+                                               windowNumber: w.windowNumber, context: nil, characters: chars,
+                                               charactersIgnoringModifiers: chars, isARepeat: false,
+                                               keyCode: key.code) else { continue }
+            w.sendEvent(event)
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         w.contentView?.layoutSubtreeIfNeeded()
     }
 

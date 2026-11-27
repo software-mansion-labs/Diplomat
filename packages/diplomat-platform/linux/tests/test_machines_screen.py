@@ -1000,6 +1000,32 @@ def test_hiding_the_window_stops_the_machines_polls_and_showing_it_restarts_them
     panel.deleteLater()
 
 
+def test_opening_the_screen_on_a_new_snapshot_opens_no_window_of_its_own(app, monkeypatch):
+    """Opening reads the snapshot, whose ``machines_changed`` rebuilds the screen, then
+    rebuilds it itself, in one turn."""
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+    from diplomat_app.machinesview import MachinesView
+    from diplomat_app.store import Store
+
+    monkeypatch.setattr(Store, "refresh_machines_install_async", lambda self: None)
+    view = MachinesView(Store(), live=True)
+    try:
+        view.show()
+        view.activateWindow()
+        assert QTest.qWaitForWindowActive(view)
+        rm.state_path().parent.mkdir(parents=True, exist_ok=True)
+        rm.state_path().write_text(json.dumps(snapshot()))
+        view.opened()
+        QApplication.processEvents()
+        assert [w for w in QApplication.topLevelWidgets()
+                if w.isVisible() and w is not view] == []
+        assert QApplication.activeWindow() is view
+    finally:
+        view.closed()
+        view.close()
+
+
 @pytest.mark.parametrize("mode", ["machines-screen", "machines-screen-idle",
                                   "machines-screen-off"])
 def test_each_mode_renders_through_the_real_entry_and_touches_no_real_state(

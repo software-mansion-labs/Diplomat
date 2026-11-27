@@ -131,18 +131,20 @@ public enum AgentTaskQueue {
     public static let reviewAction = "review"
     public static let issuesAction = "issues"
     public static let investigateAction = InvestigateConfig.kind
+    /// A Pipeline rating, run headless (`PipelineRateJob`).
+    public static let rateAction = "rate"
     public static let requestedActions: Set<String> = [reviewAction, issuesAction,
-                                                       investigateAction]
+                                                       investigateAction, rateAction]
 
     /// The bands whose work waits behind the monitors' finds, nearest-first. Matched off
     /// the queue key, not the job: the operator's saved arrangement is a list of keys and
     /// must band the same way after a restart, with no job to consult (`order`).
-    public static let lastBands: [Set<String>] = [[reviewAction], [issuesAction],
+    public static let lastBands: [Set<String>] = [[reviewAction], [rateAction], [issuesAction],
                                                   [investigateAction], ["conflicts"]]
 
     /// Which band of the queue a task waits in: 0 for the monitors' own finds, 1 for a
-    /// review the operator asked for, 2 for an issue fix they asked for, 3 for a Slack
-    /// investigation, 4 for a conflict fix. Bands outrank the operator's arrangement;
+    /// review the operator asked for, 2 for a Pipeline rating, 3 for an issue fix they
+    /// asked for, 4 for a Slack investigation, 5 for a conflict fix. Bands outrank the operator's arrangement;
     /// within one, the arrangement decides.
     ///
     /// A monitor's find is first because it is answering something GitHub is already
@@ -153,7 +155,8 @@ public enum AgentTaskQueue {
     /// blocked on it, so it bands behind the review — a sweep of fifty issues never
     /// buries a review the operator also asked for. Neither runs ahead of a monitor's
     /// find; a Review-PRs sweep of fifty drafts otherwise buries every review request
-    /// behind it for a day.
+    /// behind it for a day. A rating is backlog too, but runs in minutes and decides
+    /// whether a fix is owed at all, so it goes ahead of the fixes.
     ///
     /// An investigation comes after both, being a triage's guess at a Slack message, not
     /// the operator's ask of a known PR or issue; but ahead of a conflict, since someone

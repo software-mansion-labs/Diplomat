@@ -10,6 +10,7 @@ below.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -130,6 +131,34 @@ def test_a_minimized_window_polls_nothing_and_catches_up_when_restored(panel, qa
     calls.clear()
     panel._tasks_tick()
     assert calls == ["ps"]
+
+
+def test_the_tick_both_timers_share_opens_no_window_of_its_own(panel, qapp, monkeypatch):
+    """Every 120 s the 30 s and the 8 s timer fire in one pass: the first redraws the
+    Devices section, and the second's read of a changed pool redraws it again."""
+    from PySide6.QtTest import QTest
+
+    from diplomat_app import deviceallocator as da
+
+    def pool(name: str) -> None:
+        da.state_path().write_text(json.dumps({"devices": [
+            {"key": "ios:A", "platform": "ios", "name": name, "status": "ready",
+             "owner": {"ownerPid": 1}}]}))
+
+    monkeypatch.setattr(panel.store, "refresh_auto_task_count_async", lambda: None)
+    da.state_path().parent.mkdir(parents=True, exist_ok=True)
+    pool("iPhone 15")
+    panel.store.refresh_device_state()
+    panel.show()
+    panel.activateWindow()
+    assert QTest.qWaitForWindowActive(panel)
+    pool("iPhone 16")
+    panel._duration_timer.timeout.emit()
+    panel._device_timer.timeout.emit()
+    qapp.processEvents()
+    assert [w for w in QApplication.topLevelWidgets()
+            if w.isVisible() and w is not panel] == []
+    assert QApplication.activeWindow() is panel
 
 
 def test_file_quit_asks_to_quit(panel):

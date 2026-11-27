@@ -89,11 +89,11 @@
     "testFiles": ["test_*", "*_test.*", "*.test.*", "*_spec.*", "*.spec.*"]
   },
   "rater": {
-    "_modelComment": "`model` rates issues; `prModel` rates PRs, whose rating decides a merge. A sync makes at most perSync rating calls past the ones the operator forced, each bounded by timeoutSecs, and at most one fracture call past the forced ones.",
+    "_modelComment": "`model` rates issues; `prModel` rates PRs, whose rating decides a merge. At most `asks` ratings past the ones the operator forced wait in the queue at once, each call bounded by timeoutSecs; a sync makes at most one fracture call past the forced ones.",
     "model": "sonnet",
     "prModel": "opus",
     "timeoutSecs": 300,
-    "perSync": 4,
+    "asks": 4,
     "bodyChars": 6000,
     "diffChars": 20000,
     "instructions": [

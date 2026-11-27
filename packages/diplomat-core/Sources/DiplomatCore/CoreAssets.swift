@@ -324,7 +324,7 @@ public enum CoreAssets {
             public let model: String
             public let prModel: String
             public let timeoutSecs: Double
-            public let perSync: Int
+            public let asks: Int
             public let bodyChars: Int
             public let diffChars: Int
             public let instructions: [String]

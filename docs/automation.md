@@ -104,8 +104,9 @@ Linux; `DIPLOMAT_APIWATCH_SECS`, floor 5s).
 are level-triggered over everything GitHub currently owes, so one poll of a busy
 day would otherwise dispatch every pending unit in a single pass - a terminal
 window and an agent session per conflicted PR and per owed review, all at the
-same moment. The cap is the *machine's*, not a monitor's: it spans every monitor
-and the work a sweep queues, and it counts
+same moment. The cap is the *machine's*, not a monitor's: it spans every monitor,
+the work a sweep queues and the [Pipeline's ratings](pipeline.md#ratings), each a headless
+`claude -p` job holding a bay until it returns, and it counts
 agents that are really running (`ps`, so it survives an applet restart) rather than
 a tally that can drift. The agent a wizard press opens on the spot is outside it
 and is never refused; what a press leaves in the queue instead - the reviews of a
@@ -252,7 +253,8 @@ task will come in under, at the confidence you pick. At the default 95%, roughly
 auto-task in twenty may still overrun what it was gated on.
 
 **Two currencies, because there are two ways an agent is paid for.** Which one
-applies follows from the [runner](settings.md#agent-runner) a spawn uses, and the two never
+applies follows from the [runner](settings.md#agent-runner) a spawn uses (a
+[Pipeline rating](pipeline.md#ratings) is always Claude Code's), and the two never
 substitute for each other - a Hermes task held against a Claude window is gated on a
 limit it never touches, and a machine not logged into Claude Code at all would have
 no gate whatsoever.
@@ -313,8 +315,9 @@ Two failure directions, both deliberate:
   priced like the rest of the queue, because what starting it costs is the same
   whoever wanted it.
 
-The feed carries one `no-budget` line per episode, quoting which window is short and
-against what, and another when the next episode begins - not one per PR per poll.
+The feed carries one `no-budget` line per episode in each currency, quoting which
+window is short and against what, and another when the next episode begins - not
+one per PR per poll.
 
 The queue is a view of what the monitors would re-offer, not a second copy of
 their state: it is rebuilt from live GitHub evidence on every 3-minute poll, so a
