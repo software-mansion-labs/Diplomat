@@ -6,8 +6,8 @@ import Foundation
 // open PRs, is rated for risk and complexity, and a low/low one goes down the fast track:
 // issue -> fix PR -> the PR rated on its own -> reviewed until clean -> rated again at that
 // head -> merged with no human review. Anything else is left to a human. The state is
-// `PipelineLog.dir`, the ratings included, the trackers' fast-track and split labels, and
-// Diplomat's clean-marker reviews. The Linux front-end reaches `PipelineTick` through `diplomat-core
+// `PipelineLog.dir`, the ratings included, the trackers' `diplomat:` labels, and Diplomat's
+// clean-marker reviews. The Linux front-end reaches `PipelineTick` through `diplomat-core
 // pipeline-tick`, never by reimplementing it.
 
 public enum PipelineLevel: String, Codable, CaseIterable, Comparable, Sendable {

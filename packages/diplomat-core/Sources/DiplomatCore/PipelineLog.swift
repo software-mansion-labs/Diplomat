@@ -195,8 +195,8 @@ struct PipelineParts: Codable, Equatable {
     var sent: Bool?
 }
 
-/// An item's ratings, rating labels or splits failed in a row: the next is tried at sync `after`, 1, 2,
-/// 4 ... syncs on, and a day after `at` at the latest.
+/// An item's ratings, rating labels or splits failed in a row: the next is tried at sync
+/// `after`, 1, 2, 4 ... syncs on, and a day after `at` at the latest.
 struct PipelineRetry: Codable, Equatable {
     var failures: Int
     var after: Int

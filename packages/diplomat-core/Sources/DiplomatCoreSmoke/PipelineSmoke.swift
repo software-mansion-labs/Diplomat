@@ -6045,6 +6045,12 @@ private func pipelineMirror(base: URL, root: PipelineSettings.Root, team: Pipeli
     (bothOn.mirrorGitHub, bothOn.mirrorLinear, bothOn.mirrorScope) = (true, true, .all)
     let lt = sync(oneOff, bothOn, dir("live-tracker"), later(10), mirror: nil)
     check(Set(labelled(lt).keys) == ["ENG-1", "ENG-8", "ENG-9"], "GitHub's mirror switched off live: \(labelled(lt))")
+    PipelineControl(enabled: true, rate: true, mirrorGitHub: false, mirrorLinear: false, mirrorScope: .all,
+                    fix: false, fastTrack: true, merge: false, fracture: false).save(in: dir("live-tracker"))
+    let bothOff = sync(oneOff, bothOn, dir("live-tracker"), later(15), mirror: nil)
+    check(labelled(bothOff).isEmpty
+          && bothOff.result.notices.contains("Mirror is switched off, so this sync took no mirror step past that"),
+          "both mirrors switched off live: \(labelled(bothOff)) \(bothOff.result.notices)")
 
     // Labels raise a kept rating and never lower it, mirrored or not.
     let raisedTo = only([1])
