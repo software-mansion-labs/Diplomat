@@ -32,10 +32,11 @@ LAB = LocalRepo("group/sub", "r", "/src/lab", host="gitlab.example.com")
 ISSUE = "https://github.com/o/r/issues/12"
 PR = "https://github.com/o/r/pull/7"
 LINEAR = "https://linear.app/acme/issue/ENG-12/a-thing"
-SWITCHES = ("pipeline_enabled", "pipeline_rate", "pipeline_fix", "pipeline_fast_track",
-            "pipeline_merge", "pipeline_fracture")
-KEYS = ("pipelineEnabled", "pipelineRate", "pipelineFix", "pipelineFastTrack",
-        "pipelineMerge", "pipelineFracture")
+SWITCHES = ("pipeline_enabled", "pipeline_rate", "pipeline_mirror_github",
+            "pipeline_mirror_linear", "pipeline_fix", "pipeline_fast_track", "pipeline_merge",
+            "pipeline_fracture")
+KEYS = ("pipelineEnabled", "pipelineRate", "pipelineMirrorGitHub", "pipelineMirrorLinear",
+        "pipelineFix", "pipelineFastTrack", "pipelineMerge", "pipelineFracture")
 
 
 def _item(url: str = ISSUE, **fields) -> dict:
@@ -107,6 +108,7 @@ def test_every_pipeline_setting_defaults_off():
     st = Store()
     assert [getattr(st, name) for name in SWITCHES] == [False] * len(SWITCHES)
     assert st.pipeline_linear_teams_raw == ""
+    assert st.pipeline_mirror_scope == "prs"
 
 
 def test_the_pipeline_settings_persist_under_their_keys():
@@ -114,18 +116,33 @@ def test_the_pipeline_settings_persist_under_their_keys():
     for name in SWITCHES:
         setattr(st, name, True)
     st.pipeline_linear_teams_raw = "ENG=o/r"
+    st.pipeline_mirror_scope = "mine"
     raw = app_settings()
     assert [raw.value(k, False, bool) for k in KEYS] == [True] * len(KEYS)
     assert raw.value("pipelineLinearTeams", "", str) == "ENG=o/r"
+    assert raw.value("pipelineMirrorScope", "", str) == "mine"
     again = Store()
     assert [getattr(again, name) for name in SWITCHES] == [True] * len(SWITCHES)
     assert again.pipeline_linear_teams_raw == "ENG=o/r"
+    assert again.pipeline_mirror_scope == "mine"
+
+
+@pytest.mark.parametrize("stored", ["bogus", "", "PRS", "Mine"])
+def test_a_mirror_scope_the_core_has_no_case_for_reads_as_my_prs(stored):
+    """``PipelineMirrorScope`` decodes its raw values exactly, and a settings JSON it cannot
+    decode is no sync at all."""
+    app_settings().setValue("pipelineMirrorScope", stored)
+    st = Store()
+    assert st.pipeline_mirror_scope == "prs"
+    assert st.pipeline_settings_payload()["mirrorScope"] == "prs"
 
 
 def test_a_sync_is_handed_the_github_roots_the_teams_and_the_switches(pipe, monkeypatch):
     monkeypatch.setattr(review, "repo_roots", lambda: [ROOT, LAB])
     monkeypatch.setattr(Store, "run_pipeline_sync_async", lambda self: None)
     pipe.pipeline_linear_teams_raw = "eng = o/r; OPS=o/other, nonsense"
+    pipe.pipeline_mirror_linear = True
+    pipe.pipeline_mirror_scope = "all"
     pipe.pipeline_force_now("rate", ISSUE)
     pipe.pipeline_force_now("rate", PR)
     pipe.pipeline_force_now("fracture", ISSUE)
@@ -135,7 +152,8 @@ def test_a_sync_is_handed_the_github_roots_the_teams_and_the_switches(pipe, monk
     assert pipe.pipeline_settings_payload() == {
         "roots": [{"owner": "o", "repo": "r", "path": "/src/r", "me": "alice"}],
         "linearTeams": [{"key": "ENG", "repo": "o/r"}, {"key": "OPS", "repo": "o/other"}],
-        "rate": False, "fix": True, "fastTrack": True, "merge": False, "fracture": False,
+        "rate": False, "mirrorGitHub": False, "mirrorLinear": True, "mirrorScope": "all",
+        "fix": True, "fastTrack": True, "merge": False, "fracture": False,
         "force": {"rate": [ISSUE, PR], "fracture": [ISSUE], "takeover": [ISSUE, PR],
                   "revoke": [LINEAR]}, "queued": [],
     }
@@ -1088,6 +1106,16 @@ def test_a_syncs_deadline_grows_with_what_it_may_do(monkeypatch):
         pipeline.tick_timeout({}) + 3 * 6 * 65)
 
 
+def test_a_syncs_deadline_holds_the_labels_a_mirror_writes():
+    """``labels.mirrorPerSync`` kept ratings past those answered, each a re-read and, for
+    each of its two labels, a create, an add and two removals."""
+    assert pipeline.tunables()["labels"]["mirrorPerSync"] == 10
+    for mirror in ("mirrorGitHub", "mirrorLinear"):
+        assert pipeline.tick_timeout({mirror: True}) == pipeline.tick_timeout({}) + 10 * 9 * 65
+    assert pipeline.tick_timeout({"mirrorGitHub": False, "mirrorLinear": False}) == (
+        pipeline.tick_timeout({}))
+
+
 def test_a_syncs_deadline_fits_a_capped_roots_whole_read():
     """A root read whole at ``githubMaxItems`` open issues and as many open PRs, every page
     cut to ``githubPage.least`` by timeouts: 300 / 3 pages of each, the first two in one
@@ -1302,12 +1330,16 @@ def _control() -> dict:
 def test_each_switch_is_written_where_a_running_sync_reads_it(pipe):
     """``control.json``: the core reads it before each write, so a switch turned off
     stops the sync already running."""
-    assert _control() == {"enabled": True, "rate": False, "fix": True, "fastTrack": True,
-                          "merge": False, "fracture": False}
+    assert _control() == {"enabled": True, "rate": False, "mirrorGitHub": False,
+                          "mirrorLinear": False, "mirrorScope": "prs", "fix": True,
+                          "fastTrack": True, "merge": False, "fracture": False}
     for name, key in [("pipeline_merge", "merge"), ("pipeline_fracture", "fracture"),
-                      ("pipeline_rate", "rate")]:
+                      ("pipeline_rate", "rate"), ("pipeline_mirror_github", "mirrorGitHub"),
+                      ("pipeline_mirror_linear", "mirrorLinear")]:
         setattr(pipe, name, True)
         assert _control()[key] is True
+    pipe.pipeline_mirror_scope = "mine"
+    assert _control()["mirrorScope"] == "mine"
     pipe.pipeline_enabled = False
     assert _control()["enabled"] is False
     mode = stat.S_IMODE(os.stat(pipeline.pipeline_dir() / "control.json").st_mode)
@@ -1342,8 +1374,9 @@ def test_a_sync_writes_the_switches_before_it_starts(pipe, monkeypatch):
         _control()) or _result())
     (pipeline.pipeline_dir() / "control.json").unlink()
     pipe._pipeline_sync_once()
-    assert seen == [{"enabled": True, "rate": False, "fix": True, "fastTrack": True,
-                     "merge": False, "fracture": False}]
+    assert seen == [{"enabled": True, "rate": False, "mirrorGitHub": False, "mirrorLinear": False,
+                     "mirrorScope": "prs", "fix": True, "fastTrack": True, "merge": False,
+                     "fracture": False}]
 
 
 def test_a_headless_store_writes_the_switches_only_into_a_named_dir(pipe, tmp_path,
@@ -1364,6 +1397,45 @@ def test_an_unwritable_control_file_is_no_raise(pipe, tmp_path, monkeypatch):
     (tmp_path / "file").write_text("not a dir")
     pipe.pipeline_merge = True
     assert (tmp_path / "file").read_text() == "not a dir"
+
+
+@pytest.mark.parametrize("switches, scope", [
+    ({}, "prs"),
+    ({"mirrorScope": "all"}, "all"),
+    ({"mirrorScope": "bogus"}, "prs"),
+    ({"mirrorScope": "MINE"}, "prs"),
+    ({"mirrorScope": True}, "prs"),
+    ({"mirrorScope": ["all"]}, "prs"),
+])
+def test_the_mirror_scope_is_written_as_a_case_the_core_decodes(switches, scope):
+    """``PipelineControl.read`` takes a ``control.json`` holding every switch and a scope
+    ``PipelineMirrorScope`` has a case for, or none of it."""
+    pipeline.write_control(switches)
+    assert _control() == {"enabled": False, "rate": False, "mirrorGitHub": False,
+                          "mirrorLinear": False, "mirrorScope": scope, "fix": False,
+                          "fastTrack": False, "merge": False, "fracture": False}
+
+
+@pytest.mark.skipif(not os.environ.get("DIPLOMAT_CORE_BIN"), reason="DIPLOMAT_CORE_BIN not set")
+def test_the_real_core_takes_the_switches_written_as_its_control(pipe, monkeypatch):
+    """A mirror switched off while a sync runs stops that sync's mirroring: the core reads
+    the ``control.json`` the store wrote, where one missing a key would leave it the
+    settings it started with."""
+    monkeypatch.setattr(review, "repo_roots", lambda: [LAB])
+    monkeypatch.setattr(Store, "run_pipeline_sync_async", lambda self: None)
+    real = pipeline.tick
+
+    def switched_off(settings, started=None):
+        pipe.pipeline_mirror_github = False
+        return real(settings, started=started)
+
+    monkeypatch.setattr(pipeline, "tick", switched_off)
+    pipe.pipeline_mirror_github = True
+    pipe.pipeline_mirror_scope = "mine"
+    pipe._apply_pipeline_sync(pipe._pipeline_sync_once())
+    assert pipe.pipeline_error is None
+    assert pipe.pipeline_result["notices"] == [
+        "Mirror is switched off, so this sync took no mirror step past that"]
 
 
 def _core_that_waits(tmp_path, monkeypatch):
