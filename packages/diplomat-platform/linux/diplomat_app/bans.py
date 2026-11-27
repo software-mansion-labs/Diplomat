@@ -142,6 +142,12 @@ def _listed() -> dict | None:
     return data if isinstance(data.get("banned", []), list) else None
 
 
+def _left_unread() -> str:
+    """Why a ban or un-ban left an :func:`unreadable` file alone, before any daemon is
+    asked: one older than its own refusal writes over it."""
+    return f"{banned_path()} is unreadable, so it was left as it is"
+
+
 #: Why a gate refused work while the list is :func:`unreadable`.
 UNREADABLE = "the prompt-injection ban list could not be read"
 #: The dispatch verdict for that refusal: the job waits as a deferral does, a find
@@ -251,6 +257,8 @@ def report_comms_ban(ban: dict, *, timeout_secs: float = 10) -> Reported:
     evidence = str(ban.get("evidence") or "")
     if not _SLACK_USER_ID.match(user_id):
         return Reported(False, f"no Slack user id to ban ({user_id or 'none'})")
+    if unreadable():
+        return Reported(False, _left_unread())
     login = slack_login(user_id)
     before = {b.login.lower() for b in read()}
     reply = deviceallocator.exchange("report-injection", {
@@ -285,7 +293,7 @@ def _write_directly(login: str, handle: str, place: str, permalink: str,
     path = banned_path()
     data = _listed()
     if data is None:
-        return f"{path} is unreadable, so it was left as it is"
+        return _left_unread()
     data.setdefault("banned", [])
     at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     entry = {"login": login, "reason": "prompt injection", "pr": permalink or None,
@@ -317,6 +325,8 @@ def unban(login: str, *, timeout_secs: float = 5) -> Reported:
     something; directly, with that line, only when no daemon is reachable."""
     from . import deviceallocator
 
+    if unreadable():
+        return Reported(False, _left_unread())
     reply = deviceallocator.exchange("unban", {"login": login}, timeout_secs=timeout_secs)
     if reply == deviceallocator.UNREACHABLE:
         return Reported(False, _unban_directly(login))
@@ -331,7 +341,7 @@ def _unban_directly(login: str) -> str | None:
     path = banned_path()
     data = _listed()
     if data is None:
-        return f"{path} is unreadable, so it was left as it is"
+        return _left_unread()
     listed = data.get("banned", [])
     low = login.lower()
     kept = [b for b in listed

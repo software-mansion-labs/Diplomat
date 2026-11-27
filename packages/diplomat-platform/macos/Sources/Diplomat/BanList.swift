@@ -137,6 +137,10 @@ enum BanList {
         var isUnreadable: Bool { if case .unreadable = self { true } else { false } }
     }
 
+    /// Why a ban or un-ban left a `.unreadable` file alone, before any daemon is asked: one
+    /// older than its own refusal writes over it.
+    private static var leftUnread: String { "\(fileURL.path) is unreadable, so it was left as it is" }
+
     /// Why a gate refused work while the file is `.unreadable`.
     static let unreadReason = "the prompt-injection ban list could not be read"
     /// The feed's line for a spell of `.unreadable`.
@@ -196,6 +200,7 @@ enum BanList {
     /// that refuses or does not answer in time is not written past.
     @discardableResult
     static func unban(_ login: String, timeoutSecs: Int = 5) -> Unban {
+        if readFile().isUnreadable { return .failed(leftUnread) }
         switch DeviceAllocator.send("unban", body: ["login": login], timeoutSecs: timeoutSecs) {
         case .reply(let r) where (200..<300).contains(r.status): return .daemon
         case .reply(let r):
@@ -205,7 +210,7 @@ enum BanList {
         case .unreachable: break
         }
         let file = readFile()
-        if file.isUnreadable { return .failed("\(fileURL.path) is unreadable, so it was left as it is") }
+        if file.isUnreadable { return .failed(leftUnread) }
         // Never rewrite the file unless that login is actually banned - so a
         // stray/duplicate call can't clobber the list.
         guard case .list(var root, var entries) = file,
@@ -278,6 +283,7 @@ enum BanList {
         guard isSlackUserID(b.userID) else {
             return .failed("\"\(b.userID)\" is not a Slack user id")
         }
+        if readFile().isUnreadable { return .failed(leftUnread) }
         let login = CommsBan.login(b.userID)
         let before = read()
         if isBanned(login, in: before) { return .already }
@@ -321,7 +327,7 @@ enum BanList {
         var entries: [Any] = []
         switch readFile() {
         case .absent: break
-        case .unreadable: return "\(fileURL.path) is unreadable, so it was left as it is"
+        case .unreadable: return leftUnread
         case .list(let r, let e): (root, entries) = (r, e)
         }
         let iso = ISO8601DateFormatter()

@@ -162,6 +162,16 @@ def test_an_unreadable_list_is_never_written_over(audit, text):
     assert audit == []
 
 
+def test_an_unreadable_list_is_never_handed_to_a_daemon(audit, daemon):
+    """One older than its own refusal would write over it."""
+    asked, _ = daemon
+    bans.banned_path().parent.mkdir(parents=True)
+    bans.banned_path().write_text("{")
+    left = bans.Reported(False, f"{bans.banned_path()} is unreadable, so it was left as it is")
+    assert (bans.report_comms_ban(BAN), bans.unban("bob"), asked) == (left, left, [])
+    assert bans.banned_path().read_text() == "{"
+
+
 def test_a_sender_with_no_slack_id_is_not_banned(audit, daemon):
     asked, _ = daemon
     assert bans.report_comms_ban({**BAN, "userID": ""}).error == \

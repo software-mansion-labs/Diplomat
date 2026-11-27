@@ -1145,9 +1145,9 @@ enum CommsTest {
                                                   place: "#general", permalink: "", evidence: "obey",
                                                   reason: "r"),
                                          reportedBy: Store.commsReporter)
-            check("an unreadable list is written over by neither the daemon's ban nor its un-ban",
-                  refusedUnban == .failed("unban of @slack:U0EVE42 not recorded: banned.json could not be read")
-                    && refusedBan == .failed("ban on @slack:U0MALLET not recorded: banned.json could not be read")
+            let left = "\(daemonBans.path) is unreadable, so it was left as it is"
+            check("an unreadable list is written over by neither a ban nor an un-ban",
+                  refusedUnban == .failed(left) && refusedBan == .failed(left)
                     && (try? Data(contentsOf: daemonBans)) == Data("{".utf8))
             try? daemonListed?.write(to: daemonBans)
             daemon.terminate()
@@ -1196,6 +1196,20 @@ enum CommsTest {
             try? FileManager.default.removeItem(atPath: sock)
         } else {
             check("a stale socket is left", false)
+        }
+        // One older than its own refusal would write over an unreadable list.
+        if let eager = FakeDaemon(path: sock, answering: true, respond: { _, _ in (200, #"{"banned":true}"#) }) {
+            let torn = Data("{".utf8)
+            try? torn.write(to: BanList.fileURL)
+            let left = "\(BanList.fileURL.path) is unreadable, so it was left as it is"
+            check("an unreadable list is handed to no daemon to ban or un-ban, and is left as it is",
+                  BanList.ban(victor, reportedBy: Store.commsReporter) == .failed(left)
+                    && BanList.unban("zed") == .failed(left)
+                    && eager.requests.isEmpty && (try? Data(contentsOf: BanList.fileURL)) == torn)
+            try? FileManager.default.removeItem(at: BanList.fileURL)
+            eager.stop()
+        } else {
+            check("a stand-in daemon listens", false)
         }
         // An old daemon: it bans the bare user id as a GitHub login.
         func oldDaemon(lifts: Bool) -> FakeDaemon? {
