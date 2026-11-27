@@ -131,7 +131,8 @@ def test_the_assets_readme_names_the_icon_and_tint_fields_linux_reads():
     readme = (core.assets_dir() / "README.md").read_text(encoding="utf-8")
     row = next(r for r in readme.splitlines() if r.startswith("| `catalog.json` |"))
     assert re.findall(r"`(\w+)` for Linux", row) == ["linuxGlyph", "colorHex"]
-    note = " ".join(readme.split())
+    assert {k for c in core.catalog() for k in c} <= set(re.findall(r"\w+", row))
+    note =" ".join(readme.split())
     assert re.findall(r"`(\w+)`\+`(\w+)` are the Linux assets", note) == [
         ("linuxGlyph", "colorHex")]
 
