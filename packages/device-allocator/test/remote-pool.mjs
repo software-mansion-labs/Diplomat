@@ -20,6 +20,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DAEMON = path.join(__dirname, '..', 'src', 'daemon.js');
 const PROVIDER = path.join(__dirname, 'lib', 'fake-provider.mjs');
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+// Set, so loading a provider never waits on the host's login shell for them.
+const ANDROID_TOOLS = { ADB_PATH: path.join(os.tmpdir(), 'da-remote-no-adb'), EMULATOR_PATH: path.join(os.tmpdir(), 'da-remote-no-emulator') };
 
 const REMOTE = [
   { key: 'pool:P16', platform: 'android', name: 'Pixel (pool)', version: '16', apiVersion: '36', format: 'phone', free: true },
@@ -59,7 +61,7 @@ function startDaemon(box, extraEnv = {}, provider = PROVIDER) {
   const child = spawn(process.execPath, [DAEMON], {
     stdio: 'ignore',
     env: {
-      ...process.env, DA_BASE_DIR: box.dir, DA_FAKE_DEVICES: path.join(box.dir, 'fake.json'),
+      ...process.env, ...ANDROID_TOOLS, DA_BASE_DIR: box.dir, DA_FAKE_DEVICES: path.join(box.dir, 'fake.json'),
       DA_NO_SPAWN: '1', DA_BAN_DIR: path.join(box.dir, 'ban'), DIPLOMAT_CONFIG: path.join(box.dir, 'config.json'),
       FAKE_POOL_DIR: path.join(box.dir, 'pool'), ...(provider ? { DA_REMOTE_PROVIDER: provider } : {}),
       DA_ALLOC_GRACE_MS: '150', DA_REAP_INTERVAL_MS: '250', DA_POOL_INTERVAL_MS: '400',
@@ -345,7 +347,7 @@ const pass = (m) => { ok++; console.log(`  PASS ${m}`); };
     fs.writeFileSync(process.env.DIPLOMAT_CONFIG, '{}');
     out.push(remote.status());
     console.log(JSON.stringify(out));`;
-  const env = { ...process.env, DA_BASE_DIR: box.dir, DIPLOMAT_CONFIG: path.join(box.dir, 'config.json'),
+  const env = { ...process.env, ...ANDROID_TOOLS, DA_BASE_DIR: box.dir, DIPLOMAT_CONFIG: path.join(box.dir, 'config.json'),
     FAKE_POOL_DIR: path.join(box.dir, 'pool'), MISSING: path.join(box.dir, 'missing.mjs') };
   delete env.DA_FAKE_DEVICES;
   delete env.DA_REMOTE_PROVIDER;
