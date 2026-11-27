@@ -1160,8 +1160,7 @@ struct SettingsView: View {
         }
     }
 
-    /// Each GitHub root's limit, as `pipelineSettings` hands it on: a slider a dimension, its
-    /// stops low up to `PipelineRating.maxLimit`'s.
+    /// The GitHub roots `pipelineSettings` hands a sync.
     private var pipelineLimitsRow: some View {
         let roots = store.roots.filter { !$0.isGitLab }
         return SettingRow(title: "Fast-track limits",
@@ -1207,7 +1206,7 @@ struct SettingsView: View {
         }
     }
 
-    static let pipelineLimitsDetail = """
+    private static let pipelineLimitsDetail = """
         Low/low unless set. Risk stops at medium: high risk is the ground the fast track \
         never takes. A Linear team's issues go by the repo it maps to.
         """
