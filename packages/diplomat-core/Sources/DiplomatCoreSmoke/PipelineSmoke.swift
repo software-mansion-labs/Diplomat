@@ -2694,12 +2694,16 @@ private func pipelineJudged(base: URL, root: PipelineSettings.Root, team: Pipeli
           "a PR closing a Linear issue synced with #27: \(closesSynced.writes) \(stageOf(closesSynced.result, prURL(13)))")
 
     // A ban list that cannot be read holds every item, and the sync takes no step.
-    for (k, text) in [#"{"banned": [{"login": "mallory"}"#, #"{"banned": {"login": "mallory"}}"#].enumerated() {
-        try banFile(text)
+    // nil: mallory listed in a directory that cannot be searched, except by root (CI's Linux container).
+    let unreadLists: [String?] = [#"{"banned": [{"login": "mallory"}"#, #"{"banned": {"login": "mallory"}}"#]
+        + (geteuid() == 0 ? [] : [nil])
+    for (k, text) in unreadLists.enumerated() {
+        if let text { try banFile(text) } else { try ban(["mallory"]); chmod(banDir.path, 0o600) }
         let t = fixture()
         try seedRerate(dir("ban-unread-\(k)"), 13, sha("c3"), at: later(-60))
         let s = sync(t, PipelineSettings(roots: [root], linearTeams: [team], rate: true, fix: true, fastTrack: true,
                                          merge: true, fracture: true), dir("ban-unread-\(k)"), t0)
+        chmod(banDir.path, 0o700)
         let open = s.result.items.filter { ["open", "draft"].contains($0.state) }
         check(s.claude.isEmpty && s.writes.isEmpty && s.result.effects.isEmpty && !open.isEmpty
               && open.allSatisfy { $0.hold == "the prompt-injection ban list could not be read" }

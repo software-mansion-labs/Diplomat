@@ -778,8 +778,9 @@ final class Store: ObservableObject {
     /// banned.json). They receive no automated reviews, their Slack messages are not
     /// triaged, and they appear in the "Banned" list above the sessions.
     @Published var bannedAuthors: [BannedAuthor] = []
-    /// banned.json is present but unreadable, as `refreshBanList` last read it: the Pipeline
-    /// then acts on nothing, as its sync does (`PipelineTick.bannedLogins`).
+    /// banned.json cannot be read, as `refreshBanList` last found it: work naming an author
+    /// is held (`heldByBanList`), and the Pipeline acts on nothing, as its sync does
+    /// (`PipelineTick.bannedLogins`).
     @Published var banListUnreadable = false
 
     /// Each ban `refreshBanList` has seen, as login and `at`; nil until its first read,
@@ -3198,11 +3199,26 @@ final class Store: ObservableObject {
     /// (`Filters.newCommunityIssues`). So it is offered until it is dispatched, can be
     /// cancelled, and re-reads its issue when its turn comes.
     ///
+    /// While the ban list cannot be read nothing is queued and only a root with no mark
+    /// takes one, so each issue filed meanwhile is judged once it reads.
+    ///
     /// Not private: the queue self-test drives it with a fixture fetch.
     func queueCommunityIssues(_ found: [OpenIssue], root: PRRef.LocalRepo, me: String) {
+        let bans = BanList.readFile()
         let key = root.key
-        let scan = Filters.newCommunityIssues(found, since: communityIssuesSince[key], now: Date())
-        let banned = BanList.read()
+        let since = communityIssuesSince[key]
+        var marks = communityIssuesSince
+        if rootsResolved {
+            let current = Set(roots.map(\.key))
+            marks = marks.filter { current.contains($0.key) }
+        }
+        defer { communityIssuesSince = marks }
+        guard !bans.isUnreadable || since == nil else {
+            marks[key] = since
+            return
+        }
+        let scan = Filters.newCommunityIssues(found, since: since, now: Date())
+        let banned = BanList.read(bans)
         for issue in scan.fresh {
             let label = itemLabel(PRRef.itemKey(owner: root.owner, repo: root.repo,
                                                 number: issue.number, host: root.host))
@@ -3220,13 +3236,7 @@ final class Store: ObservableObject {
                 AuditLog.log("auto", "community-issue", "\(who) — fix queued")
             }
         }
-        var marks = communityIssuesSince
-        if rootsResolved {
-            let current = Set(roots.map(\.key))
-            marks = marks.filter { current.contains($0.key) }
-        }
         marks[key] = scan.since
-        communityIssuesSince = marks
         if !scan.fresh.isEmpty { refreshAudit() }
     }
 
@@ -3270,7 +3280,8 @@ final class Store: ObservableObject {
         }
         noteRootsRead(Store.reviewRequestsRead, read: read, failed: failed)
         heldKeys.formUnion(failed.map { $0.root.key })
-        let banned = BanList.read()
+        let bans = BanList.readFile()
+        let banned = BanList.read(bans)
         let now = Date()
         let prior = loadReviewReqAttempts()
         // An author outside the allowlist is dropped here rather than carried down as a
@@ -3285,10 +3296,12 @@ final class Store: ObservableObject {
         // Before dispatching, so the ledger has a queue instant to measure the
         // time-to-start against. A banned author's request is owed by GitHub's
         // reckoning but will never be dispatched, so it is left out — counting it
-        // would show a review pending forever that nothing is meant to pick up.
+        // would show a review pending forever that nothing is meant to pick up. While the
+        // list cannot be read, the last one read stands in for it.
+        let standing = bans.isUnreadable ? bannedAuthors : banned
         TelemetryLog.observeOwed(
             kind: AutofixWork.kindReviewReq, duty: "review",
-            owed: Dictionary(owed.filter { !BanList.isBanned($0.author, in: banned) }.map {
+            owed: Dictionary(owed.filter { !BanList.isBanned($0.author, in: standing) }.map {
                 (AutofixWork.ledgerKey(kind: AutofixWork.kindReviewReq,
                                        prURL: $0.url, headSha: $0.headSha), $0.number)
             }, uniquingKeysWith: { first, _ in first }))
@@ -3297,6 +3310,8 @@ final class Store: ObservableObject {
         for r in owed {
             let key = item(url: r.url, number: r.number)
             let stamp = AttemptStamp.reviewRequest(r)
+            // An unreadable list reads as empty here; the dispatch gate queues the
+            // request, held.
             let decision = ReviewReconcile.decide(
                 prior: prior[key], stamp: stamp, inFlight: await inFlight(key),
                 banned: BanList.isBanned(r.author, in: banned), now: now)
@@ -3328,7 +3343,9 @@ final class Store: ObservableObject {
         saveReviewReqAttempts(attempts)
         // Reviews still owed with no agent on them AFTER this poll — the ones a freshly
         // spawned agent didn't cover (cooling down between retries, or a spawn that failed).
-        // Excludes banned authors, which we never auto-review, and requests a run concluded.
+        // Excludes banned authors, which we never auto-review, and requests a run concluded,
+        // so it stands while the list cannot be read.
+        guard !bans.isUnreadable else { return }
         var unaddressed = 0
         for r in owed where !BanList.isBanned(r.author, in: banned) {
             let key = item(url: r.url, number: r.number)
@@ -3356,12 +3373,19 @@ final class Store: ObservableObject {
 
     /// Re-read the prompt-injection ban list (cheap local file). Publishes on change, and
     /// posts a notification for each ban not seen by an earlier read: a new login, or a
-    /// repeat offence (a new `at`).
+    /// repeat offence (a new `at`). An unreadable list leaves the last read standing, and
+    /// the feed says so once per spell.
     func refreshBanList() {
         let file = BanList.readFile()
+        if file.isUnreadable != banListUnreadable {
+            banListUnreadable = file.isUnreadable
+            if file.isUnreadable {
+                AuditLog.log("auto", "warn", BanList.unreadNote)
+                refreshAudit()
+            }
+        }
+        guard !file.isUnreadable else { return }
         let next = BanList.read(file)
-        let unreadable = if case .unreadable = file { true } else { false }
-        if unreadable != banListUnreadable { banListUnreadable = unreadable }
         let keys = next.map { "\($0.login.lowercased())@\($0.at ?? "")" }
         if let seen = bansSeen {
             for (ban, key) in zip(next, keys)
@@ -4190,7 +4214,7 @@ final class Store: ObservableObject {
         // never draw it, since the allowlist answers for the review monitor's own
         // finds and an ask is not one (`AgentJob.counter`).
         case .inFlight, .atCapacity, .unaffordable, .lowDisk, .failed, .notAllowed,
-             .offering, .networkRefused, .networkDown: break
+             .offering, .networkRefused, .networkDown, .banListUnreadable: break
         }
     }
 
@@ -4260,8 +4284,9 @@ final class Store: ObservableObject {
 
     /// The queued tasks the drain may start, in the operator's order — everything
     /// whose monitor is still on, plus the reviews the operator asked for, which no
-    /// monitor speaks for either way. Empty while `queueAutoRun` is off, including
-    /// the asks: that switch is over the queue itself, not over what fills it.
+    /// monitor speaks for either way, less what `isHeld` holds. Empty while
+    /// `queueAutoRun` is off, including the asks: that switch is over the queue
+    /// itself, not over what fills it.
     ///
     /// Not private: this is the seam the queue self-test drives. Asserting on the
     /// list the drain walks is how the "a paused monitor's work is held, not run"
@@ -4274,11 +4299,18 @@ final class Store: ObservableObject {
 
     /// Paused, or a pipeline ask still stale (`pipelineStale`) or held by an unreadable ban
     /// list (`banListUnreadable`), unless a Slack ping took it as its ask: then it is
-    /// asked-for work, which switching a monitor off never stops (`isPaused`).
+    /// asked-for work, which switching a monitor off never stops (`isPaused`). Work naming
+    /// an author waits while that list cannot be read, whoever asked for it
+    /// (`heldByBanList`).
     func isHeld(_ task: QueuedAgentTask, owned: Set<String>? = nil) -> Bool {
-        (isPaused(task.job.counter)
-            || (task.job.counter == .pipeline && (banListUnreadable || pipelineStale.contains(task.id))))
-            && !(owned ?? commsOwnedKeys).contains(task.id)
+        heldByBanList(task)
+            || ((isPaused(task.job.counter)
+                || (task.job.counter == .pipeline && (banListUnreadable || pipelineStale.contains(task.id))))
+                && !(owned ?? commsOwnedKeys).contains(task.id))
+    }
+
+    func heldByBanList(_ task: QueuedAgentTask) -> Bool {
+        banListUnreadable && !(task.job.authorLogin ?? "").isEmpty
     }
 
     /// Dispatch one queued task past the capacity check its caller already made, and
@@ -4399,6 +4431,12 @@ final class Store: ObservableObject {
     /// in both.
     func executeQueuedTask(_ id: String) async {
         guard let entry = queuedTasks.first(where: { $0.id == id }) else { return }
+        // Refused before it leaves the queue, where it would be missing until the next poll.
+        refreshBanList()
+        if heldByBanList(entry) {
+            error = "\(entry.job.label): \(BanList.unreadReason)."
+            return
+        }
         switch await runQueuedTask(entry, forced: true) {
         case .spawned:
             AuditLog.log("panel", "queue-run",
@@ -4418,6 +4456,8 @@ final class Store: ObservableObject {
         case .banned:
             let who = BanList.refusedWho(entry.job.authorLogin ?? "")
             error = "\(entry.job.label): \(who) is banned (\(Store.banRemedy(entry.job)))."
+        case .banListUnreadable:
+            error = "\(entry.job.label): \(BanList.unreadReason)."
         case .notAllowed:
             error = "\(entry.job.label): the PR's author is not on the auto-review list "
                   + "(add them, or review it from the wizard)."
@@ -4568,6 +4608,9 @@ final class Store: ObservableObject {
         case spawned(terminal: String)
         case inFlight
         case banned
+        /// The ban list could not be read, so the job waits as a deferral does: a find is
+        /// queued again and an ask stays.
+        case banListUnreadable
         case notAllowed
         case atCapacity
         case unaffordable
@@ -4621,7 +4664,7 @@ final class Store: ObservableObject {
     /// is filling, and skips paused work by construction) and "execute now" (where
     /// the operator is overriding both holds deliberately). It skips the measurement —
     /// not just its verdict — so neither pays for a second `ps` scan, and so a forced
-    /// run cannot re-queue itself.
+    /// run cannot re-queue itself for want of a slot.
     ///
     /// `forced` is only the second of those, and it also overrides the budget and the
     /// disk floor. The drain runs the machine's own automatic work, and work that could
@@ -4642,7 +4685,11 @@ final class Store: ObservableObject {
             resolvingPRs.insert(item)
         }
         defer { if let item = job.item { resolvingPRs.remove(item) } }
-        let banned = job.authorLogin.map { BanList.isBanned($0, in: BanList.read()) } ?? false
+        // An unreadable list could be banning anyone.
+        let bans = BanList.readFile()
+        let banned = job.authorLogin.map {
+            !$0.isEmpty && (bans.isUnreadable || BanList.isBanned($0, in: BanList.read(bans)))
+        } ?? false
         // The allowlist speaks for the review monitor's work and nothing else, so the
         // counter — which is what makes a job that monitor's — is the whole test. A
         // sweep, a wizard press and both reconcilers over my own PRs carry no counter or
@@ -4719,6 +4766,10 @@ final class Store: ObservableObject {
             stageQueued(job, attemptNumber: attemptNumber)
             return .unaffordable
         case .banned:
+            if bans.isUnreadable {
+                stageQueued(job, attemptNumber: attemptNumber)
+                return .banListUnreadable
+            }
             let who = BanList.refusedWho(job.authorLogin ?? "")
             AuditLog.log(source.rawValue, "ban-skip",
                          "\(job.label) — \(who) is banned (\(Store.banRemedy(job)))")
@@ -5201,8 +5252,8 @@ final class Store: ObservableObject {
             self.error = "Resolve \(label): an agent is already on this PR."
         case .networkRefused(let why), .networkDown(let why):
             self.error = "Resolve \(label) was not offered: \(why)."
-        case .spawned, .offered, .offering, .banned, .atCapacity, .unaffordable, .lowDisk,
-             .notAllowed:
+        case .spawned, .offered, .offering, .banned, .banListUnreadable, .atCapacity,
+             .unaffordable, .lowDisk, .notAllowed:
             // `.atCapacity`, `.unaffordable` and `.lowDisk` are answers only a monitor
             // gets - none of the automatic-task cap, the spending budget and the disk
             // floor applies to a click - and `.notAllowed` speaks for the review

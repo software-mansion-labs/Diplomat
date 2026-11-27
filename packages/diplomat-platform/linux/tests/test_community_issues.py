@@ -13,10 +13,14 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from test_autofix import _spawn_recorder, fake_probes, store  # noqa: F401 — fixture
 
+from diplomat_app import bans
 from diplomat_runtime import activity, core
 from diplomat_runtime.models import Filters, OpenIssue
 
 pytest.importorskip("PySide6")
+
+#: Before ``watched`` stubs it.
+_REAL_READ = bans.read
 
 NOW = datetime.now(timezone.utc)
 
@@ -145,6 +149,39 @@ def test_a_banned_authors_issue_is_not_queued(watched, monkeypatch):
 
     assert watched.requested_work == []
     assert _feed("ban-skip") == ["Issue #7 by @mallory - author is banned, not queued"]
+
+
+def test_an_unreadable_ban_list_queues_no_issue_and_keeps_the_mark(watched, monkeypatch):
+    """Each issue filed meanwhile is judged once the list reads."""
+    monkeypatch.setattr(bans, "read", _REAL_READ)
+    listed = '{"banned": [{"login": "mallory"}]}'
+    bans.banned_path().parent.mkdir(parents=True)
+    bans.banned_path().write_text(listed)
+    watched._autofix_poll_once()
+    watched.found += [_filed(7, author="mallory"), _filed(8, author="carol", minutes=2)]
+    bans.banned_path().write_text("{")
+    watched._autofix_poll_once()
+    assert (watched.requested_work, _feed("ban-skip"), _feed("community-issue")) == ([], [], [])
+
+    bans.banned_path().write_text(listed)
+    watched._autofix_poll_once()
+    assert [a.key for a in watched.requested_work] == [f"issues:{PRIMARY}#8"]
+    assert _feed("ban-skip") == ["Issue #7 by @mallory - author is banned, not queued"]
+
+
+def test_a_root_first_read_while_the_ban_list_is_unreadable_takes_its_mark(watched, monkeypatch):
+    """So an issue filed after that scan is judged once the list reads."""
+    monkeypatch.setattr(bans, "read", _REAL_READ)
+    bans.banned_path().parent.mkdir(parents=True)
+    bans.banned_path().write_text("{")
+    watched.found[:] = [_filed(7)]
+    watched._autofix_poll_once()
+    watched.found.append(_filed(8, minutes=2))
+    watched._autofix_poll_once()
+    assert watched.requested_work == []
+    bans.banned_path().unlink()
+    watched._autofix_poll_once()
+    assert [a.key for a in watched.requested_work] == [f"issues:{PRIMARY}#8"]
 
 
 def test_a_failed_read_is_logged_and_keeps_the_mark(watched, monkeypatch):
