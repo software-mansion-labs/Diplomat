@@ -120,8 +120,8 @@ enum AppLogTest {
         let short = lines().dropFirst(beforeShort).first { $0.contains("main thread blocked") }
         check("a short hang names the work that was in flight while it was late, ended since",
               short?.contains("; in flight: shortProbe ") == true, short ?? "no line")
-        // Other work on the machine can hold the spin to part of a core, and the hang is
-        // then rightly partly busy. Not asked of the sampled hang: `sample` takes its share too.
+        // A loaded machine can hold the spin to part of a core, which HangWatch rightly logs
+        // as less than busy. Not asked of the sampled hang: `sample` takes from it too.
         let computing = "and tells it was the main thread computing"
         if shortShare >= 0.9 {
             check(computing, short?.contains("(busy on the main thread)") == true, short ?? "no line")
@@ -271,11 +271,11 @@ enum AppLogTest {
     @discardableResult
     static func spinMain(_ secs: Double) -> Double {
         let cpu = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
-        let end = AppLog.uptime + secs
+        let start = AppLog.uptime
         var x = 0.0
-        while AppLog.uptime < end { x += sin(x) }
+        while AppLog.uptime < start + secs { x += sin(x) }
         if x.isNaN { print(x) }
-        return Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - cpu) / 1e9 / secs
+        return Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - cpu) / 1e9 / (AppLog.uptime - start)
     }
 
     /// Keeps the main thread computing until `done` (asked every 50 ms) or `atMost`
