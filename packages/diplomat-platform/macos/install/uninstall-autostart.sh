@@ -10,7 +10,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 rm -f "$HOME/Library/LaunchAgents/$LABEL.plist"
 . "$HERE/agent-launcher.sh"
-rm -f "$LAUNCHER"
+rm -rf "$LAUNCHER"
 rmdir "$(dirname "$LAUNCHER")" 2>/dev/null || true
 pkill -x Diplomat 2>/dev/null || true
 echo "Autostart removed and app stopped. (The bundle stays beside this checkout's macOS package; delete it, or the checkout, to fully uninstall.)"

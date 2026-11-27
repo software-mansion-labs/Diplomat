@@ -175,7 +175,9 @@ check "…before it writes an agent that would start nothing" test ! -e "$AGENTS
 check "install-watchdog.sh runs again once it can be" run install-watchdog.sh
 
 echo "installers: uninstall-autostart.sh"
-check "runs" run uninstall-autostart.sh
+/bin/rm -rf "$LAUNCHER" && mkdir "$LAUNCHER" && : > "$SCRATCH/calls"
+check "runs, a directory where the launcher belongs" run uninstall-autostart.sh
+check "…to the end, stopping the app" grep -qx "pkill -x Diplomat" "$SCRATCH/calls"
 check "…and removes the agents and the launcher" \
   bash -c '[ ! -e "$1" ] && [ ! -L "$2" ] && [ ! -e "$(dirname "$2")" ]' _ "$AGENTS/com.ignacy.diplomat.plist" "$LAUNCHER"
 echo "installers: all passed"
