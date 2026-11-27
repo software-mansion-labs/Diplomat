@@ -125,6 +125,10 @@ enum SpawnScriptTest {
                                               tmux: "/opt/homebrew/bin/tmux")
         check("it opens a tmux session by name on the staged file",
               cmd.contains("new-session -s 'diplomat-abc'") && cmd.contains("'\(launcher)'"))
+        // A bare `tmux` inside the pane reaches whichever server `$TMUX` names, so an
+        // agent's `kill-server` there must reach only this run's.
+        check("…on a server of its own, labelled with the session's name",
+              cmd.hasPrefix("'/opt/homebrew/bin/tmux' -L 'diplomat-abc' new-session "))
         // Not "$SHELL": the staged file invokes an interactive login shell itself, and on
         // a box whose zshrc execs tmux, one outside that one nests a second server.
         check("…under /bin/sh, not the login shell",
@@ -141,8 +145,7 @@ enum SpawnScriptTest {
         check("the staged file titles its window after the session",
               staged.contains("set-option set-titles on")
                 && staged.contains("set-option set-titles-string 'diplomat-abc'"))
-        // Without `-g`: this is the operator's own tmux server, and a global set would
-        // retitle every session they have open.
+        // Without `-g`, which would retitle every session on the server rather than this one.
         check("…for its own session and no other", !staged.contains(" -g "))
         // Titled first, or the window wears the old name for the whole life of the agent
         // being looked for.

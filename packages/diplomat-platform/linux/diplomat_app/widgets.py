@@ -1537,6 +1537,7 @@ class SettingRow(QWidget):
         # Plain, like the detail below: a summary can quote a path or a daemon's words.
         self._summary = QLabel(summary or "")
         self._summary.setTextFormat(Qt.TextFormat.PlainText)
+        self._summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._summary.setWordWrap(True)
         self._summary.setStyleSheet(muted(10))
         self._summary.setVisible(bool(summary))

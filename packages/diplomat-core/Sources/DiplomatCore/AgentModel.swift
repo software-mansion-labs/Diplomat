@@ -503,11 +503,11 @@ public enum AgentModel {
     /// A path named by `key` in the environment, `~` expanded; nil when unset or empty.
     private static func envPath(_ key: String) -> URL? {
         guard let env = ProcessInfo.processInfo.environment[key], !env.isEmpty else { return nil }
-        return URL(fileURLWithPath: (env as NSString).expandingTildeInPath)
+        return URL(fileURLWithPath: PrivateFiles.expandingTilde(env))
     }
 
     private static func homePath(_ relative: String) -> URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(relative)
+        PrivateFiles.home.appendingPathComponent(relative)
     }
 
     /// One XDG base directory, resolved as OpenCode resolves it: the variable's value

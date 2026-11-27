@@ -1308,6 +1308,42 @@ do {
 }
 print("opencode 2.x service assertions passed")
 
+section("~ is $HOME")
+// As the Linux front-end's `Path.home()` reads it; Foundation's home is the account's.
+do {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent("diplomat-smoke-home-\(UUID().uuidString)",
+                                                            isDirectory: true)
+    defer { try? fm.removeItem(at: home) }
+    let names = ["HOME", "SHELL", "ENV", "XDG_STATE_HOME", "DIPLOMAT_COMMS_DIR", "DIPLOMAT_AGENTS_DIR",
+                 "DIPLOMAT_CONFIG"]
+    let saved = names.map { ($0, ProcessInfo.processInfo.environment[$0]) }
+    defer { for (name, value) in saved { if let value { setenv(name, value, 1) } else { unsetenv(name) } } }
+    for name in names { unsetenv(name) }
+    setenv("HOME", home.path, 1)
+    check(CommsLog.dir.path == "\(home.path)/.diplomat/comms", "the Comms log: \(CommsLog.dir.path)")
+    check(AgentRegistry.agentsDir().path == "\(home.path)/.diplomat/agents",
+          "the run book: \(AgentRegistry.agentsDir().path)")
+    try fm.createDirectory(at: home.appendingPathComponent(".diplomat"), withIntermediateDirectories: true)
+    // A shell with no rc, so no XDG_STATE_HOME.
+    let shell = home.appendingPathComponent("sh")
+    fm.createFile(atPath: shell.path, contents: Data("#!/bin/sh\nexec /bin/sh \"$@\"\n".utf8),
+                  attributes: [.posixPermissions: 0o755])
+    setenv("SHELL", shell.path, 1)
+    let service = OpenCodeCLI.serviceFile(now: Date().addingTimeInterval(200_000)).path
+    check(service == "\(home.path)/.local/state/opencode/service.json", "OpenCode's service file: \(service)")
+    func pin(_ model: String, in file: URL) throws {
+        try Data(#"{"agentRunner": "opencode", "agentModel": "\#(model)"}"#.utf8).write(to: file)
+    }
+    try pin("acme/home-probe", in: home.appendingPathComponent(".diplomat/config.json"))
+    let pinned = AgentModel.detectedAfresh()
+    check(pinned == "Home Probe", "the settings file: \(pinned)")
+    setenv("DIPLOMAT_CONFIG", "~/moved.json", 1)
+    try pin("acme/moved-probe", in: home.appendingPathComponent("moved.json"))
+    let moved = AgentModel.detectedAfresh()
+    check(moved == "Moved Probe", "a ~ in an override: \(moved)")
+}
+
 section("hermes sessions")
 // The same two questions, answered from Hermes' own SQLite store instead of a port —
 // and the same cases `tests/test_hermes_store.py` pins. A turn is over only when the
