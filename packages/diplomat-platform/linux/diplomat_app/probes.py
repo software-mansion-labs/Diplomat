@@ -177,7 +177,7 @@ def ttys_running_an_agent(now: float) -> Observation:
 
     Which screens belong to somebody's agent, for the caller that has to ask it the
     other way round from :func:`pane_tails`: the API-error watcher reads every pane on
-    the tmux server, and what it does with a match is TYPE into it. On a pane running
+    every tmux server, and what it does with a match is TYPE into it. On a pane running
     an agent that is a user turn; on a plain shell it is a command, executed. Nothing
     on a screen can tell those two apart — a pane can be showing a banner because it
     printed one — so the process on the tty is the only thing that can.
