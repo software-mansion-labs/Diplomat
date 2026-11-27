@@ -11,6 +11,7 @@ the Python builder is wrong.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -26,7 +27,7 @@ from diplomat_runtime.prref import LocalRepo  # noqa: E402
 from diplomat_runtime.prtarget import PRTarget  # noqa: E402
 from diplomat_runtime.review import ReviewConfig  # noqa: E402
 
-from diplomat_runtime import promptcore  # noqa: E402
+from diplomat_runtime import core, promptcore  # noqa: E402
 
 GOLDEN_DIR = Path(__file__).resolve().parents[3] / "diplomat-core" / "Tests" / "fixtures" / "prompts"
 
@@ -134,3 +135,13 @@ def test_prompt_matches_golden(name: str):
     assert golden, f"empty golden {name}.expected.txt"
     prompt = GOLDEN_MODES[name]().build_prompt().encode("utf-8")
     assert prompt == golden, f"prompt {name} drifted from its golden file"
+
+
+# MARK: - The assets README
+
+
+def test_the_assets_readme_describes_the_issues_scope_issues_json_has():
+    readme = (core.assets_dir() / "README.md").read_text(encoding="utf-8")
+    row = next(r for r in readme.splitlines() if r.startswith("| `issues.json` |"))
+    assert re.findall(r"`scope\.(\w+)`", row) == list(core.issues()["scope"])
+    assert "enumeration" not in row
