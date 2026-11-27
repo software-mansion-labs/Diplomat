@@ -626,7 +626,7 @@ public enum Telemetry {
         /// they carry no tokens and sit out the spread.
         public let unattributedCount: Int
 
-        /// Oldest and newest poll sample in the whole ledger (not just the range),
+        /// Oldest and newest sample in the whole ledger (not just the range),
         /// so the screen can say how far back the data actually goes.
         public let firstSampleAt: Double?
         public let lastSampleAt: Double?
