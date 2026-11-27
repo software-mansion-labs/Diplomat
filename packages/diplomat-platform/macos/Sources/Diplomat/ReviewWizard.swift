@@ -359,13 +359,18 @@ enum AgentSpawner {
     /// found again by name — for its tty on the way in, to end it on the way out, and, by
     /// way of `ghosttyLauncher`, to raise its window at any point in between.
     ///
+    /// `-L` opens it on a server of its own, labelled with the same name. Inside the pane
+    /// `$TMUX` names the server, and a bare `tmux` takes its socket from there before
+    /// `TMUX_TMPDIR`: on the operator's server, an agent's `tmux kill-server` would take
+    /// every one of their sessions with it.
+    ///
     /// `/bin/sh` rather than the operator's login shell: the staged file is the command
     /// `shellCommand` built, which invokes `"$SHELL" -i -c` itself. Running it under the
     /// login shell too would put an interactive zsh outside that one — and on a box whose
     /// zshrc execs tmux, an interactive zsh inside tmux nests a second server.
     static func ghosttyCommand(session: String, launcher: String,
                                tmux: String = TerminalFocus.binary ?? "tmux") -> String {
-        "\(shq(tmux)) new-session -s \(shq(session)) /bin/sh \(shq(launcher))"
+        "\(shq(tmux)) -L \(shq(session)) new-session -s \(shq(session)) /bin/sh \(shq(launcher))"
     }
 
     /// What the staged file runs: the agent's command, under the two tmux options that
@@ -379,8 +384,8 @@ enum AgentSpawner {
     /// the agent is found again, so a window carrying it can be raised exactly for as long
     /// as the agent is alive (`TerminalFocus.ghosttyRaiseScript`).
     ///
-    /// Set from inside the session, so the options need no target and touch no other
-    /// session on the operator's server. `set-titles-string` is pinned to the name rather
+    /// Set from inside the session, so the options need no target, no `-L` and touch no
+    /// other session. `set-titles-string` is pinned to the name rather
     /// than left at its default, which interpolates the pane's own title: the agent
     /// rewrites that as it works, and a title that moves is not one to match on.
     static func ghosttyLauncher(command: String, session: String,
@@ -404,10 +409,11 @@ enum AgentSpawner {
     /// The tty of the pane the spawn just opened, polled because tmux takes a moment to
     /// come up inside the new window. "" when it never appears, which costs the run the
     /// head start and nothing else — the pid file lands next, and the tty comes off that.
-    private static func ghosttyPaneTTY(session: String) -> String {
+    static func ghosttyPaneTTY(session: String) -> String {
         let deadline = Date().addingTimeInterval(ghosttyPaneTimeout)
         repeat {
-            if let tty = TerminalFocus.panes().first(where: { $0.value.session == session })?.key {
+            let own = TerminalFocus.Session(name: session, server: session)
+            if let tty = TerminalFocus.panes().first(where: { $0.value.session == own })?.key {
                 return tty
             }
             usleep(100_000)

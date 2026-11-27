@@ -206,7 +206,7 @@ enum AgentProbes {
     static func ttysRunningAnAgent(procs: [Int: AgentState.ProcInfo],
                                    processes: [Int: TerminalFocus.Proc],
                                    panes: [String: TerminalFocus.Pane],
-                                   clients: [String: String]) -> Set<String> {
+                                   clients: [TerminalFocus.Session: String]) -> Set<String> {
         var out: Set<String> = []
         for (pid, info) in procs where info.isAgent && !info.tty.isEmpty {
             out.formUnion(TerminalFocus.walk(tty: info.tty, pid: pid, processes: processes,
@@ -241,7 +241,8 @@ enum AgentProbes {
     static func ttysRunningAnAgent(
         procs: Observation<[Int: AgentState.ProcInfo]>,
         processes: () -> [Int: TerminalFocus.Proc],
-        tmux: () -> (panes: [String: TerminalFocus.Pane], clients: [String: String])?
+        tmux: () -> (panes: [String: TerminalFocus.Pane],
+                     clients: [TerminalFocus.Session: String])?
     ) -> Observation<Set<String>> {
         guard let table = procs.value else { return .unavailable(procs.reason) }
         guard table.values.contains(where: { $0.isAgent && !$0.tty.isEmpty }) else {
@@ -461,7 +462,7 @@ enum AgentProbes {
                                   into tails: [String: String],
                                   processes: [Int: TerminalFocus.Proc],
                                   panes: [String: TerminalFocus.Pane],
-                                  clients: [String: String]) -> [String: String] {
+                                  clients: [TerminalFocus.Session: String]) -> [String: String] {
         var out = tails
         for a in agents where !a.tty.isEmpty && out[a.tty] == nil {
             let walk = TerminalFocus.walk(tty: a.tty, pid: a.pid, processes: processes,
