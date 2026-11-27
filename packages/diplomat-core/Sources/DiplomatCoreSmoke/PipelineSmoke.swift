@@ -5999,6 +5999,29 @@ private func pipelineMirror(base: URL, root: PipelineSettings.Root, team: Pipeli
           && part.writes.isEmpty && partRead.isEmpty && !partRetried,
           "the mirror against a pending rating, a ban, a read in part: \(pend.writes) \(pendRead) "
           + "\(stageOf(pend.result, issueURL(1))) \(taken.result.effects) \(banned.writes) \(bannedRead) \(part.writes) \(partRead)")
+    // A mirror write refused, or onto an item changed since the read, backs it off; one that
+    // lands clears that.
+    let refusedMirror = only([1])
+    refusedMirror.refuseLabels = ["1"]
+    let (rm1, _) = try untouched("mirror-refused", refusedMirror, mediumLow)
+    let rmRetried = try retried("mirror-refused")
+    refusedMirror.refuseLabels = []
+    let rmLater = (1...3).map { sync(refusedMirror, capped, dir("mirror-refused"), later(Double(5 * $0)), mirror: nil) }
+    let changed = only([1])
+    changed.onItem = { _ in changed.issues[0].assignees = ["alice"] }
+    try fm.createDirectory(at: dir("mirror-changed"), withIntermediateDirectories: true)
+    try json([issueURL(1): mediumLow]).write(to: dir("mirror-changed").appendingPathComponent("ratings.json"))
+    let ch = sync(changed, capped, dir("mirror-changed"), t0, mirror: nil)
+    let (rmCleared, chRetried) = (try !retried("mirror-refused"), try retried("mirror-changed"))
+    check(!rm1.writes.contains { $0.hasPrefix("+") } && rmRetried && rmLater.flatMap(\.writes).filter { $0.hasPrefix("+") } == ["+risk:medium #1", "+complexity:low #1"]
+          && rmCleared && ch.writes.isEmpty && chRetried,
+          "a mirror write refused, then landing, and onto a changed item: \(rm1.result.notices) \(rmLater.map(\.writes)) "
+          + "\(ch.writes) \(ch.result.notices)")
+    // Two labels of one dimension do not wear a rating: the lower one comes off.
+    let twice = only([1])
+    twice.issues[0].labels = ["risk:low", "risk:medium", "complexity:low"]
+    let (tw, _) = try untouched("worn-twice", twice, mediumLow)
+    check(tw.writes == ["-risk:low #1"], "a rating worn with a second label of its dimension: \(tw.writes)")
     // The live switches turn one tracker's mirror off.
     let oneOff = mixed()
     _ = sync(oneOff, settings, dir("live-tracker"), t0, mirror: nil)
@@ -6020,6 +6043,7 @@ private func pipelineMirror(base: URL, root: PipelineSettings.Root, team: Pipeli
     raisedTo.issues[0].labels = ["risk:low", "complexity:low"]
     let down = sync(raisedTo, PipelineSettings(roots: [root], rate: true), dir("raise"), later(5), mirror: nil)
     check(item(up.result, issueURL(1))?.rating == rating(.high, .low) && item(up.result, issueURL(1))?.ratedBy == "label"
+          && item(up.result, issueURL(1))?.why == nil
           && item(down.result, issueURL(1))?.rating == rating(.medium, .low)
           && item(down.result, issueURL(1))?.ratedBy == "local" && item(down.result, issueURL(1))?.why == "kept"
           && up.writes.isEmpty && down.writes.isEmpty && up.claude.isEmpty && down.claude.isEmpty,
