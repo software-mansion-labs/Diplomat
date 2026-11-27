@@ -112,7 +112,7 @@ function loginShellEnv(names) {
     let out = '';
     let timer;
     let done = false;
-    // The whole group: a hung rc leaves the inner shell running.
+    // The whole group: what a hung rc started outlives its shell.
     const kill = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} };
     const settle = (env) => {
       if (done) return;
@@ -120,16 +120,18 @@ function loginShellEnv(names) {
       clearTimeout(timer);
       process.off('exit', kill);
       child?.unref();
-      child?.stdout.unref();
+      child?.stdout?.unref();
       resolve(env);
     };
     try {
       child = spawn(shell, ['-l', '-c', `${shq(shell)} -i -c ${shq(probe)}`],
         { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
     } catch { return settle(null); }
+    child.on('error', () => settle(null));
     timer = setTimeout(() => { kill(); settle(null); }, LOGIN_SHELL_TIMEOUT_MS);
     process.once('exit', kill);
-    child.stdout.on('data', (d) => {
+    // No stdout when spawn ran out of descriptors: 'error' follows.
+    child.stdout?.on('data', (d) => {
       if (done) return;
       out += d;
       const said = out.split('\n').slice(0, -1).filter((l) => l.startsWith(ENV_MARK));
@@ -137,7 +139,6 @@ function loginShellEnv(names) {
         settle(Object.fromEntries(names.map((n, i) => [n, said[i].slice(ENV_MARK.length)])));
       }
     });
-    child.on('error', () => settle(null));
     child.on('close', () => settle(null));
   });
 }

@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
+import { onInterrupt } from './lib/interrupt.mjs';
 
 const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src');
 const BASE = fs.mkdtempSync(path.join(os.tmpdir(), 'da-login-shell-'));
@@ -15,6 +16,14 @@ const SDK = path.join(BASE, 'sdk');
 const HOME = path.join(BASE, 'home');
 const PROBES = path.join(BASE, 'probes.log');
 const CALLS = path.join(BASE, 'adb.log');
+const PID = path.join(BASE, 'hung.pid');
+// What the rc's leave running sits in the probe's own process group, out of reach of a
+// signal to this test's; each names BASE on its command line.
+const cleanup = () => {
+  try { execFileSync('pkill', ['-f', BASE]); } catch {}
+  fs.rmSync(BASE, { recursive: true, force: true });
+};
+onInterrupt(cleanup);
 // launchd's PATH, minus any adb the host has installed.
 const BIN = path.join(BASE, 'bin');
 fs.mkdirSync(BIN);
@@ -49,19 +58,30 @@ const HOME_RC = `export ANDROID_HOME='${SDK}'`;
 const LIST = 'return { devices: (await dev.listAndroid()).map(({ avd, serial, state }) => ({ avd, serial, state })) };';
 
 // `body`'s result and the binaries it left, from a process with launchd's environment.
-function launchd(extra, body = LIST) {
+function launchd(extra, body = LIST, { fdLimit } = {}) {
   fs.rmSync(PROBES, { force: true });
   fs.rmSync(CALLS, { force: true });
   const started = Date.now();
-  const out = execFileSync(process.execPath, ['--input-type=module', '-e', `
+  const node = [process.execPath, '--input-type=module', '-e', `
     const fs = await import('node:fs');
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const pidIn = async (f) => {
+      for (;;) {
+        const pid = fs.existsSync(f) ? fs.readFileSync(f, 'utf8').trim() : '';
+        if (pid) return pid;
+        await sleep(20);
+      }
+    };
     const dev = await import(${JSON.stringify(path.join(SRC, 'devices.js'))});
     const p = await import(${JSON.stringify(path.join(SRC, 'paths.js'))});
     const t0 = Date.now();
     const r = await (async () => { ${body} })();
     process.stdout.write(JSON.stringify({ ...r, adb: p.ADB_BIN, emulator: p.EMULATOR_BIN, ms: Date.now() - t0 }));
-  `], {
+  `];
+  const [file, args] = fdLimit
+    ? ['/bin/sh', ['-c', `ulimit -n ${fdLimit} && exec "$@"`, 'sh', ...node]]
+    : [node[0], node.slice(1)];
+  const out = execFileSync(file, args, {
     env: { HOME, PATH: BIN, DA_BASE_DIR: path.join(BASE, 'state'), ...extra },
     encoding: 'utf8', timeout: 20000,
   });
@@ -114,12 +134,10 @@ try {
 
   // An rc that reads stdin, and a job it leaves running on the probe's stdout, neither
   // delay the answer nor keep the process alive.
-  const JOB = path.join(BASE, 'job.pid');
   const job = launchd({
-    SHELL: shell('rc-job', `${HOME_RC}; read answer; [ "$1" = -i ] && { sleep 8 & echo $! > '${JOB}'; }`),
+    SHELL: shell('rc-job', `${HOME_RC}; read answer; [ "$1" = -i ] && '${BIN}/sleep' 8 &`),
     DA_LOGIN_SHELL_TIMEOUT_MS: '5000',
   });
-  try { process.kill(Number(fs.readFileSync(JOB, 'utf8'))); } catch {}
   assert.deepEqual(job.devices, BOOTED);
   assert.ok(job.wallMs < 4000, `took ${job.wallMs}ms beside an 8s rc job`);
   console.log('ok   rc reading stdin, rc job holding stdout');
@@ -139,21 +157,19 @@ try {
 
   // A hung rc: the probe gives up and its whole group goes with it. The retry hangs too,
   // without holding up its caller, and the one after it answers.
-  const PID = path.join(BASE, 'hung.pid');
   const HANG = path.join(BASE, 'hang');
-  const hungShell = shell('rc-hung', `${HOME_RC}; [ "$1" = -i ] && [ -f '${HANG}' ] && { sleep 600 & echo $! > '${PID}'; wait; }`);
+  const hungShell = shell('rc-hung', `${HOME_RC}; [ "$1" = -i ] && [ -f '${HANG}' ] && { '${BIN}/sleep' 600 & echo $! > '${PID}'; wait; }`);
   fs.writeFileSync(HANG, '');
   const hung = launchd({ SHELL: hungShell, DA_LOGIN_SHELL_TIMEOUT_MS: '3000', DA_LOGIN_SHELL_RETRY_MS: '1' },
     `const pidFile = ${JSON.stringify(PID)};
     const first = (await dev.listAndroid()).length;
-    const pids = [fs.readFileSync(pidFile, 'utf8').trim()];
+    const pids = [await pidIn(pidFile)];
     fs.rmSync(pidFile);
     await sleep(5);
     const t = Date.now();
     await dev.listAndroid();
     const retryMs = Date.now() - t;
-    while (!fs.existsSync(pidFile)) await sleep(20);
-    pids.push(fs.readFileSync(pidFile, 'utf8').trim());
+    pids.push(await pidIn(pidFile));
     fs.rmSync(${JSON.stringify(HANG)});
     let then = 0;
     for (let i = 0; i < 300 && !then; i++) { await sleep(50); then = (await dev.listAndroid()).length; }
@@ -167,7 +183,7 @@ try {
   fs.rmSync(PID);
   const exited = launchd({ SHELL: hungShell },
     `dev.listAndroid();
-    while (!fs.existsSync(${JSON.stringify(PID)})) await sleep(20);
+    await pidIn(${JSON.stringify(PID)});
     process.exit(0);`);
   assert.ok(exited.wallMs < 5000);
   assert.ok(gone(Number(fs.readFileSync(PID, 'utf8'))), 'the hung rc outlived the process that started it');
@@ -176,6 +192,12 @@ try {
   for (const SHELL of [path.join(BASE, 'no-such-shell'), path.join(ADB, 'sh')]) {
     assert.deepEqual(launchd({ SHELL }).devices, [], `SHELL=${SHELL}`);
   }
+  const noFds = launchd({ SHELL: home }, `const fds = [];
+    try { for (;;) fds.push(fs.openSync('/dev/null', 'r')); } catch {}
+    const devices = await dev.listAndroid();
+    for (const fd of fds) fs.closeSync(fd);
+    return { devices };`, { fdLimit: 64 });
+  assert.deepEqual(noFds.devices, [], 'out of descriptors: nothing listed, nothing thrown');
   console.log('ok   a shell that cannot start');
 
   // Each other way in looks the tools up before its first adb call.
@@ -196,5 +218,5 @@ try {
   assert.equal(remote.providerAdb, ADB, 'a remote provider is handed the located adb');
   console.log('ok   boot, shutdown, motion and the remote provider');
 } finally {
-  fs.rmSync(BASE, { recursive: true, force: true });
+  cleanup();
 }
