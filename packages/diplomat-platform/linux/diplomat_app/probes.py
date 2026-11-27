@@ -323,8 +323,7 @@ def pane_tails(records: list[RunRecord], now: float = 0.0) -> Observation:
         return _tails_cache[2]
     tails = tmuxwatch.pane_tails_for_ttys(set(ttys))
     if tails is None:
-        obs = Observation.unavailable("is unreadable (no tmux server, or it would "
-                                      "not answer)")
+        obs = Observation.unavailable("is unreadable (a tmux server would not answer)")
     else:
         obs = Observation.present(tails)
         global _tails_read, _marker_seen

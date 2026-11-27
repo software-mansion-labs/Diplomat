@@ -199,10 +199,9 @@ def test_an_opencode_spawn_carries_its_own_permission_grant(opencode):
 
 
 def test_the_grant_travels_in_the_command_not_the_launchers_environment(opencode):
-    """``tmux new-session`` hands the command to a server that already exists, and the
-    session runs with the SERVER's environment — a variable set on the launcher never
-    arrives. The macOS spawner has no environment channel at all. Put it in the
-    environment and the agent silently stops at its first permission prompt."""
+    """The command is the one channel every spawn path has: the macOS spawner has no
+    environment channel at all. Put it in the environment and the agent there silently
+    stops at its first permission prompt."""
     assert runner.OPENCODE_PERMISSION_ENV not in review.spawn_env()
     assert runner.OPENCODE_PERMISSION_ENV in review.shell_command("/tmp/p.txt")
 

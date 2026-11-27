@@ -174,11 +174,12 @@ def test_the_agent_runs_under_an_interactive_shell_inside_its_own_tmux_session(
 
     argv = review.agent_argv("/tmp/p.txt", "/tmp/done")
 
-    assert argv[:2] == ["tmux", "new-session"]
+    assert argv[:2] == ["tmux", "-L"]
+    assert argv[3:6] == ["new-session", "-s", argv[2]]
     # `new-session` takes ONE shell-command argument and hands it to `sh -c`; the
     # split is what that `sh` will do, so the whole command has to survive it intact.
-    assert len(argv) == 3
-    assert shlex.split(argv[2]) == [
+    assert len(argv) == 7
+    assert shlex.split(argv[6]) == [
         "/usr/bin/zsh", "-i", "-c", review.shell_command("/tmp/p.txt", "/tmp/done")
     ]
 
@@ -186,10 +187,11 @@ def test_the_agent_runs_under_an_interactive_shell_inside_its_own_tmux_session(
 def test_a_named_session_is_the_runs_handle_on_its_own_window(
     with_tmux, monkeypatch, tmp_path
 ):
-    """Without ``-s`` the session is auto-named and the only route back to the window is
-    the tty the agent happens to be on — which a run whose pid was never adopted does
-    not have. Named, the reaper computes the same name from the run id and closes the
-    window with no tty at all."""
+    """Without ``-s`` the only route back to the window is the tty the agent happens to
+    be on — which a run whose pid was never adopted does not have. Named, the reaper
+    computes the same name from the run id and closes the window with no tty at all.
+    The server is labelled with the same name, so ``$TMUX`` in the agent's pane names
+    the run's own server and not the operator's."""
     import shlex
 
     monkeypatch.setattr(review, "repo_path", lambda: str(tmp_path))
@@ -197,23 +199,29 @@ def test_a_named_session_is_the_runs_handle_on_its_own_window(
 
     argv = review.agent_argv("/tmp/p.txt", "/tmp/done", session="diplomat-17-abc")
 
-    assert argv[:4] == ["tmux", "new-session", "-s", "diplomat-17-abc"]
+    assert argv[:6] == ["tmux", "-L", "diplomat-17-abc", "new-session", "-s", "diplomat-17-abc"]
     # The command is still ONE argument after the name, or `sh -c` gets a fragment.
-    assert len(argv) == 5
-    assert shlex.split(argv[4]) == [
+    assert len(argv) == 7
+    assert shlex.split(argv[6]) == [
         "/usr/bin/zsh", "-i", "-c", review.shell_command("/tmp/p.txt", "/tmp/done")
     ]
 
 
-def test_a_window_nobody_has_to_find_again_is_left_unnamed(with_tmux, monkeypatch,
-                                                           tmp_path):
+def test_a_window_nobody_has_to_find_again_gets_a_server_of_its_own_too(
+        with_tmux, monkeypatch, tmp_path):
     """The provider-login wizard opens a window through the same seam and is not a run:
-    nothing books it, nothing reaps it, and a name would only invite a reap to match
-    it."""
+    nothing books it and nothing reaps it, so its name is one no run id produces. Its
+    server is its own all the same, or its pane's ``$TMUX`` would name the operator's."""
+    import re
+
     monkeypatch.setattr(review, "repo_path", lambda: str(tmp_path))
     monkeypatch.setenv("DIPLOMAT_SHELL", "/usr/bin/zsh")
 
-    assert "-s" not in review.terminal_argv("echo hi")
+    first, second = review.terminal_argv("echo hi"), review.terminal_argv("echo hi")
+    name = first[2]
+    assert re.fullmatch(r"diplomat-[0-9a-f]{8}", name), name
+    assert first[:6] == ["tmux", "-L", name, "new-session", "-s", name]
+    assert second[2] != name
 
 
 def test_without_tmux_the_agent_runs_under_the_bare_interactive_shell(
@@ -261,6 +269,7 @@ def test_the_terminal_is_handed_the_session_argv_and_a_pane_free_env(
 
     (args, kwargs) = popen_spy[0]
     assert args[0][0] == term.exec_name
-    assert args[0][len(term.prefix) + 1:len(term.prefix) + 3] == ["tmux", "new-session"]
+    tmux = args[0][len(term.prefix) + 1:]
+    assert tmux[:2] == ["tmux", "-L"] and tmux[3] == "new-session"
     assert "TMUX" not in kwargs["env"]
 
