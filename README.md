@@ -12,7 +12,7 @@ issues, and act on what people ask you on Slack. You decide; they do the legwork
 |---|---|
 | **Time** | A review is written before you open the PR. Conflicts and review threads on your own PRs are fixed and pushed. A new issue from outside the team is reproduced and, if it is real, comes back as a draft PR. A Slack "can you look at #412?" is queued before you have read it. |
 | **Money** | Every task is priced from your real usage, and automatic work holds before your rate limit or credit runs dry. Telemetry shows what each task costs. Work spreads over the machines and devices you already have. |
-| **Power** | One maintainer, a swarm: agents in parallel, each with its own simulator; full-repo audits ranked by severity; every open issue and your own PRs rated, and the low-risk, low-complexity ones fixed, reviewed and merged with nobody in the loop, if you let it. |
+| **Power** | One maintainer, a swarm: agents in parallel, each with its own simulator; full-repo audits ranked by severity; every open issue and your own PRs rated, and the ones within each repo's limit (low/low by default) fixed, reviewed and merged with nobody in the loop, if you let it. |
 
 ## How it fits together
 
@@ -23,7 +23,7 @@ tracked.
 flowchart TB
   GH["GitHub monitors<br/>review requests · your PRs · new issues"] --> Q
   SL["Comms<br/>Slack asks, triaged"] --> Q
-  PL["Pipeline<br/>GitHub + Linear, rated · low/low fast-tracked"] --> Q
+  PL["Pipeline<br/>GitHub + Linear, rated · fast-tracked within limits"] --> Q
   YOU["You<br/>panel · wizards"] --> Q
   Q["One queue · priority bands"] --> GATE{"Budget gate + task cap"}
   GATE --> AG["Agents in real terminals<br/>a simulator each · heavy work offloaded to your other machines"]
@@ -37,10 +37,10 @@ flowchart TB
 ### Pipeline - every issue and your PRs, rated and routed
 
 Every open issue of your GitHub repos and Linear teams, and every open PR of yours, is rated for risk
-and complexity, as labels wherever Diplomat may write. A low/low issue gets a fix PR; that PR, low/low
-too, is reviewed until clean, rated again at that head, and merged with your admin rights. Anything
-else is left to you. Issues, sub-issues, the PRs fixing them and the PRs stacked on those are drawn
-as one graph.
+and complexity, as labels wherever Diplomat may write. An issue within its repo's limit (low/low by
+default) gets a fix PR; that PR, within it too, is reviewed until clean, rated again at that head,
+and merged with your admin rights. Anything else is left to you. Issues, sub-issues, the PRs fixing
+them and the PRs stacked on those are drawn as one graph.
 Off by default, every step its own switch. [More](docs/pipeline.md)
 
 <img alt="The Pipeline screen" src="docs/img/pipeline.png" />

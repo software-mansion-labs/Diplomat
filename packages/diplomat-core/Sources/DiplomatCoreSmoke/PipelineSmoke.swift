@@ -1615,7 +1615,7 @@ private func pipelineMergeSync(base: URL, root: PipelineSettings.Root, team: Pip
                  PipelineEvent(at: before, item: prURL(31), kind: .rerated, detail: "", head: sha("d3"), rating: low))
         return (t, sync(t, PipelineSettings(roots: [root], merge: true), dir(name), t0))
     }
-    let notAFix = "cleared/fast (closes no issue, or one that is not a low-risk, low-complexity issue Diplomat may act on)"
+    let notAFix = "cleared/fast (closes no issue, or one that is not a candidate issue Diplomat may act on)"
     let (ut, unread) = try pair("unread") { t in
         var reads = 0
         t.onReread = { n in
@@ -1673,7 +1673,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
 
     // A hold on the first read, or on that last one.
     typealias Change = (inout Trackers.PR) -> Void
-    let notAFix = "closes no issue, or one that is not a low-risk, low-complexity issue Diplomat may act on"
+    let notAFix = "closes no issue, or one that is not a candidate issue Diplomat may act on"
     let holds: [(String, Change, String)] = [
         ("more comments than a read lists", { $0.moreComments = 1 }, "has more reviews or comments than one read lists"),
         ("an unresolved thread", { $0.threads = 1 }, "has 1 unresolved review thread"),
@@ -2416,6 +2416,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     try pipelinePins9(base: base, root: root, team: team, t0: t0)
     try pipelinePins10(base: base, root: root, team: team, t0: t0)
     try pipelineGatePass1(base: base, root: root, team: team, t0: t0)
+    try pipelineLimits(base: base, root: root, team: team, t0: t0)
 }
 
 /// Each part a split files is one its own answer named, and a link to its parent makes a
@@ -2831,7 +2832,7 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
     let lowLow = ["risk:low", "complexity:low"]
     let watch = PipelineSettings(roots: [root])
     let fastTrack = PipelineSettings(roots: [root], rate: true, fastTrack: true, merge: true)
-    let notAFix = "closes no issue, or one that is not a low-risk, low-complexity issue Diplomat may act on"
+    let notAFix = "closes no issue, or one that is not a candidate issue Diplomat may act on"
     func cleared(_ name: String, settings: PipelineSettings = PipelineSettings(roots: [root], merge: true),
                  _ change: (Trackers) -> Void = { _ in }) throws -> (Trackers, Synced) {
         let t = only([13, 27])
@@ -3112,7 +3113,7 @@ private func pipelineFreshReads(base: URL, root: PipelineSettings.Root, team: Pi
     let mergeOnly = PipelineSettings(roots: [root], merge: true)
     let split = PipelineSettings(roots: [root], fracture: true)
     let rateTrack = PipelineSettings(roots: [root], rate: true, fastTrack: true)
-    let notAFix = "closes no issue, or one that is not a low-risk, low-complexity issue Diplomat may act on"
+    let notAFix = "closes no issue, or one that is not a candidate issue Diplomat may act on"
     func unread(_ what: String) -> String { "would close \(what), which Diplomat did not read or may not write to" }
     func cleared(_ name: String, _ change: (Trackers) -> Void) throws -> Synced {
         let t = only([13, 27])
@@ -3701,7 +3702,7 @@ private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: Pipeli
     floored.prs[0].files = [("src/a.swift", 1, 1, "MODIFIED")]
     let fl = sync(floored, watch, dir("floored"), t0)
     check(stageOf(nf.result, prURL(17)) == "human/human (off the fast track: it closes no issue, "
-            + "or one that is not a low-risk, low-complexity issue Diplomat may act on)"
+            + "or one that is not a candidate issue Diplomat may act on)"
           && stageOf(fl.result, prURL(17)) == "human/human (off the fast track: its diff allows no less than medium risk, low complexity)",
           "off the fast track: \(stageOf(nf.result, prURL(17))) \(stageOf(fl.result, prURL(17)))")
 
@@ -4199,7 +4200,7 @@ private func pipelineKept(base: URL, root: PipelineSettings.Root, team: Pipeline
     stopped.issues[0].labels.append("On Hold")
     try seedRerate(dir("stop-issue"), 13, sha("c3"), at: later(-60))
     let so = sync(stopped, PipelineSettings(roots: [root], merge: true), dir("stop-issue"), t0)
-    let notAFix = "closes no issue, or one that is not a low-risk, low-complexity issue Diplomat may act on"
+    let notAFix = "closes no issue, or one that is not a candidate issue Diplomat may act on"
     check(!merged(so) && stageOf(so.result, prURL(13)) == "cleared/fast (\(notAFix))",
           "a stop label on the issue a cleared PR closes: \(so.writes) \(stageOf(so.result, prURL(13)))")
     let blocked = only([3])
@@ -5001,4 +5002,131 @@ private func pipelineRatingPass1(base: URL, root: PipelineSettings.Root, team: P
     check(lost.writes.first == "-diplomat:cleared #15" && cl.writes.isEmpty
           && stageOf(cl.result, prURL(15)) == "fast-track/fast" && cl.result.effects == [reviewFX(15, sha("e5"))],
           "cleared taken off, gh failing: \(lost.writes) \(stageOf(cl.result, prURL(15)))")
+}
+
+/// A root's fast-track limit: what each step takes in it, and one lowered mid-sync.
+private func pipelineLimits(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
+                            t0: Date) throws {
+    section("pipeline limits")
+    func dir(_ name: String) -> URL { base.appendingPathComponent("limits-" + name) }
+    let mediumRisk = rating(.medium, .low)
+    func limited(_ limit: PipelineRating) -> PipelineSettings.Root {
+        PipelineSettings.Root(owner: root.owner, repo: root.repo, path: root.path, me: root.me, limit: limit)
+    }
+    let riskier = limited(mediumRisk)
+
+    check(mediumRisk.fits(mediumRisk) && low.fits(mediumRisk) && !rating(.medium, .medium).fits(mediumRisk)
+          && !rating(.low, .high).fits(rating(.medium, .medium)), "a rating fits a limit in both dimensions")
+    check(limited(rating(.high, .high)).limit == rating(.medium, .high), "high risk is no limit")
+    let decoded = try CommsLog.decoder.decode(PipelineSettings.Root.self, from: Data(
+        #"{"owner":"acme","repo":"app","path":"/w","me":"op","limit":{"risk":"high","complexity":"medium"}}"#.utf8))
+    check(decoded.limit == rating(.medium, .medium), "a limit read is capped too: \(decoded.limit)")
+    check(try CommsLog.decoder.decode(PipelineSettings.Root.self, from: CommsLog.encoder.encode(decoded)) == decoded,
+          "a root's limit round-trips")
+
+    let controlDir = dir("control")
+    let control = PipelineControl(enabled: true, rate: true, fix: true, fastTrack: true, merge: true, fracture: true,
+                                  limits: ["acme/app": mediumRisk])
+    check(control.save(in: controlDir) && PipelineControl.read(in: controlDir) == control, "control.json's limits round-trip")
+    let controlFile = controlDir.appendingPathComponent("control.json")
+    let switches = #""enabled":true,"rate":true,"fix":true,"fastTrack":true,"merge":true,"fracture":true"#
+    try Data(#"{\#(switches),"limits":{"acme/app":{"risk":"medium","complexity":"low"}}}"#.utf8).write(to: controlFile)
+    let read = PipelineControl.read(in: controlDir)
+    check(read?.limit("Acme/App") == mediumRisk && read?.limit("acme/lib") == low,
+          "a root's limit by its slug in any case, low/low when missing: \(String(describing: read))")
+    check(PipelineControl(enabled: true, rate: true, fix: true, fastTrack: true, merge: true, fracture: true)
+            .limit("acme/app") == nil, "a control.json without limits stops nothing")
+    try Data(#"{\#(switches),"limits":{"acme/app":{"risk":"extreme","complexity":"low"}}}"#.utf8).write(to: controlFile)
+    check(PipelineControl.read(in: controlDir) == nil, "a control.json with an unreadable limit is no control")
+
+    var gate = PipelineGate.Candidate(
+        state: "open", author: "op", isCrossRepository: false, baseRef: "main", defaultBranch: "main",
+        participants: ["op"], reviewDecision: "", unresolvedThreads: 0, rating: mediumRisk, floor: mediumRisk,
+        mergeable: "MERGEABLE", headSha: "abc", ciCommit: "abc", ciState: "SUCCESS", limit: mediumRisk)
+    check(PipelineGate.hold(gate, me: "op") == nil, "a PR at its root's limit merges")
+    gate.limit = low
+    check(PipelineGate.hold(gate, me: "op") == .rated(mediumRisk), "a PR rated past it does not")
+    gate.rating = low
+    check(PipelineGate.hold(gate, me: "op") == .floor(mediumRisk), "nor one its diff floors past it")
+
+    // An issue is a candidate, and its fix asked for, within its root's limit.
+    func issue(_ r: PipelineSettings.Root, _ name: String) -> Synced {
+        let t = only([4])
+        t.issues[0].labels = ["risk:medium", "complexity:low"]
+        return sync(t, PipelineSettings(roots: [r], fix: true), dir("issue-" + name), t0)
+    }
+    let heldIssue = issue(root, "low"), fixedIssue = issue(riskier, "medium")
+    check(stageOf(heldIssue.result, issueURL(4)) == "human/human" && heldIssue.result.effects.isEmpty,
+          "medium risk past a low/low limit: \(stageOf(heldIssue.result, issueURL(4)))")
+    check(stageOf(fixedIssue.result, issueURL(4)) == "candidate/fast" && fixedIssue.result.effects == [fixFX(4)],
+          "medium risk within its limit: \(stageOf(fixedIssue.result, issueURL(4))) \(fixedIssue.result.effects)")
+
+    // A Linear issue goes by the limit of the root its team maps to.
+    func ticket(_ r: PipelineSettings.Root, _ name: String) -> Synced {
+        let t = only([])
+        t.tickets = [fixture().tickets[2]]
+        t.tickets[0].labels = ["lab-rm", "lab-cl"]
+        t.labelBook.append(("lab-rm", "risk:medium", nil))
+        return sync(t, PipelineSettings(roots: [r], linearTeams: [team], fix: true), dir("linear-" + name), t0)
+    }
+    let heldTicket = ticket(root, "low"), fixedTicket = ticket(riskier, "medium")
+    check(stageOf(heldTicket.result, linearURL("ENG-3")) == "human/human" && heldTicket.result.effects.isEmpty,
+          "a Linear issue past its root's limit: \(stageOf(heldTicket.result, linearURL("ENG-3")))")
+    check(stageOf(fixedTicket.result, linearURL("ENG-3")) == "candidate/fast"
+          && fixedTicket.result.effects.map(\.key) == ["pipeline-fix:" + linearURL("ENG-3")],
+          "a Linear issue within it: \(stageOf(fixedTicket.result, linearURL("ENG-3"))) \(fixedTicket.result.effects)")
+
+    // Split big issues splits only an issue more complex than its root's limit.
+    func split(_ r: PipelineSettings.Root, _ name: String) -> Synced {
+        let t = only([3])
+        t.issues[0].labels = ["risk:low", "complexity:medium"]
+        return sync(t, PipelineSettings(roots: [r], fracture: true), dir("split-" + name), t0)
+    }
+    let splitLow = split(root, "low"), splitMedium = split(limited(rating(.low, .medium)), "medium")
+    check(splitLow.claude == ["sonnet fracture Split the storage layer"], "split past its limit: \(splitLow.claude)")
+    check(splitMedium.claude.isEmpty && stageOf(splitMedium.result, issueURL(3)) == "candidate/fast",
+          "not split within it: \(splitMedium.claude) \(stageOf(splitMedium.result, issueURL(3)))")
+
+    // A PR's first rating puts it on the fast track within its root's limit.
+    func firstRating(_ r: PipelineSettings.Root, _ name: String) -> Synced {
+        let t = only([4, 11])
+        t.prs[0].body = "Fixes #4."
+        t.ratings["Fix the docs link"] = ["risk": "medium", "complexity": "low", "why": "a link and its test"]
+        return sync(t, PipelineSettings(roots: [r], rate: true, fastTrack: true), dir("first-" + name), t0)
+    }
+    let rated = firstRating(root, "low"), tracked = firstRating(riskier, "medium")
+    let labelled = ["label risk:medium exists", "+risk:medium #11", "+complexity:low #11"]
+    check(rated.writes == labelled, "rated past its limit: \(rated.writes)")
+    check(tracked.writes == labelled + ["label diplomat:fast-track exists", "+diplomat:fast-track #11"], "rated within it: \(tracked.writes)")
+
+    // A PR cleared at a re-rate within its root's limit merges; past it, it leaves the fast
+    // track for good; and a limit lowered mid-sync stops the merge.
+    func cleared(_ r: PipelineSettings.Root, _ name: String, _ change: (Trackers) -> Void = { _ in }) throws -> Synced {
+        let t = only([13, 27])
+        t.prs[0].labels = ["risk:medium", "complexity:low", "diplomat:fast-track", "diplomat:cleared"]
+        change(t)
+        try seed(dir(name), PipelineEvent(at: t0.addingTimeInterval(-3600), item: prURL(13), kind: .rerated,
+                                          detail: "medium risk, low complexity", head: sha("c3"), rating: mediumRisk))
+        return sync(t, PipelineSettings(roots: [r], fastTrack: true, merge: true), dir(name), t0)
+    }
+    let past = try cleared(root, "merge-low"), within = try cleared(riskier, "merge-medium")
+    check(past.writes == ["-diplomat:fast-track #13", "-diplomat:cleared #13"]
+          && past.events.contains { $0.kind == .labelled && $0.detail.contains("re-rated medium risk, low complexity at this head") }
+          && stageOf(past.result, prURL(13)) == "human/human",
+          "re-rated past its limit: \(past.writes) \(stageOf(past.result, prURL(13)))")
+    check(within.writes == ["merge #13 --squash \(sha("c3"))"], "re-rated within it: \(within.writes)")
+    func controlled(_ name: String, _ limit: PipelineRating) -> (Trackers) -> Void {
+        { t in
+            t.onReread = { _ in
+                PipelineControl(enabled: true, rate: false, fix: false, fastTrack: true, merge: true, fracture: false,
+                                limits: ["acme/app": limit]).save(in: dir(name))
+            }
+        }
+    }
+    let lowered = try cleared(riskier, "lowered", controlled("lowered", low))
+    check(!merged(lowered) && lowered.result.notices
+          == ["merge", "fast track"].map { "acme/app's fast-track limit was lowered, so this sync took no \($0) step past that" },
+          "lowered mid-sync: \(lowered.writes) \(lowered.result.notices)")
+    let kept = try cleared(riskier, "kept", controlled("kept", mediumRisk))
+    check(merged(kept) && kept.result.notices.isEmpty, "kept mid-sync: \(kept.writes) \(kept.result.notices)")
 }

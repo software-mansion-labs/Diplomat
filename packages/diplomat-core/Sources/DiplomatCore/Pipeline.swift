@@ -314,7 +314,7 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
         public var path: String
         public var me: String
         /// The highest rating its fast track takes, at most `PipelineRating.maxLimit`.
-        public var limit: PipelineRating
+        public let limit: PipelineRating
         /// GitHub's `owner/repo` for it as a sync read it, which a rename or transfer makes
         /// differ from `slug`; never encoded.
         var nameWithOwner: String?
