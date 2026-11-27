@@ -60,10 +60,8 @@ LABELS = {CLAUDE: "Claude Code", OPENCODE: "OpenCode", HERMES: "Hermes"}
 #: its task-cap bay until someone noticed.
 #:
 #: Carried as an assignment *inside the command*, never in the launcher's
-#: environment: on neither spawn path is that environment the agent's.
-#: ``tmux new-session`` hands the command to the already-running tmux server, so the
-#: session gets the SERVER's environment; the macOS spawner has no environment
-#: channel at all, typing a line into a fresh window via AppleScript.
+#: environment: the macOS spawner has no environment channel at all, typing a line
+#: into a fresh window via AppleScript.
 OPENCODE_PERMISSION_ENV = "OPENCODE_PERMISSION"
 OPENCODE_PERMISSION_VALUE = (
     '{"edit":"allow","bash":"allow","webfetch":"allow",'

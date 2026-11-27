@@ -542,10 +542,12 @@ class Store(QObject):
 
         # Claude-API-error watcher: live-only runtime state (the toggle/count persist
         # via QSettings below). Mirrors the per-tty backoff + idle-confirmation maps in
-        # Store.swift, keyed by tmux pane_id.
+        # Store.swift, keyed by tmux server and pane_id: every server has a `%0`.
         self.apiwatch_status: dict | None = None
-        self._apiwatch_backoff: dict[str, dict] = {}  # pane_id -> {nextAllowed, interval}
-        self._apiwatch_seen_tail: dict[str, str] = {}  # pane_id -> last erroring tail
+        # (server, pane_id) -> {nextAllowed, interval}
+        self._apiwatch_backoff: dict[tuple[str | None, str], dict] = {}
+        # (server, pane_id) -> last erroring tail
+        self._apiwatch_seen_tail: dict[tuple[str | None, str], str] = {}
         self._apiwatch_lock = threading.Lock()
         self._telemetry_sample_lock = threading.Lock()
 
@@ -4414,35 +4416,37 @@ class Store(QObject):
         # tmux spells a tty `/dev/pts/13` and `ps` spells it `pts/13`.
         watched = [p for p in panes
                    if p.tty.removeprefix("/dev/") in on_an_agent.value]
-        erroring: set[str] = set()
+        erroring: set[tuple[str | None, str]] = set()
         for p in watched:
             # Out-of-quota banners return False here: a quota-limited agent can't
             # progress until its window resets, so only transient errors are nudged.
             if not apiwatch.looks_like_api_error(p.tail):
                 continue
-            erroring.add(p.pane_id)
+            key = (p.server, p.pane_id)
+            erroring.add(key)
             # Idle-confirmation: only nudge a pane whose erroring tail is UNCHANGED
             # since the previous scan.
             stalled = apiwatch.is_confirmed_stall(
-                self._apiwatch_seen_tail.get(p.pane_id), p.tail
+                self._apiwatch_seen_tail.get(key), p.tail
             )
-            self._apiwatch_seen_tail[p.pane_id] = p.tail
+            self._apiwatch_seen_tail[key] = p.tail
             if not stalled:
                 continue
-            b = self._apiwatch_backoff.get(p.pane_id)
+            b = self._apiwatch_backoff.get(key)
             if b and now < b["nextAllowed"]:  # still inside this pane's backoff window
                 continue
-            if not tmuxwatch.send_continue(p.pane_id, apiwatch.CONTINUE_MESSAGE):
+            if not tmuxwatch.send_continue(p, apiwatch.CONTINUE_MESSAGE):
                 continue  # pane vanished — don't count a nudge that never landed
             self.api_watch_continues += 1
             nxt = apiwatch.next_backoff(b["interval"] if b else None)
-            self._apiwatch_backoff[p.pane_id] = {
+            self._apiwatch_backoff[key] = {
                 "nextAllowed": now + nxt,
                 "interval": nxt,
             }
+            where = p.pane_id if p.server is None else f"{p.pane_id} of {p.server}"
             activity.log(
                 "auto", "nudge",
-                f"Continued a stalled agent (API error) on {p.pane_id}; "
+                f"Continued a stalled agent (API error) on {where}; "
                 f"next retry in ≥ {apiwatch.human_interval(nxt)}",
             )
         # Keep backoff + idle-confirmation state ONLY for currently-erroring panes: a
@@ -6774,6 +6778,7 @@ class Store(QObject):
                 # them the worker thread dies with update_state stuck on "updating",
                 # and the phase guard above then makes every later update a permanent
                 # no-op until the app restarts. Surface it as an error phase instead.
+                selfupdate._sched_log(f"update failed: {exc}")
                 self.update_state = {"phase": "error", "error": str(exc)}
             self.update_changed.emit()
 

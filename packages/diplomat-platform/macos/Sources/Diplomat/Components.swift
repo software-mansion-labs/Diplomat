@@ -432,6 +432,7 @@ struct SettingRow<Control: View>: View {
             if let summary {
                 Text(summary).font(.system(size: 10)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
             if explain, let detail {
                 Text(detail).font(.system(size: 10)).foregroundStyle(.secondary)
