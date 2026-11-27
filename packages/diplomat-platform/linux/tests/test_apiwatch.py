@@ -6,32 +6,21 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
+import signal
+import socket
 import subprocess
 import tempfile
+import time
 import uuid
 
 import pytest
 
-from diplomat_runtime import apiwatch, tmuxwatch
+from diplomat_runtime import apiwatch, review, tmuxwatch
 
-
-@pytest.fixture(autouse=True)
-def private_tmux_server(monkeypatch):
-    """The real-tmux tests open, list and kill sessions on whatever server ``tmux``
-    reaches, which is the operator's own when the suite runs inside their tmux. A
-    socket directory of its own keeps them on a server nothing else uses; ``/tmp``
-    because a tmux socket path is capped at 108 bytes."""
-    sockets = tempfile.mkdtemp(prefix="dpt-", dir="/tmp")
-    monkeypatch.delenv("TMUX", raising=False)
-    monkeypatch.delenv("TMUX_PANE", raising=False)
-    monkeypatch.setenv("TMUX_TMPDIR", sockets)
-    yield
-    if shutil.which("tmux"):
-        # By its socket: a test that set $TMUX would otherwise name the server killed.
-        socket = os.path.join(sockets, f"tmux-{os.getuid()}", "default")
-        subprocess.run(["tmux", "-S", socket, "kill-server"], capture_output=True, check=False)
-    shutil.rmtree(sockets, ignore_errors=True)
+# conftest's `private_tmux_server` gives every test here a socket directory of its own,
+# so each server below, the default one included, is one the test started.
 
 
 # MARK: - looks_like_api_error
@@ -362,8 +351,13 @@ def test_a_failed_capture_is_distinguishable_from_an_agent_with_no_pane(monkeypa
                         lambda argv: "" if argv[:2] == ["tmux", "list-panes"] else None)
     assert tmuxwatch.pane_tails_for_ttys({"pts/1"}) == {}
 
-    # tmux could not be asked.
+    # No server is running, so there is no pane to have: the default server is down
+    # wherever the operator runs no tmux of their own.
     monkeypatch.setattr(tmuxwatch, "_run", lambda argv: None)
+    assert tmuxwatch.pane_tails_for_ttys({"pts/1"}) == {}
+
+    # tmux could not be asked.
+    monkeypatch.setattr(tmuxwatch, "_server_running", lambda server: True)
     assert tmuxwatch.pane_tails_for_ttys({"pts/1"}) is None
 
 
@@ -386,14 +380,16 @@ def test_run_survives_non_utf8_pane_bytes_and_still_scans():
 def test_dump_panes_none_when_tmux_command_fails(monkeypatch):
     monkeypatch.setattr(tmuxwatch.shutil, "which", lambda _: "/usr/bin/tmux")
     monkeypatch.setattr(tmuxwatch, "_run", lambda argv: None)
-    monkeypatch.setattr(tmuxwatch, "_server_running", lambda: True)  # server up → failure
+    monkeypatch.setattr(tmuxwatch, "_server_running",
+                        lambda server: True)  # server up → failure
     assert tmuxwatch.dump_panes() is None
 
 
 def test_dump_panes_empty_when_no_server(monkeypatch):
     monkeypatch.setattr(tmuxwatch.shutil, "which", lambda _: "/usr/bin/tmux")
     monkeypatch.setattr(tmuxwatch, "_run", lambda argv: None)
-    monkeypatch.setattr(tmuxwatch, "_server_running", lambda: False)  # no server → inert
+    monkeypatch.setattr(tmuxwatch, "_server_running",
+                        lambda server: False)  # no server → inert
     assert tmuxwatch.dump_panes() == []
 
 
@@ -437,7 +433,7 @@ def _panes(monkeypatch, sequence, sent=True, agent_ttys=frozenset({"pts/1"})):
     monkeypatch.setattr(tmuxwatch, "is_available", lambda: True)
     monkeypatch.setattr(
         tmuxwatch, "send_continue",
-        lambda pane_id, msg: (nudged.append(pane_id) or True) if sent else False,
+        lambda pane, msg: (nudged.append(pane.pane_id) or True) if sent else False,
     )
     obs = (agent_ttys if isinstance(agent_ttys, probes.Observation)
            else probes.Observation.present(set(agent_ttys)))
@@ -445,8 +441,8 @@ def _panes(monkeypatch, sequence, sent=True, agent_ttys=frozenset({"pts/1"})):
     return nudged
 
 
-def _pane(pane_id="%0", tty="/dev/pts/1", tail="⏺ API Error: 529 Overloaded."):
-    return tmuxwatch.Pane(pane_id=pane_id, tty=tty, tail=tail)
+def _pane(pane_id="%0", tty="/dev/pts/1", tail="⏺ API Error: 529 Overloaded.", server=None):
+    return tmuxwatch.Pane(pane_id=pane_id, tty=tty, tail=tail, server=server)
 
 
 def test_scan_never_nudges_a_pane_no_agent_is_on(store, monkeypatch):
@@ -481,6 +477,20 @@ def test_scan_watches_an_agent_pane_beside_a_shell_showing_the_same_tail(
     assert store.apiwatch_status["watching"] == 1
 
 
+def test_two_servers_pane_0_are_two_panes_to_the_watcher(store, monkeypatch):
+    """Every server numbers its panes from %0. Keyed by the id alone, the second
+    agent's stall reads as the first's and waits out the first's backoff."""
+    nudged = _panes(
+        monkeypatch,
+        [[_pane(tty="/dev/pts/1"), _pane(tty="/dev/pts/2", server="diplomat-17-abc")]] * 2,
+        agent_ttys={"pts/1", "pts/2"},
+    )
+    store._apiwatch_scan_once()
+    store._apiwatch_scan_once()
+    assert nudged == ["%0", "%0"]
+    assert set(store._apiwatch_backoff) == {(None, "%0"), ("diplomat-17-abc", "%0")}
+
+
 def test_scan_skips_when_the_process_table_cannot_be_read(store, monkeypatch):
     """Not knowing which panes carry an agent has to mean typing into none of them —
     the same trade the failed pane dump makes, and for a heavier reason. State
@@ -493,7 +503,7 @@ def test_scan_skips_when_the_process_table_cannot_be_read(store, monkeypatch):
     assert nudged == ["%0"]
     monkeypatch.setattr(probes, "ttys_running_an_agent",
                         lambda now: probes.Observation.unavailable("exited 1"))
-    store._apiwatch_backoff["%0"]["nextAllowed"] = 0  # backoff is not what holds it
+    store._apiwatch_backoff[(None, "%0")]["nextAllowed"] = 0  # backoff is not what holds it
     store._apiwatch_scan_once()
     assert nudged == ["%0"]
     assert store._apiwatch_backoff  # not cleared by the skipped scan
@@ -544,7 +554,7 @@ def test_scan_renudges_after_backoff_elapses(store, monkeypatch):
     store._apiwatch_scan_once()  # seed
     store._apiwatch_scan_once()  # nudge 1, schedules nextAllowed = now + 120
     # Fast-forward the pane's backoff window into the past.
-    store._apiwatch_backoff["%0"]["nextAllowed"] = 0
+    store._apiwatch_backoff[(None, "%0")]["nextAllowed"] = 0
     store._apiwatch_scan_once()  # backoff elapsed + still stalled → nudge 2
     assert nudged == ["%0", "%0"]
     assert store.api_watch_continues == 2
@@ -574,10 +584,10 @@ def test_scan_prunes_recovered_pane(store, monkeypatch):
     nudged = _panes(monkeypatch, [[_pane()], [_pane()], [_pane(tail="all good now")]])
     store._apiwatch_scan_once()  # seed
     store._apiwatch_scan_once()  # nudge, records backoff + seen_tail
-    assert "%0" in store._apiwatch_seen_tail
+    assert (None, "%0") in store._apiwatch_seen_tail
     store._apiwatch_scan_once()  # pane no longer erroring → pruned
-    assert "%0" not in store._apiwatch_backoff
-    assert "%0" not in store._apiwatch_seen_tail
+    assert (None, "%0") not in store._apiwatch_backoff
+    assert (None, "%0") not in store._apiwatch_seen_tail
     # Exactly one nudge, on the second scan: the recovered pane must not draw
     # another. Without this the test passes even if the watcher never nudges.
     assert nudged == ["%0"]
@@ -609,8 +619,8 @@ def _live_sessions() -> set[str]:
     return set(out.stdout.split()) if out.returncode == 0 else set()
 
 
-def _open_session(name: str) -> None:
-    subprocess.run(["tmux", "new-session", "-d", "-s", name, "sleep 120"], check=True)
+def _open_session(name: str, command: str = "sleep 120") -> None:
+    subprocess.run(["tmux", "new-session", "-d", "-s", name, command], check=True)
 
 
 def _close_sessions(*names: str) -> None:
@@ -623,7 +633,8 @@ def _close_sessions(*names: str) -> None:
 @pytest.mark.usefixtures("real_kills")
 def test_a_runs_own_session_is_closed_by_its_name():
     """Against the real tmux: the name the spawn opened is the name the reaper computes,
-    and killing it takes the window with it."""
+    and killing it takes the window with it - here on the default server, where an
+    older build opened it."""
     name = tmuxwatch.session_name(f"{os.getpid()}-{uuid.uuid4().hex[:8]}")
     _open_session(name)
     try:
@@ -751,3 +762,229 @@ def test_a_window_of_a_two_window_session_goes_alone():
         assert left == ttys[:1]
     finally:
         _close_sessions(name)
+
+
+# MARK: - a spawn's session is on a tmux server of its own
+
+needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None,
+                                reason="no tmux on this machine")
+#: A stalled agent's screen. `cat` echoes a submitted line back, so a nudge whose Enter
+#: landed shows its text twice.
+BANNER = "printf 'API Error: 529 Overloaded.\\n'; cat"
+
+
+@pytest.fixture
+def plain_shell(monkeypatch):
+    """The shell a spawn's session runs its command under: one that sources no rc of
+    the operator's inside the test's panes."""
+    monkeypatch.setenv("DIPLOMAT_SHELL", "/bin/sh")
+
+
+def _tmux(server: str | None, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["tmux", *(["-L", server] if server else []), *args],
+                          capture_output=True, text=True, check=False)
+
+
+def _open_like_a_spawn(command: str = "sleep 120") -> str:
+    """A session opened with the argv a spawn hands its terminal, detached since no
+    terminal is attached here. Returns its name."""
+    name = tmuxwatch.session_name(f"{os.getpid()}-{uuid.uuid4().hex[:8]}")
+    argv = review.terminal_argv(command, session=name)
+    at = argv.index("new-session") + 1
+    subprocess.run([*argv[:at], "-d", *argv[at:]], check=True)
+    return name
+
+
+def _pane_of(server: str | None, session: str) -> tuple[str, str]:
+    """(pane id, tty) of the one pane in ``session`` on ``server``."""
+    out = _tmux(server, "list-panes", "-t", f"={session}", "-F", "#{pane_id} #{pane_tty}")
+    assert out.returncode == 0, out.stderr
+    pane_id, tty = out.stdout.split()
+    return pane_id, tty
+
+
+def _has_session(server: str | None, session: str) -> bool:
+    return _tmux(server, "has-session", "-t", f"={session}").returncode == 0
+
+
+def _socket_of(server: str) -> str:
+    return os.path.join(os.path.realpath(os.environ["TMUX_TMPDIR"]),
+                        f"tmux-{os.getuid()}", server)
+
+
+def _until(done, what: str) -> None:
+    for _ in range(100):
+        if done():
+            return
+        time.sleep(0.05)
+    pytest.fail(f"never {what}")
+
+
+@needs_tmux
+@pytest.mark.usefixtures("plain_shell")
+def test_a_spawns_own_server_is_read_beside_the_default_one():
+    """Every first pane is %0, and the readers keep them apart by server."""
+    shows = {None: "theirs"}
+    _open_session("operator", f"echo {shows[None]}; sleep 120")
+    for _ in range(2):
+        name = _open_like_a_spawn(f"echo mine-{len(shows)}; sleep 120")
+        shows[name] = f"mine-{len(shows)}"
+    panes = {s: _pane_of(s, s or "operator") for s in shows}
+    assert {pane_id for pane_id, _ in panes.values()} == {"%0"}
+
+    def screens():
+        return {(p.server, p.pane_id, p.tty, p.tail.strip())
+                for p in tmuxwatch.dump_panes() or []}
+
+    want = {(s, *panes[s], shows[s]) for s in shows}
+    _until(lambda: screens() == want, "showed what each pane printed")
+    order = [p.server for p in tmuxwatch.dump_panes() or []]
+    assert order == [None, *sorted(s for s in shows if s)]
+    ttys = {tty.removeprefix("/dev/") for _, tty in panes.values()}
+    tails = tmuxwatch.pane_tails_for_ttys(ttys)
+    assert {tty: tail.strip() for tty, tail in (tails or {}).items()} == \
+        {panes[s][1].removeprefix("/dev/"): shows[s] for s in shows}
+
+
+def test_the_socket_dir_is_where_tmux_puts_a_labelled_server(monkeypatch, tmp_path):
+    """TMUX_TMPDIR when it names a directory, /tmp otherwise; resolved, as tmux does."""
+    tmp = os.path.join(os.path.realpath("/tmp"), f"tmux-{os.getuid()}")
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path))
+    assert tmuxwatch._socket_dir() == \
+        os.path.join(os.path.realpath(tmp_path), f"tmux-{os.getuid()}")
+    for unusable in ("", str(tmp_path / "missing")):
+        monkeypatch.setenv("TMUX_TMPDIR", unusable)
+        assert tmuxwatch._socket_dir() == tmp
+    monkeypatch.delenv("TMUX_TMPDIR")
+    assert tmuxwatch._socket_dir() == tmp
+
+
+@needs_tmux
+@pytest.mark.usefixtures("plain_shell")
+def test_a_spawns_own_server_is_watched_with_no_default_server_at_all():
+    """Where the operator runs no tmux of their own, the default server is down: that
+    is nothing to read there, not a reading that failed."""
+    name = _open_like_a_spawn()
+    pane_id, tty = _pane_of(name, name)
+    assert _tmux(None, "has-session").returncode != 0
+    assert tmuxwatch.is_available() is True
+    assert [(p.server, p.pane_id) for p in tmuxwatch.dump_panes() or []] == [(name, pane_id)]
+    assert set(tmuxwatch.pane_tails_for_ttys({tty.removeprefix("/dev/")}) or {}) == \
+        {tty.removeprefix("/dev/")}
+
+
+@needs_tmux
+@pytest.mark.usefixtures("plain_shell")
+def test_a_nudge_lands_in_its_own_servers_pane_0(store, monkeypatch):
+    """Two stalled agents, each on a %0 of a different server: each gets one nudge, in
+    its own pane."""
+    from diplomat_app import probes
+    from diplomat_app import store as store_module
+
+    _open_session("operator", BANNER)
+    name = _open_like_a_spawn(BANNER)
+    panes = {None: _pane_of(None, "operator"), name: _pane_of(name, name)}
+
+    def screen(server):
+        return _tmux(server, "capture-pane", "-p", "-t", panes[server][0]).stdout
+
+    _until(lambda: all("API Error" in screen(s) for s in panes), "showed the banner")
+    monkeypatch.setattr(probes, "ttys_running_an_agent", lambda now: probes.Observation.present(
+        {tty.removeprefix("/dev/") for _, tty in panes.values()}))
+    logged: list[str] = []
+    monkeypatch.setattr(store_module.activity, "log",
+                        lambda source, action, detail: logged.append(detail))
+
+    store._apiwatch_scan_once()
+    store._apiwatch_scan_once()
+
+    _until(lambda: [screen(s).count(apiwatch.CONTINUE_MESSAGE) for s in panes] == [2, 2],
+           "echoed each nudge once")
+    assert store.api_watch_continues == 2
+    assert set(store._apiwatch_backoff) == {(None, "%0"), (name, "%0")}
+    assert sorted(logged) == sorted(
+        f"Continued a stalled agent (API error) on {where}; next retry in ≥ 2m"
+        for where in ("%0", f"%0 of {name}"))
+
+
+@needs_tmux
+@pytest.mark.usefixtures("real_kills", "plain_shell")
+def test_a_runs_session_ends_on_its_own_server_and_the_default_one_stays_up():
+    _open_session("operator")
+    name = _open_like_a_spawn()
+    assert tmuxwatch.kill_session(name) is True
+    assert not _has_session(name, name)
+    assert _live_sessions() == {"operator"}
+
+
+@needs_tmux
+@pytest.mark.usefixtures("real_kills", "plain_shell")
+def test_the_tty_route_finds_a_pane_on_a_spawns_own_server():
+    _open_session("operator")
+    name = _open_like_a_spawn()
+    _, tty = _pane_of(name, name)
+    assert tmuxwatch.kill_window_for_tty(tty) is True
+    assert not _has_session(name, name)
+    assert _live_sessions() == {"operator"}
+
+
+@needs_tmux
+@pytest.mark.usefixtures("plain_shell")
+@pytest.mark.parametrize("left_by", ["a server that was killed", "a socket closed unserved"])
+def test_a_stale_diplomat_socket_is_skipped_and_removed_once_old(left_by):
+    """A server leaves its socket behind when it exits. Nothing answers on it, so it
+    is no server to read; once it is old enough not to be a starting server's, it
+    goes."""
+    _open_session("operator")
+    theirs = _pane_of(None, "operator")
+    if left_by == "a server that was killed":
+        name = _open_like_a_spawn()
+        os.kill(int(_tmux(name, "display-message", "-p", "#{pid}").stdout), signal.SIGKILL)
+    else:
+        name = tmuxwatch.session_name(f"{os.getpid()}-{uuid.uuid4().hex[:8]}")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as unserved:
+            unserved.bind(_socket_of(name))
+    path = _socket_of(name)
+
+    def refused():
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            try:
+                probe.connect(path)
+            except ConnectionRefusedError:
+                return True
+            return False
+
+    _until(refused, "refused a connection")
+    assert {(p.server, p.pane_id, p.tty) for p in tmuxwatch.dump_panes() or []} == \
+        {(None, *theirs)}
+    short = theirs[1].removeprefix("/dev/")
+    assert set(tmuxwatch.pane_tails_for_ttys({short}) or {}) == {short}
+    assert os.path.exists(path), "a socket this young may be a starting server's"
+
+    old = time.time() - 61
+    os.utime(path, (old, old))
+    assert tmuxwatch.dump_panes() is not None
+    assert not os.path.exists(path)
+
+
+@needs_tmux
+@pytest.mark.usefixtures("plain_shell")
+def test_kill_server_inside_an_agents_pane_ends_only_that_agents_server(tmp_path):
+    """The incident: an agent ran ``TMUX_TMPDIR=... tmux kill-server`` to stop a server
+    it had started. With no ``-L``/``-S`` tmux takes the socket from ``$TMUX`` first,
+    so on the operator's server that ended every window they had."""
+    _open_session("operator")
+    seen = tmp_path / "tmux"
+    name = _open_like_a_spawn(f'printf %s "$TMUX" > {shlex.quote(str(seen))}; sleep 120')
+    _until(lambda: seen.exists() and seen.read_text(), "reported its $TMUX")
+    pane_tmux = seen.read_text()
+    # Never a server this test did not start, whatever the pane reported.
+    assert pane_tmux.startswith(os.path.realpath(os.environ["TMUX_TMPDIR"]) + os.sep)
+    elsewhere = tempfile.mkdtemp(prefix="dpo-", dir="/tmp")
+    try:
+        subprocess.run(["tmux", "kill-server"], capture_output=True, check=False,
+                       env={**os.environ, "TMUX": pane_tmux, "TMUX_TMPDIR": elsewhere})
+    finally:
+        shutil.rmtree(elsewhere, ignore_errors=True)
+    assert not _has_session(name, name)
+    assert _live_sessions() == {"operator"}

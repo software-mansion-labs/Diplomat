@@ -16,14 +16,20 @@ way but this one: it will open a window on command and close one, but it reports
 neither the text on a surface nor the tty it is on. So a Ghostty agent's screen has
 exactly one reader, and it is this one.
 
-Panes are keyed by their tmux ``pane_id`` (``%N``) — unique and never recycled for
-the life of the server, unlike a ``/dev/pts`` tty which is reused as panes close.
+Panes are keyed by their server and tmux ``pane_id`` (``%N``) — unique and never
+recycled for the life of the server, unlike a ``/dev/pts`` tty which is reused as panes
+close. Every session Diplomat opens is on a server of its own (:func:`_servers`), and
+every server numbers its panes from ``%0``.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
+import socket
+import stat
 import subprocess
+import time
 from dataclasses import dataclass
 
 from .apiwatch import last_lines
@@ -35,22 +41,23 @@ from .apiwatch import last_lines
 
 @dataclass(frozen=True)
 class Pane:
-    pane_id: str  # tmux "%N" — the stable key
+    pane_id: str  # tmux "%N" — the stable key, with `server`
     tty: str  # "/dev/pts/N" — for the audit line only
     tail: str  # last SCANNED_TAIL_LINES non-empty visible rows
+    server: str | None = None  # its server's `-L` label; None = the default server
 
 
 def is_available() -> bool:
     """tmux is installed AND a server is running (there are panes to watch)."""
     if shutil.which("tmux") is None:
         return False
-    return _server_running()
+    return bool(_diplomat_servers()) or _server_running(None)
 
 
-def _server_running() -> bool:
+def _server_running(server: str | None) -> bool:
     try:
         r = subprocess.run(
-            ["tmux", "has-session"],
+            _argv(server, "has-session"),
             capture_output=True, timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
@@ -58,8 +65,81 @@ def _server_running() -> bool:
     return r.returncode == 0
 
 
+def _servers() -> list[str | None]:
+    """Every server a pane may be on: the default one (None), which holds an agent the
+    operator started in their own tmux and a session an older build opened, then the
+    live server of each session Diplomat opened (:func:`review.terminal_argv`)."""
+    return [None, *_diplomat_servers()]
+
+
+#: A refused socket younger than this may be a server's that has bound it and not yet
+#: listened on it; older, it is one a server left behind when it exited.
+_STALE_SOCKET_SECS = 60
+
+
+def _socket_dir() -> str:
+    """Where tmux puts a ``-L`` server's socket, resolved the way tmux resolves it."""
+    tmpdir = os.environ.get("TMUX_TMPDIR")
+    try:
+        base = os.path.realpath(tmpdir, strict=True) if tmpdir else None
+    except OSError:
+        base = None
+    return os.path.join(base or os.path.realpath("/tmp"), f"tmux-{os.getuid()}")
+
+
+def _diplomat_servers() -> list[str]:
+    """The label of each live ``diplomat-`` server, by name so readings are stable."""
+    sockets = _socket_dir()
+    try:
+        names = sorted(n for n in os.listdir(sockets) if n.startswith(SESSION_PREFIX))
+    except OSError:
+        return []
+    return [n for n in names if _listening(os.path.join(sockets, n))]
+
+
+def _listening(path: str) -> bool:
+    """Whether a server answers on the socket at ``path``. Asked with a connect, not a
+    tmux, since every server that exits leaves its socket behind; one nothing answers
+    on is removed once older than :data:`_STALE_SOCKET_SECS`."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(1)
+            probe.connect(path)
+        return True
+    except ConnectionRefusedError:
+        pass
+    except OSError:
+        return False
+    try:
+        st = os.lstat(path)
+        if stat.S_ISSOCK(st.st_mode) and time.time() - st.st_mtime > _STALE_SOCKET_SECS:
+            os.unlink(path)
+    except OSError:
+        pass
+    return False
+
+
+def _pane_rows(fmt: str) -> list[tuple[str | None, str, str]] | None:
+    """``(server, first field, rest)`` for each pane ``list-panes -a -F fmt`` lists on
+    each of :func:`_servers`. ``None`` when a server that is up would not list its panes;
+    one that is not up has none."""
+    rows: list[tuple[str | None, str, str]] = []
+    for server in _servers():
+        listing = _run(_argv(server, "list-panes", "-a", "-F", fmt))
+        if listing is None:
+            if _server_running(server):
+                return None
+            continue
+        for line in listing.splitlines():
+            if " " not in line:
+                continue
+            first, rest = (s.strip() for s in line.split(" ", 1))
+            rows.append((server, first, rest))
+    return rows
+
+
 def dump_panes() -> list[Pane] | None:
-    """Every tmux pane's last visible lines, keyed by pane_id.
+    """Every tmux pane's last visible lines, keyed by server and pane_id.
 
     Returns ``None`` when tmux is present but a command FAILED unexpectedly — the
     caller treats that as "unknown" and skips the scan rather than clearing all
@@ -69,31 +149,26 @@ def dump_panes() -> list[Pane] | None:
     """
     if shutil.which("tmux") is None:
         return []
-    listing = _run(
-        ["tmux", "list-panes", "-a", "-F", "#{pane_id} #{pane_tty}"]
-    )
-    if listing is None:
-        # Distinguish "no server running" (inert, known-empty) from a real failure.
-        return [] if not _server_running() else None
+    rows = _pane_rows("#{pane_id} #{pane_tty}")
+    if rows is None:
+        return None
     out: list[Pane] = []
-    for line in listing.splitlines():
-        if " " not in line:
-            continue
-        pane_id, tty = line.split(" ", 1)
-        pane_id, tty = pane_id.strip(), tty.strip()
+    for server, pane_id, tty in rows:
         if not pane_id:
             continue
-        captured = _run(["tmux", "capture-pane", "-p", "-t", pane_id])
+        captured = _run(_argv(server, "capture-pane", "-p", "-t", pane_id))
         if captured is None:  # pane vanished between list + capture — skip it
             continue
-        out.append(Pane(pane_id=pane_id, tty=tty, tail=last_lines(captured)))
+        out.append(Pane(pane_id=pane_id, tty=tty, tail=last_lines(captured),
+                        server=server))
     return out
 
 
 def pane_tails_for_ttys(ttys: set[str]) -> dict[str, str] | None:
     """The visible tail of each pane running on one of ``ttys``, keyed by that tty —
     the join column between a tmux pane and the ``claude`` process ``ps`` reports on
-    that same tty. ``None`` when tmux could not be asked at all.
+    that same tty, and unique across servers. ``None`` when tmux is not installed or a
+    running server would not answer.
 
     Selective on purpose, unlike :func:`dump_panes`: this runs on the panel's
     8-second tick, and the callers want two panes out of however many the developer
@@ -119,20 +194,15 @@ def pane_tails_for_ttys(ttys: set[str]) -> dict[str, str] | None:
     if not ttys:
         return {}
     try:
-        listing = _run(
-            ["tmux", "list-panes", "-a", "-F", "#{pane_id} #{pane_tty}"]
-        )
-        if listing is None:
+        rows = _pane_rows("#{pane_id} #{pane_tty}")
+        if rows is None:
             return None
         out: dict[str, str] = {}
-        for line in listing.splitlines():
-            if " " not in line:
-                continue
-            pane_id, tty = (s.strip() for s in line.split(" ", 1))
+        for server, pane_id, tty in rows:
             tty = tty.removeprefix("/dev/")
             if not pane_id or tty not in ttys:
                 continue
-            captured = _run(["tmux", "capture-pane", "-p", "-t", pane_id])
+            captured = _run(_argv(server, "capture-pane", "-p", "-t", pane_id))
             if captured is not None:  # pane vanished between list + capture — skip it
                 out[tty] = last_lines(captured)
         return out
@@ -140,13 +210,13 @@ def pane_tails_for_ttys(ttys: set[str]) -> dict[str, str] | None:
         return None
 
 
-def send_continue(pane_id: str, message: str) -> bool:
+def send_continue(pane: Pane, message: str) -> bool:
     """Type ``message`` into the pane and submit it (send the literal text, then
     Enter). Returns whether the pane accepted it — False when the pane no longer
     exists, so the caller doesn't count a nudge that never landed."""
-    if _run(["tmux", "send-keys", "-t", pane_id, "-l", message]) is None:
+    if _run(_argv(pane.server, "send-keys", "-t", pane.pane_id, "-l", message)) is None:
         return False
-    return _run(["tmux", "send-keys", "-t", pane_id, "Enter"]) is not None
+    return _run(_argv(pane.server, "send-keys", "-t", pane.pane_id, "Enter")) is not None
 
 
 #: What every tmux session opened for a run is named for. Matched exactly on the way
@@ -162,7 +232,8 @@ def session_name(run_id: str) -> str:
     Derived from the run id rather than recorded, so there is nothing to write at spawn
     and nothing to lose: the reaper computes the same name from the same record. The
     run id is ``<epoch>-<hex8>`` (:func:`agentregistry.new_run_id`), which carries none
-    of the characters a tmux session name may not (``.`` and ``:``).
+    of the characters a tmux session name may not (``.`` and ``:``), nor the ``/`` its
+    server's socket name may not.
     """
     return SESSION_PREFIX + run_id
 
@@ -180,10 +251,14 @@ def kill_session(name: str) -> bool:
     then fnmatch: a bare name would let one run's reap end a session whose name merely
     starts the same. Run ids are fixed-width, so no two can collide that way today, and
     that is not a property to leave a destructive call resting on.
+
+    Asked of the session's own server (:func:`review.terminal_argv`), then of the
+    default one, where an older build opened it.
     """
     if not name or shutil.which("tmux") is None:
         return False
-    return _run(["tmux", "kill-session", "-t", f"={name}"]) is not None
+    return any(_run(_argv(server, "kill-session", "-t", f"={name}")) is not None
+               for server in (name, None))
 
 
 def kill_window_for_tty(tty: str) -> bool:
@@ -215,24 +290,25 @@ def kill_window_for_tty(tty: str) -> bool:
     if not tty or shutil.which("tmux") is None:
         return False
     want = tty.removeprefix("/dev/")
-    window = _window_on(want)
-    if window is None:
+    found = _window_on(want)
+    if found is None:
         return False
-    return _run(["tmux", "kill-window", "-t", window]) is not None
+    server, window = found
+    return _run(_argv(server, "kill-window", "-t", window)) is not None
 
 
-def _window_on(tty: str) -> str | None:
-    """The id of the window whose pane runs on ``tty`` (the ``ps`` spelling, no
-    ``/dev/``), or None - for a tty no pane is on, and for no server at all."""
-    listing = _run(
-        ["tmux", "list-panes", "-a", "-F", "#{pane_tty} #{window_id}"])
-    for line in (listing or "").splitlines():
-        if " " not in line:
-            continue
-        pane_tty, window = (x.strip() for x in line.split(" ", 1))
+def _window_on(tty: str) -> tuple[str | None, str] | None:
+    """The server and id of the window whose pane runs on ``tty`` (the ``ps`` spelling,
+    no ``/dev/``), or None - for a tty no pane is on, and for no server at all."""
+    for server, pane_tty, window in _pane_rows("#{pane_tty} #{window_id}") or []:
         if pane_tty.removeprefix("/dev/") == tty and window:
-            return window
+            return server, window
     return None
+
+
+def _argv(server: str | None, *args: str) -> list[str]:
+    """A tmux command on ``server`` (a ``-L`` label; None = the default server)."""
+    return ["tmux", *(["-L", server] if server else []), *args]
 
 
 def _run(argv: list[str]) -> str | None:
