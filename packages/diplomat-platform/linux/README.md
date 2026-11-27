@@ -95,7 +95,8 @@ nothing starts by itself — only *execute now* does. So the toggles decide who 
 the work, not whether you get to see it, and turning both off does not stop the
 3-minute GitHub poll. **Auto-execute queue** holds every kind at once, the reviews you
 asked for included — which is the one thing no monitor toggle speaks for. While the
-**ban list** cannot be read, every task naming an author is held, whoever asked for it. The
+**ban list** cannot be read, every task naming an author is held, whoever asked for it
+(reading *queued · ban list unreadable*). The
 **author allowlist** holds every review request from outside it, whoever asks and
 whatever else is free; it is the only one of the seven that drops the work rather than
 listing it, because nothing about it changes on the next poll.

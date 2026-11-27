@@ -141,6 +141,7 @@ itself - only *execute now* does, or a [Comms](comms.md) ping that asked for tha
 whether you get to see it, and turning both off does not stop the 3-minute GitHub
 poll. **Auto-execute queue** holds every kind at once, the reviews you asked for
 included - which is the one thing no monitor toggle speaks for. While the ban list cannot be
-read, every task naming an author is held, whoever asked for it. The
+read, every task naming an author is held, whoever asked for it (reading *queued · ban list
+unreadable*). The
 [Pipeline](pipeline.md) also holds its own asks while the ban list cannot be read, and after a
 launch or the Pipeline going on, until a sync since has judged their item.

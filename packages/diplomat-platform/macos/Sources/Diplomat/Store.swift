@@ -4297,12 +4297,17 @@ final class Store: ObservableObject {
     /// Paused, or a pipeline ask still stale (`pipelineStale`) or held by an unreadable ban
     /// list (`banListUnreadable`), unless a Slack ping took it as its ask: then it is
     /// asked-for work, which switching a monitor off never stops (`isPaused`). Work naming
-    /// an author waits while that list cannot be read, whoever asked for it.
+    /// an author waits while that list cannot be read, whoever asked for it
+    /// (`heldByBanList`).
     func isHeld(_ task: QueuedAgentTask, owned: Set<String>? = nil) -> Bool {
-        (banListUnreadable && !(task.job.authorLogin ?? "").isEmpty)
+        heldByBanList(task)
             || ((isPaused(task.job.counter)
                 || (task.job.counter == .pipeline && (banListUnreadable || pipelineStale.contains(task.id))))
                 && !(owned ?? commsOwnedKeys).contains(task.id))
+    }
+
+    func heldByBanList(_ task: QueuedAgentTask) -> Bool {
+        banListUnreadable && !(task.job.authorLogin ?? "").isEmpty
     }
 
     /// Dispatch one queued task past the capacity check its caller already made, and

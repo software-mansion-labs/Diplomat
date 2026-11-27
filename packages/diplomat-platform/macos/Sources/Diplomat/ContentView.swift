@@ -581,6 +581,7 @@ struct ContentView: View {
                 task: task,
                 tint: agentTaskTint(task.job.kind),
                 paused: store.isHeld(task),
+                banHeld: store.heldByBanList(task),
                 refusal: store.networkJobRefusals[task.job.label],
                 onRun: { Task { await store.executeQueuedTask(task.id) } },
                 cancellable: task.job.requested,
@@ -1095,6 +1096,8 @@ private struct QueuedTaskRow: View {
     /// Its monitor is switched off, so nothing will start this by itself. Worth
     /// saying on the row: "queued" otherwise promises a start that is never coming.
     let paused: Bool
+    /// Held by an unreadable ban list (`Store.heldByBanList`), not by its monitor.
+    let banHeld: Bool
     /// The network's refusal, when its reason is the job's own.
     let refusal: String?
     let onRun: () -> Void
@@ -1118,12 +1121,17 @@ private struct QueuedTaskRow: View {
         Start this agent now, without waiting for a free slot. It then counts against \
         the cap like any automatic agent.
         """
+    private static let banHeldHelp = """
+        The prompt-injection ban list cannot be read, so this agent cannot start, not \
+        even from here, until it does.
+        """
     private static let cancelHelp = """
         Drop this task from the queue without running it. You asked for it by \
         sweeping, so nothing else will bring it back.
         """
     private var runHelp: String {
-        paused ? QueuedTaskRow.pausedHelp : QueuedTaskRow.heldHelp
+        banHeld ? QueuedTaskRow.banHeldHelp
+            : paused ? QueuedTaskRow.pausedHelp : QueuedTaskRow.heldHelp
     }
     private var cancelTip: String { Store.pipelineCancelHelp(task.job) ?? QueuedTaskRow.cancelHelp }
 
@@ -1150,8 +1158,8 @@ private struct QueuedTaskRow: View {
                 HStack(spacing: 3) {
                     AgentTaskStatusLabel(status: .queued)
                     if paused {
-                        Text("· monitor off").font(.system(size: 9))
-                            .foregroundStyle(.secondary)
+                        Text(banHeld ? "· ban list unreadable" : "· monitor off")
+                            .font(.system(size: 9)).foregroundStyle(.secondary)
                     }
                 }
                 if let refusal {

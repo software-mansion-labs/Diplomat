@@ -3430,12 +3430,16 @@ class Store(QObject):
         """Paused, or a pipeline ask still stale (:attr:`_pipeline_stale`) or held by an
         unreadable ban list, unless a Slack ping took it as its ask: then it is
         asked-for work, which switching a monitor off never stops (:meth:`is_paused`).
-        Work naming an author waits while that list cannot be read, whoever asked for it."""
+        Work naming an author waits while that list cannot be read, whoever asked for it
+        (:meth:`held_by_ban_list`)."""
         held = task.job.counter == PIPELINE_COUNTER and (
             self.ban_list_unreadable or task.id in self._pipeline_stale)
-        return (self.ban_list_unreadable and bool(task.job.author_login)) or (
+        return self.held_by_ban_list(task) or (
             (self.is_paused(task.job.counter) or held)
             and task.id not in (self._comms_owned if owned is None else owned))
+
+    def held_by_ban_list(self, task: autofix.QueuedTask) -> bool:
+        return self.ban_list_unreadable and bool(task.job.author_login)
 
     def _begin_starting(self, entry: autofix.QueuedTask) -> None:
         """Move one task out of the queue and into the starting band, where it stays

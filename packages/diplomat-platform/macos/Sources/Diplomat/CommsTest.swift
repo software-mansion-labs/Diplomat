@@ -1021,7 +1021,7 @@ enum CommsTest {
         check("…and acts on no stranded ask: \(outcome(strandedAsk))", outcome(strandedAsk) == "<none>")
         let victorTask = store.queuedTasks.first { $0.id == victorKey }
         check("a queued ask naming its author waits, a Slack ping's too",
-              victorTask.map { store.isHeld($0) } == true)
+              victorTask.map { store.isHeld($0) && store.heldByBanList($0) } == true)
         // A paused queue holds whatever the gate lets through, so this probe spawns nothing.
         var probe: Store.DispatchOutcome?
         if let victorTask {
@@ -1037,7 +1037,7 @@ enum CommsTest {
         for author in ["", nil] as [String?] {
             guard var task = victorTask else { break }
             task.job.authorLogin = author
-            unattributedHeld.append(store.isHeld(task))
+            unattributedHeld.append(store.isHeld(task) || store.heldByBanList(task))
             let autoRun = store.queueAutoRun
             store.queueAutoRun = false
             unattributed.append(await store.dispatchAgent(task.job, source: .auto))
