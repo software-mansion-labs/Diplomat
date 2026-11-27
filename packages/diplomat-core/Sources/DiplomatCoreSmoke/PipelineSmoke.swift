@@ -1589,6 +1589,7 @@ func pipelineSmoke() throws {
     try pipelineGuards(base: base, root: root, team: team, t0: t0)
     try pipelineMergeSync(base: base, root: root, team: team, t0: t0)
     try pipelineRatingPass1(base: base, root: root, team: team, t0: t0)
+    try pipelineRatingPass2(base: base, root: root, t0: t0)
     try pipelineRateJobs(base: base, root: root, t0: t0)
 
     // The real gh and claude get neither token, and claude runs in the checkout.
@@ -5815,4 +5816,59 @@ private func pipelineRatingPass1(base: URL, root: PipelineSettings.Root, team: P
     check(lost.writes.first == "-diplomat:cleared #15" && cl.writes.isEmpty
           && stageOf(cl.result, prURL(15)) == "fast-track/fast" && cl.result.effects == [reviewFX(15, sha("e5"))],
           "cleared taken off, gh failing: \(lost.writes) \(stageOf(cl.result, prURL(15)))")
+}
+
+/// A first rating's fast track as decided when its answer is applied.
+private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Date) throws {
+    section("pipeline rating pass 2")
+    func dir(_ name: String) -> URL { base.appendingPathComponent("rating2-" + name) }
+    func later(_ minutes: Double) -> Date { t0.addingTimeInterval(minutes * 60) }
+    let rateOnly = PipelineSettings(roots: [root], rate: true)
+    let rateTrack = PipelineSettings(roots: [root], rate: true, fastTrack: true)
+    let tracked = ["+risk:low #11", "+complexity:low #11", "label diplomat:fast-track exists", "+diplomat:fast-track #11"]
+    func fix() -> Trackers {
+        let t = only([4, 11])
+        t.prs[0].body = "Fixes #4."
+        return t
+    }
+    /// `change` made once, as the sync applying the answer reads the PR again.
+    func applying(_ t: Trackers, _ change: @escaping (Trackers) -> Void) {
+        t.onItem = { _ in
+            t.onItem = nil
+            change(t)
+        }
+    }
+
+    // Rated while Fast track was off, its labels written once it is on: a person's.
+    let unwritten: [(String, (Trackers) -> Void)] = [
+        ("refused in part", { $0.refuseLabels = ["11 complexity:low"] }),
+        ("refused", { $0.refuseLabels = ["11"] }),
+        ("held by a stop label", { t in applying(t) { $0.prs[0].labels = ["wip"] } }),
+    ]
+    for (what, keep) in unwritten {
+        let t = fix()
+        keep(t)
+        let s1 = sync(t, rateOnly, dir("off-" + what), t0)
+        t.refuseLabels = []
+        t.prs[0].labels.removeAll { $0 == "wip" }
+        let s2 = sync(t, rateTrack, dir("off-" + what), later(5))
+        check(s1.claude == ["opus Fix the docs link"] && !s1.writes.contains("+complexity:low #11") && s2.claude.isEmpty
+              && t.prs[0].labels == ["risk:low", "complexity:low"] && s2.result.effects.isEmpty
+              && stageOf(s2.result, prURL(11)) == "human/human",
+              "rated with Fast track off, its labels \(what): \(s1.writes) then \(s2.writes) \(stageOf(s2.result, prURL(11)))")
+    }
+    // Rated with it on, held by a stop label as it was applied: still its first rating.
+    // Labelled by a person as it was applied: theirs.
+    let stopped = fix()
+    applying(stopped) { $0.prs[0].labels = ["wip"] }
+    let st1 = sync(stopped, rateTrack, dir("on-stopped"), t0)
+    stopped.prs[0].labels = []
+    let st2 = sync(stopped, rateTrack, dir("on-stopped"), later(5))
+    check(st1.writes.isEmpty && st2.claude.isEmpty && st2.writes == tracked && st2.result.effects == [reviewFX(11, sha("a1"))],
+          "rated with Fast track on, held by a stop label: \(st1.writes) then \(st2.writes)")
+    let person = fix()
+    applying(person) { $0.prs[0].labels = ["risk:low"] }
+    let pl = sync(person, rateTrack, dir("on-labelled"), t0)
+    check(pl.writes == ["+complexity:low #11"] && pl.result.effects.isEmpty && stageOf(pl.result, prURL(11)) == "human/human",
+          "labelled by a person as it was applied: \(pl.writes) \(stageOf(pl.result, prURL(11)))")
 }

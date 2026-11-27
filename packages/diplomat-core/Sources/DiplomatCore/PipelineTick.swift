@@ -1197,7 +1197,7 @@ final class PipelineSync {
                 return persist()
             }
         }
-        if unworn(entries[i].labeled) { cache[id]?.first = true }
+        judgeFirst(i)
         writeRating(i, rating, .rate)
         guard labelRating(entries[i].labels) == rating else { return failed(id) }
         cache[id]?.rating = rating
@@ -1306,7 +1306,7 @@ final class PipelineSync {
             rating = atLeastLabels(rating, entries[i].labels)
             record(i, rating, why, describe(rating) + ", as labelled meanwhile", head: head, again: again, unwritten: true)
         }
-        if unworn(entries[i].labeled) { cache[e.id]?.first = true }
+        judgeFirst(i)
         writeRating(i, rating, step)
         guard labelRating(entries[i].labels) == rating else {
             notice("\(e.item.label): its rating labels could not be written, so the rating is kept here")
@@ -1327,18 +1327,21 @@ final class PipelineSync {
         }
         log(e.id, again ? .rerated : .rated, detail, head: head, rating: rating)
         cache[e.id] = PipelineCachedRating(rating: rating, why: why, updatedAt: e.item.updatedAt,
-                                           unwritten: unwritten ? true : nil)
+                                           unwritten: unwritten ? true : nil, first: settings.fastTrack ? false : nil)
         entries[i].item.why = why
         entries[i].item.rating = rating
         entries[i].item.ratedBy = "local"
         persist()
     }
 
-    /// Whether `labeled`, a PR's timeline, shows no rating or fast-track label ever on it.
-    func unworn(_ labeled: Set<String>?) -> Bool {
+    /// Settles a rating's `first` right before its labels are first written, by whether the PR's
+    /// timeline shows no rating or fast-track label ever on it.
+    func judgeFirst(_ i: Int) {
+        let id = entries[i].id
+        guard cache[id]?.first == false else { return }
         let history = PipelineLevel.allCases.flatMap { [model.labels.risk[$0], model.labels.complexity[$0]] }
             + [model.labels.fastTrack]
-        return labeled?.isDisjoint(with: history.map { $0.lowercased() }) == true
+        cache[id]?.first = entries[i].labeled?.isDisjoint(with: history.map { $0.lowercased() }) == true ? true : nil
     }
 
     /// Puts `fastTrack` on a PR rated low/low that closes only candidates, at its first rating
