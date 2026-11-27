@@ -1667,11 +1667,20 @@ enum QueueTest {
         // The review-request twin, its reads failing while the PRs read.
         heldAnswer("review-requested", "beta", requestedPR("o2/beta", 90010))
         let heldReq = AgentTaskQueue.key(auditAction: "review-req", item: "o2/beta#90010")
+        let heldReqLedger = AutofixWork.ledgerKey(kind: AutofixWork.kindReviewReq,
+                                                  prURL: "https://github.com/o2/beta/pull/90010",
+                                                  headSha: "r90010")
+        try? Data(#"{"banned":[{"login":"qt-outsider"}]}"#.utf8).write(to: BanList.fileURL)
+        await store.runAutofixPollOnce()
+        let owedBanned = store.unaddressedReviews
         try? Data("{".utf8).write(to: BanList.fileURL)
         await store.runAutofixPollOnce()
-        check("an unreadable ban list holds a review request, recording no attempt",
-              !store.queuedTasks.map(\.id).contains(heldReq)
+        check("an unreadable ban list holds a review request in the queue, recording no attempt",
+              store.queuedTasks.map(\.id).contains(heldReq)
                   && heldRecords("reviewReqAttempts", as: ReviewAttempt.self)["o2/beta#90010"] == nil)
+        check("…and the ledger and owed count stand as a ban on its author left them",
+              !TelemetryLog.load().tasks.contains { $0.key == heldReqLedger }
+                  && store.unaddressedReviews == owedBanned)
         try? FileManager.default.removeItem(at: BanList.fileURL)
         await store.runAutofixPollOnce()
         check("a root's review request queues while it reads",

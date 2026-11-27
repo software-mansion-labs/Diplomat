@@ -18,9 +18,8 @@ root's repo in turn and acts on what they found together, and each agent starts 
 root its PR or issue belongs to.
 
 A prompt-injection ban list (`~/.diplomat/pr-monitor/banned.json`) that cannot be read
-could be banning anyone: until it reads, no review request or community issue is taken,
-work naming an author waits in the queue, and a ban or un-ban fails rather than write
-over it.
+could be banning anyone: until it reads, no community issue is taken, work naming an
+author waits in the queue, and a ban or un-ban fails rather than write over it.
 
 - **PR auto-fix** - polls my open PRs every 3 minutes, plus immediately on
   toggle-enable and, on macOS, on wake from sleep. A PR that turns CONFLICTING

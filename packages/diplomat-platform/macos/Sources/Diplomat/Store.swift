@@ -3292,22 +3292,26 @@ final class Store: ObservableObject {
         // Before dispatching, so the ledger has a queue instant to measure the
         // time-to-start against. A banned author's request is owed by GitHub's
         // reckoning but will never be dispatched, so it is left out — counting it
-        // would show a review pending forever that nothing is meant to pick up.
-        TelemetryLog.observeOwed(
-            kind: AutofixWork.kindReviewReq, duty: "review",
-            owed: Dictionary(owed.filter { !BanList.isBanned($0.author, in: banned) }.map {
-                (AutofixWork.ledgerKey(kind: AutofixWork.kindReviewReq,
-                                       prURL: $0.url, headSha: $0.headSha), $0.number)
-            }, uniquingKeysWith: { first, _ in first }))
+        // would show a review pending forever that nothing is meant to pick up. So
+        // nothing is observed while the list cannot be read.
+        if !bans.isUnreadable {
+            TelemetryLog.observeOwed(
+                kind: AutofixWork.kindReviewReq, duty: "review",
+                owed: Dictionary(owed.filter { !BanList.isBanned($0.author, in: banned) }.map {
+                    (AutofixWork.ledgerKey(kind: AutofixWork.kindReviewReq,
+                                           prURL: $0.url, headSha: $0.headSha), $0.number)
+                }, uniquingKeysWith: { first, _ in first }))
+        }
         var concluded: Set<String> = []
         var dispatched: [String: ReviewAttempt] = [:]
         for r in owed {
             let key = item(url: r.url, number: r.number)
             let stamp = AttemptStamp.reviewRequest(r)
-            // An unreadable list holds the request, which stays owed.
+            // An unreadable list reads as empty here; the dispatch gate queues the
+            // request, held.
             let decision = ReviewReconcile.decide(
                 prior: prior[key], stamp: stamp, inFlight: await inFlight(key),
-                banned: bans.isUnreadable || BanList.isBanned(r.author, in: banned), now: now)
+                banned: BanList.isBanned(r.author, in: banned), now: now)
             switch decision {
             case .skipBanned, .skipInFlight, .skipCoolingDown:
                 continue
@@ -3336,7 +3340,9 @@ final class Store: ObservableObject {
         saveReviewReqAttempts(attempts)
         // Reviews still owed with no agent on them AFTER this poll — the ones a freshly
         // spawned agent didn't cover (cooling down between retries, or a spawn that failed).
-        // Excludes banned authors, which we never auto-review, and requests a run concluded.
+        // Excludes banned authors, which we never auto-review, and requests a run concluded,
+        // so it stands while the list cannot be read.
+        guard !bans.isUnreadable else { return }
         var unaddressed = 0
         for r in owed where !BanList.isBanned(r.author, in: banned) {
             let key = item(url: r.url, number: r.number)

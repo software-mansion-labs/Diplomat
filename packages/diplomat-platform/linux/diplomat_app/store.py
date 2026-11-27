@@ -2022,22 +2022,25 @@ class Store(QObject):
         # Before dispatching, so the ledger has a queue instant to measure the
         # time-to-start against. A banned author's request is owed by GitHub's
         # reckoning but will never be dispatched, so it is left out — counting it
-        # would show a review pending forever that nothing is meant to pick up.
-        telemetry.observe_owed(autofix.WORK_REVIEW_REQ, "review", {
-            autofix.ledger_key(autofix.WORK_REVIEW_REQ, r.url, r.head_sha): r.number
-            for r in owed if not bans.is_banned(r.author, banned)
-        })
+        # would show a review pending forever that nothing is meant to pick up. So
+        # nothing is observed while the list cannot be read.
+        if not unreadable:
+            telemetry.observe_owed(autofix.WORK_REVIEW_REQ, "review", {
+                autofix.ledger_key(autofix.WORK_REVIEW_REQ, r.url, r.head_sha): r.number
+                for r in owed if not bans.is_banned(r.author, banned)
+            })
         dispatched: dict[str, autofix.ReviewAttempt] = {}
         concluded: set[str] = set()
         for r in owed:
             k = r.item
             stamp = r.stamp
-            # An unreadable list holds the request, which stays owed.
+            # An unreadable list reads as empty here; the dispatch gate queues the
+            # request, held.
             action, val = autofix.decide(
                 prior.get(k),
                 stamp,
                 self._in_flight(r.url),
-                unreadable or bans.is_banned(r.author, banned),
+                bans.is_banned(r.author, banned),
                 now,
             )
             if action == "concluded":
@@ -2054,6 +2057,9 @@ class Store(QObject):
             polled = {r.key for r in read}
             kept |= {k: a for k, a in records.items() if k.partition("#")[0] not in polled}
         self._save_attempts(key, kept)
+        # It excludes banned authors, so it stands while the list cannot be read.
+        if unreadable:
+            return
         self.unaddressed_reviews = sum(
             1
             for r in owed

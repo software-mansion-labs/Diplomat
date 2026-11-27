@@ -689,25 +689,41 @@ def test_a_review_request_runs_at_the_default_depth_unless_its_author_has_a_row(
     assert [c["prompt"] for c in calls] == ["PROMPT:8:max"]
 
 
-def test_an_unreadable_ban_list_holds_each_review_request_until_it_reads(store, monkeypatch):
-    """Held as a banned author's is, with no attempt record, and still owed."""
+def test_an_unreadable_ban_list_holds_each_review_request_in_the_queue(store, monkeypatch):
+    """Held where it stands, with no attempt record, and nothing that leaves a banned
+    author out (the ledger, the owed count) is changed until the list reads."""
     from diplomat_app import bans
     from diplomat_runtime import activity
 
     store.pr_autofix_enabled = False
     store.review_requests_enabled = True
+    store.auto_task_limit = 3
     calls = _spawn_recorder(monkeypatch, finish=True)
-    reqs = [_req(requested_at="2026-01-02", author="bob")]
+    reqs = [_req(number=n, requested_at="2026-01-02", author=a)
+            for n, a in ((3, "bob"), (4, "bob"), (5, "mallory"))]
     monkeypatch.setattr("diplomat_app.autofixmonitor.fetch_review_requests", lambda *a, **k: reqs)
     bans.banned_path().parent.mkdir(parents=True)
+    bans.banned_path().write_text('{"banned":[{"login":"mallory"}]}')
+
+    def cycle():
+        store._staged_queue = []
+        store._poll_review_requests([ROOT])
+        store.commit_queue()
+        return [e.job.pr_number for e in store.queued_tasks]
+
+    store.queue_auto_run = False
+    assert cycle() == [3, 4]
+    store.move_queued_task(autofix.queue_key("review-req", item(4)),
+                           autofix.queue_key("review-req", item(3)))
+    ledger = telemetry.load().tasks
     bans.banned_path().write_text("{")
-    store._poll_review_requests([ROOT])
-    assert (calls, store._load_attempts("reviewReqAttempts"), store.unaddressed_reviews,
-            store._staged_queue) == ([], {}, 1, [])
+    store.queue_auto_run = True
+    assert (cycle(), calls, store._load_attempts("reviewReqAttempts")) == ([4, 3, 5], [], {})
+    assert (telemetry.load().tasks, store.unaddressed_reviews) == (ledger, 2)
     assert [e.detail for e in activity.read() if e.action == "ban-skip"] == []
     bans.banned_path().unlink()
-    store._poll_review_requests([ROOT])
-    assert len(calls) == 1
+    assert cycle() == []
+    assert sorted(c["prompt"][-2:] for c in calls) == [":3", ":4", ":5"]
 
 
 def test_unaddressed_count_and_ban_skip(store, monkeypatch):
