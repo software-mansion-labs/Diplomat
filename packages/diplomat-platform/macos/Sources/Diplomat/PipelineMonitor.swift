@@ -35,7 +35,9 @@ extension Store {
     /// The forces sorted as the Linux store hands them on.
     var pipelineSettings: PipelineSettings {
         let force = PipelineSettings.Force(rate: pipelineForce.rate.sorted(),
-                                           fracture: pipelineForce.fracture.sorted())
+                                           fracture: pipelineForce.fracture.sorted(),
+                                           takeover: pipelineForce.takeover.sorted(),
+                                           revoke: pipelineForce.revoke.sorted())
         return PipelineSettings(
             roots: roots.filter { !$0.isGitLab }.map {
                 PipelineSettings.Root(owner: $0.owner, repo: $0.repo, path: $0.path, me: knownMe(for: $0))
@@ -43,7 +45,7 @@ extension Store {
             linearTeams: Store.pipelineTeams(pipelineLinearTeamsRaw),
             rate: pipelineRate, fix: pipelineFix, fastTrack: pipelineFastTrack,
             merge: pipelineMerge, fracture: pipelineFracture,
-            force: force.rate.isEmpty && force.fracture.isEmpty ? nil : force,
+            force: force.isEmpty ? nil : force,
             queued: Store.pipelineQueued(requestedWork, attempts: loadPipelineAttempts()))
     }
 
@@ -55,14 +57,27 @@ extension Store {
     }
 
     /// The switches as they stand, which a running sync re-reads before each of its writes,
-    /// merges and ratings (one that cannot read them keeps those it started with). Headless
+    /// merges and ratings (one that cannot read them keeps those it started with), and the
+    /// revokes asked, which it applies right before each merge and its asks. Headless
     /// only into a `DIPLOMAT_PIPELINE_DIR`, so a render or self-test never steers the live
     /// app's sync. Twin of `pipeline.write_control`.
     func writePipelineControl() {
         let env = ProcessInfo.processInfo.environment["DIPLOMAT_PIPELINE_DIR"] ?? ""
         guard !Headless.active || !env.isEmpty else { return }
+        let revoke = pipelineForce.revoke.sorted()
         PipelineControl(enabled: pipelineEnabled, rate: pipelineRate, fix: pipelineFix,
-                        fastTrack: pipelineFastTrack, merge: pipelineMerge, fracture: pipelineFracture).save()
+                        fastTrack: pipelineFastTrack, merge: pipelineMerge, fracture: pipelineFracture,
+                        revoke: revoke.isEmpty ? nil : revoke).save()
+    }
+
+    /// The revokes `control.json` holds that no sync answered before the app quit, asked
+    /// again so the first sync applies them. Read only where `writePipelineControl` writes.
+    func restorePipelineRevokes() {
+        let env = ProcessInfo.processInfo.environment["DIPLOMAT_PIPELINE_DIR"] ?? ""
+        guard !Headless.active || !env.isEmpty else { return }
+        for id in PipelineControl.read()?.revoke ?? [] where !pipelineForce.revoke.contains(id) {
+            pipelineForce.revoke.append(id)
+        }
     }
 
     nonisolated static func pipelineTeams(_ raw: String) -> [PipelineSettings.LinearTeam] {
@@ -171,7 +186,9 @@ extension Store {
             if ran, let sent = settings.force {
                 pipelineForce = PipelineSettings.Force(
                     rate: pipelineForce.rate.filter { !sent.rate.contains($0) },
-                    fracture: pipelineForce.fracture.filter { !sent.fracture.contains($0) })
+                    fracture: pipelineForce.fracture.filter { !sent.fracture.contains($0) },
+                    takeover: pipelineForce.takeover.filter { !sent.takeover.contains($0) },
+                    revoke: pipelineForce.revoke.filter { !sent.revoke.contains($0) })
             }
             await applyPipeline(result, judged: ran && epoch == pipelineEpoch, handed: handed)
         } while pipelineSyncAgain && pipelineEnabled
@@ -664,10 +681,21 @@ extension Store {
         Task { await runPipelineSyncOnce() }
     }
 
-    /// Rate now / Fracture: rated or split on the next sync, ahead of every limit.
-    func forcePipeline(rate id: String? = nil, fracture split: String? = nil) {
+    /// Rate now / Fracture / Authorize or Revoke takeover: done on the next sync, ahead of
+    /// every limit. Of a takeover and a revoke asked of one item, the last asked wins.
+    func forcePipeline(rate id: String? = nil, fracture split: String? = nil,
+                       takeover taken: String? = nil, revoke: String? = nil) {
         if let id, !pipelineForce.rate.contains(id) { pipelineForce.rate.append(id) }
         if let split, !pipelineForce.fracture.contains(split) { pipelineForce.fracture.append(split) }
+        if let taken {
+            pipelineForce.revoke.removeAll { $0 == taken }
+            if !pipelineForce.takeover.contains(taken) { pipelineForce.takeover.append(taken) }
+        }
+        if let revoke {
+            pipelineForce.takeover.removeAll { $0 == revoke }
+            if !pipelineForce.revoke.contains(revoke) { pipelineForce.revoke.append(revoke) }
+        }
+        if taken != nil || revoke != nil { writePipelineControl() }
         syncPipelineNow()
     }
 
@@ -693,7 +721,7 @@ extension Store {
         return "Diplomat has this Linear issue's text only while Open fix PRs is on"
     }
 
-    /// Why a sync would rate and split nothing: the ban list cannot be read. Twin of
+    /// Why a sync would rate, split and take over nothing: the ban list cannot be read. Twin of
     /// `Store.pipeline_ban_unread`.
     var pipelineBanUnread: String? {
         banListUnreadable ? "The prompt-injection ban list could not be read" : nil

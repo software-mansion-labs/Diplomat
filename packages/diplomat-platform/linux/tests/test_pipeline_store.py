@@ -129,12 +129,48 @@ def test_a_sync_is_handed_the_github_roots_the_teams_and_the_switches(pipe, monk
     pipe.pipeline_force_now("rate", ISSUE)
     pipe.pipeline_force_now("rate", PR)
     pipe.pipeline_force_now("fracture", ISSUE)
+    pipe.pipeline_force_now("takeover", PR)
+    pipe.pipeline_force_now("takeover", ISSUE)
+    pipe.pipeline_force_now("revoke", LINEAR)
     assert pipe.pipeline_settings_payload() == {
         "roots": [{"owner": "o", "repo": "r", "path": "/src/r", "me": "alice"}],
         "linearTeams": [{"key": "ENG", "repo": "o/r"}, {"key": "OPS", "repo": "o/other"}],
         "rate": False, "fix": True, "fastTrack": True, "merge": False, "fracture": False,
-        "force": {"rate": [ISSUE, PR], "fracture": [ISSUE]}, "queued": [],
+        "force": {"rate": [ISSUE, PR], "fracture": [ISSUE], "takeover": [ISSUE, PR],
+                  "revoke": [LINEAR]}, "queued": [],
     }
+
+
+def test_a_takeover_and_a_revoke_of_one_item_drop_each_others_ask(pipe, monkeypatch):
+    """Of a takeover and a revoke of one item, the later ask stands. Each asks for a sync
+    now."""
+    syncs = []
+    monkeypatch.setattr(Store, "run_pipeline_sync_async", lambda self: syncs.append(1))
+
+    def forced() -> tuple[frozenset, frozenset]:
+        return pipe.pipeline_forced("takeover"), pipe.pipeline_forced("revoke")
+
+    pipe.pipeline_force_now("revoke", ISSUE)
+    pipe.pipeline_force_now("revoke", PR)
+    pipe.pipeline_force_now("takeover", ISSUE)
+    assert forced() == ({ISSUE}, {PR})
+    pipe.pipeline_force_now("revoke", ISSUE)
+    assert forced() == (frozenset(), {ISSUE, PR})
+    assert _control()["revoke"] == [ISSUE, PR]
+    pipe.pipeline_force_now("rate", ISSUE)
+    pipe.pipeline_force_now("takeover", ISSUE)
+    assert (pipe.pipeline_forced("rate"), *forced()) == ({ISSUE}, {ISSUE}, {PR})
+    assert _control()["revoke"] == [PR]
+    pipe.pipeline_force_now("takeover", PR)
+    assert "revoke" not in _control()
+    assert len(syncs) == 7
+
+
+def test_a_revoke_no_sync_answered_before_a_quit_is_asked_again_at_launch(pipe):
+    pipe.pipeline_force_now("revoke", PR)
+    assert Store().pipeline_forced("revoke") == {PR}
+    (pipeline.pipeline_dir() / "control.json").write_text('{"revoke": "not a list"}')
+    assert Store().pipeline_forced("revoke") == frozenset()
 
 
 # MARK: - Effects to asks
@@ -646,7 +682,7 @@ def test_a_failed_sync_keeps_the_last_result_and_the_forced_items(pipe, monkeypa
     assert pipe.pipeline_result["effects"] == [_fix()]
     assert pipe.pipeline_error is None
     assert pipe.pipeline_forced("rate") == {PR}
-    assert handed == [{"rate": [ISSUE], "fracture": []}] * 3
+    assert handed == [{"rate": [ISSUE], "fracture": [], "takeover": [], "revoke": []}] * 3
     assert _feed("pipeline-error") == ["gh: rate limited"]
     assert _feed("pipeline-recovered") == ["Pipeline syncing again"]
     assert _keys(pipe) == ["issues:o/r#12"]
@@ -1042,6 +1078,9 @@ def test_a_syncs_deadline_grows_with_what_it_may_do(monkeypatch):
     assert pipeline.tick_timeout({}) == 5 * 1345 + 1950 + 14170 + 40
     # A gh call for each item an ask is held for.
     assert pipeline.tick_timeout({"queued": ["a", "b"]}) == pipeline.tick_timeout({}) + 2 * 65
+    # Twice a re-read and two label writes for each takeover or revoke asked.
+    assert pipeline.tick_timeout({"force": {"takeover": ["a", "b"], "revoke": ["c"]}}) == (
+        pipeline.tick_timeout({}) + 3 * 6 * 65)
 
 
 def test_a_syncs_deadline_fits_a_capped_roots_whole_read():
@@ -1552,6 +1591,44 @@ def test_a_sync_that_found_the_lock_held_retires_nothing(pipe, monkeypatch):
     pipe._apply_pipeline_sync(pipe._pipeline_sync_once())
     assert pipe.pipeline_forced("rate") == frozenset()
     assert _keys(pipe) == []
+
+
+def test_a_takeover_and_a_revoke_are_retired_only_by_a_sync_that_ran(pipe, monkeypatch):
+    monkeypatch.setattr(Store, "run_pipeline_sync_async", lambda self: None)
+    answers = [_result(at="2026-11-20T10:00:00Z"), _result()]
+    handed = []
+
+    def tick(settings, started=None):
+        handed.append(settings["force"])
+        return answers.pop(0)
+
+    monkeypatch.setattr(pipeline, "tick", tick)
+    pipe.pipeline_force_now("takeover", ISSUE)
+    pipe.pipeline_force_now("revoke", PR)
+    pipe._apply_pipeline_sync(pipe._pipeline_sync_once())
+    assert (pipe.pipeline_forced("takeover"), pipe.pipeline_forced("revoke")) == ({ISSUE}, {PR})
+    plan = pipe._pipeline_sync_once()
+    # Asked while it ran: kept for the next.
+    pipe.pipeline_force_now("takeover", LINEAR)
+    pipe._apply_pipeline_sync(plan)
+    assert (pipe.pipeline_forced("takeover"), pipe.pipeline_forced("revoke")) == (
+        {LINEAR}, frozenset())
+    assert handed == [{"rate": [], "fracture": [], "takeover": [ISSUE], "revoke": [PR]}] * 2
+
+
+@pytest.mark.skipif(not os.environ.get("DIPLOMAT_CORE_BIN"), reason="DIPLOMAT_CORE_BIN not set")
+def test_the_real_core_is_handed_the_takeover_and_the_revoke_asked(pipe, monkeypatch):
+    """``diplomat-core pipeline-tick`` with no root to read: it says why it took nothing
+    over, and the sync, which ran, retires both asks."""
+    monkeypatch.setattr(review, "repo_roots", lambda: [LAB])
+    monkeypatch.setattr(Store, "run_pipeline_sync_async", lambda self: None)
+    pipe.pipeline_force_now("takeover", ISSUE)
+    pipe.pipeline_force_now("revoke", PR)
+    pipe._apply_pipeline_sync(pipe._pipeline_sync_once())
+    assert pipe.pipeline_error is None
+    assert pipe.pipeline_result["notices"] == [f"{ISSUE} was not read, so it was not taken over"]
+    assert (pipe.pipeline_forced("takeover"), pipe.pipeline_forced("revoke")) == (
+        frozenset(), frozenset())
 
 
 def test_ran_since_is_to_the_second():

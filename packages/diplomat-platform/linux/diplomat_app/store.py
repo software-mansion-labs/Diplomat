@@ -575,10 +575,15 @@ class Store(QObject):
         self._pipeline_stopped = False
         # The running Linear sign-in's core (:meth:`linear_login`).
         self._linear_login_proc: subprocess.Popen | None = None
-        # Item ids the screen asked to rate or fracture ahead of every limit, until a
-        # sync that was handed them answers.
-        self._pipeline_force: dict[str, frozenset[str]] = {"rate": frozenset(),
-                                                           "fracture": frozenset()}
+        # Item ids the screen asked for ahead of every limit, by ask
+        # (:meth:`pipeline_force_now`), until a sync that was handed them answers.
+        self._pipeline_force: dict[str, frozenset[str]] = {
+            kind: frozenset() for kind in ("rate", "fracture", "takeover", "revoke")}
+        # The revokes no sync answered before the app quit, asked again so the first sync
+        # applies them; read only where :meth:`_write_pipeline_control` writes. Twin of
+        # ``Store.restorePipelineRevokes``.
+        if not headless.active(os.environ) or os.environ.get("DIPLOMAT_PIPELINE_DIR"):
+            self._pipeline_force["revoke"] = frozenset(pipeline.control_revokes())
         # Bumped as the master switch flips or Fix / Fast track goes off: a sync begun
         # before may have been switched off midway, emitting less than it owes, so its
         # result withdraws and prunes nothing (:meth:`_apply_pipeline_sync`).
@@ -1403,10 +1408,11 @@ class Store(QObject):
                 self._pipeline_stale = {w.key for w in self.requested_work if w.pipeline}
 
     def pipeline_control(self) -> dict:
-        """``control.json``'s switches as they stand (:func:`pipeline.write_control`)."""
+        """``control.json``'s switches and revokes as they stand (:func:`pipeline.write_control`)."""
         return {"enabled": self.pipeline_enabled, "rate": self.pipeline_rate,
                 "fix": self.pipeline_fix, "fastTrack": self.pipeline_fast_track,
-                "merge": self.pipeline_merge, "fracture": self.pipeline_fracture}
+                "merge": self.pipeline_merge, "fracture": self.pipeline_fracture,
+                "revoke": sorted(self.pipeline_forced("revoke"))}
 
     def _write_pipeline_control(self) -> None:
         """Headless only into a ``DIPLOMAT_PIPELINE_DIR``, so a render never steers the
@@ -5112,11 +5118,18 @@ class Store(QObject):
             return self._pipeline_force[kind]
 
     def pipeline_force_now(self, kind: str, item_id: str) -> None:
-        """The screen's "Rate now" (``rate``) or "Fracture" (``fracture``): the item goes
-        ahead of every limit in a sync started now."""
+        """The screen's "Rate now" (``rate``), "Fracture" (``fracture``), "Authorize
+        takeover" (``takeover``) or "Revoke takeover" (``revoke``): the item goes ahead of
+        every limit in a sync started now. A takeover or revoke drops the other's ask, so
+        the last asked stands."""
+        undone = {"takeover": "revoke", "revoke": "takeover"}.get(kind)
         with self._pipeline_lock:
-            self._pipeline_force = {**self._pipeline_force,
-                                    kind: self._pipeline_force[kind] | {item_id}}
+            force = {**self._pipeline_force, kind: self._pipeline_force[kind] | {item_id}}
+            if undone is not None:
+                force[undone] = force[undone] - {item_id}
+            self._pipeline_force = force
+        if undone is not None:
+            self._write_pipeline_control()
         self.pipeline_changed.emit()
         self.run_pipeline_sync_async()
 
@@ -5563,8 +5576,8 @@ class Store(QObject):
         return "Diplomat has this Linear issue's text only while Open fix PRs is on"
 
     def pipeline_ban_unread(self) -> str | None:
-        """Why a sync would rate and split nothing: the ban list cannot be read; None
-        while it can. Twin of ``Store.pipelineBanUnread``."""
+        """Why a sync would rate, split and take over nothing: the ban list cannot be
+        read; None while it can. Twin of ``Store.pipelineBanUnread``."""
         return ("The prompt-injection ban list could not be read" if self.ban_list_unreadable
                 else None)
 
