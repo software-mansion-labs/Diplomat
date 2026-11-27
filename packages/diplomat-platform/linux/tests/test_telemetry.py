@@ -18,6 +18,7 @@ import os
 import re
 import shlex
 import time
+from pathlib import Path
 
 import pytest
 
@@ -733,6 +734,15 @@ def test_a_deleted_transcript_drops_its_cursor(scanner):
     usagescan.totals()
     state = json.loads(usagescan.cursor_path().read_text(encoding="utf-8"))
     assert state["files"] == {}
+
+
+def test_both_scanners_credit_the_transcripts_to_the_runners_not_the_agents():
+    """Every Claude Code turn is summed, the operator's own included."""
+    swift = (Path(__file__).resolve().parents[2] / "macos" / "Sources" / "Diplomat"
+             / "UsageScan.swift").read_text(encoding="utf-8")
+    for doc in (swift, usagescan.__doc__):
+        source = re.search(r"telemetry comes from: the (\w+)' own transcripts", doc)
+        assert source and source[1] == "runners", doc[:200]
 
 
 # MARK: - Per-task attribution

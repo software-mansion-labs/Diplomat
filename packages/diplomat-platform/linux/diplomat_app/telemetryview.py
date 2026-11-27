@@ -1058,7 +1058,7 @@ class TelemetryView(QWidget):
 
 class SplitBar(QWidget):
     """A single horizontal bar split between two quantities: the Telemetry
-    screen's Diplomat share of this machine's tokens against everything else, and the
+    screen's repo share of this machine's tokens against everything else, and the
     Machines screen's CPU or RAM use of one machine against what is left."""
 
     def __init__(self, left: float, right: float,

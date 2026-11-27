@@ -21,7 +21,9 @@ written through the real recorder into the per-test temp dir.
 
 from __future__ import annotations
 
+import re
 import time
+from pathlib import Path
 
 import pytest
 
@@ -813,3 +815,17 @@ def test_task_markers_sit_on_the_weekly_line(app):
     assert not _band_has(unfinished, red, *low), (
         "an unfinished task painted a finish dot — done=None must be a lone start"
     )
+
+
+def test_both_split_bars_name_the_token_split_for_the_repo_not_diplomat():
+    """The split is by each turn's cwd (tokenShare's ``_comment``), so it cannot be
+    credited to Diplomat."""
+    from diplomat_app.telemetryview import SplitBar
+
+    swift = (Path(__file__).resolve().parents[2] / "macos" / "Sources" / "Diplomat"
+             / "Components.swift").read_text(encoding="utf-8")
+    swift_doc = re.search(r"((?:^///.*\n)+)struct SplitBar\b", swift, re.M)[1]
+    for doc in (swift_doc.replace("///", ""), SplitBar.__doc__):
+        named = re.search(r"Telemetry(?: screen)?'s (.+?) share of (?:the|this) "
+                          r"machine's tokens", " ".join(doc.split()))
+        assert named and named[1] == "repo", doc

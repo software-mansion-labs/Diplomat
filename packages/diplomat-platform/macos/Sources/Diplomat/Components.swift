@@ -533,7 +533,7 @@ struct SliderSetting: View {
     }
 }
 
-/// A single horizontal bar split between two quantities: Telemetry's Diplomat share of
+/// A single horizontal bar split between two quantities: Telemetry's repo share of
 /// the machine's tokens, a machine's CPU and RAM use against what is left.
 struct SplitBar: View {
     let left: Double
