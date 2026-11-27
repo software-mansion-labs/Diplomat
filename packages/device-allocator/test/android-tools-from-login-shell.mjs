@@ -18,7 +18,7 @@ const CALLS = path.join(BASE, 'adb.log');
 // launchd's PATH, minus any adb the host has installed.
 const BIN = path.join(BASE, 'bin');
 fs.mkdirSync(BIN);
-for (const tool of ['sleep', 'printenv', 'touch']) {
+for (const tool of ['sleep', 'printenv']) {
   fs.symlinkSync(execFileSync('/bin/sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).trim(), path.join(BIN, tool));
 }
 fs.mkdirSync(path.join(SDK, 'platform-tools'), { recursive: true });
@@ -54,6 +54,8 @@ function launchd(extra, body = LIST) {
   fs.rmSync(CALLS, { force: true });
   const started = Date.now();
   const out = execFileSync(process.execPath, ['--input-type=module', '-e', `
+    const fs = await import('node:fs');
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const dev = await import(${JSON.stringify(path.join(SRC, 'devices.js'))});
     const p = await import(${JSON.stringify(path.join(SRC, 'paths.js'))});
     const t0 = Date.now();
@@ -67,8 +69,7 @@ function launchd(extra, body = LIST) {
   return { ...JSON.parse(out || '{}'), probes: lines(PROBES), calls: lines(CALLS), wallMs: Date.now() - started };
 }
 
-const gone = (pidFile) => {
-  const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+const gone = (pid) => {
   for (let i = 0; i < 40; i++) {
     try { process.kill(pid, 0); } catch { return true; }
     execFileSync('/bin/sleep', ['0.05']);
@@ -93,8 +94,10 @@ try {
   assert.equal(both.adb, ADB, 'ANDROID_HOME wins over ANDROID_SDK_ROOT');
   console.log('ok   ANDROID_SDK_ROOT from the login shell, after ANDROID_HOME');
 
-  // The SDK root on PATH too: its emulator/ directory is no binary.
-  const byPath = launchd({ SHELL: shell('rc-path', `PATH="$PATH:${SDK}:${SDK}/platform-tools:${SDK}/emulator"`) });
+  // A stale ANDROID_HOME, and the SDK root on PATH too: its emulator/ directory is no binary.
+  const byPath = launchd({
+    SHELL: shell('rc-path', `export ANDROID_HOME='${BASE}/no-sdk'; PATH="$PATH:${SDK}:${SDK}/platform-tools:${SDK}/emulator"`),
+  });
   assert.deepEqual(byPath.devices, BOOTED, 'the SDK binaries on the PATH the rc sets are listed');
   assert.equal(byPath.adb, ADB);
   assert.equal(byPath.emulator, EMULATOR);
@@ -109,45 +112,68 @@ try {
   assert.deepEqual([adbOnOwnPath.adb, adbOnOwnPath.emulator], ['adb', EMULATOR], 'only the missing one is looked up');
   console.log('ok   own PATH first');
 
-  // A job the rc leaves running on the probe's stdout neither delays the answer nor
-  // keeps the process alive.
+  // An rc that reads stdin, and a job it leaves running on the probe's stdout, neither
+  // delay the answer nor keep the process alive.
   const JOB = path.join(BASE, 'job.pid');
   const job = launchd({
-    SHELL: shell('rc-job', `${HOME_RC}; [ "$1" = -i ] && { sleep 8 & echo $! > '${JOB}'; }`),
+    SHELL: shell('rc-job', `${HOME_RC}; read answer; [ "$1" = -i ] && { sleep 8 & echo $! > '${JOB}'; }`),
     DA_LOGIN_SHELL_TIMEOUT_MS: '5000',
   });
   try { process.kill(Number(fs.readFileSync(JOB, 'utf8'))); } catch {}
   assert.deepEqual(job.devices, BOOTED);
   assert.ok(job.wallMs < 4000, `took ${job.wallMs}ms beside an 8s rc job`);
-  console.log('ok   rc job holding stdout');
+  console.log('ok   rc reading stdin, rc job holding stdout');
 
   const sameAnswer = launchd({ SHELL: shell('rc-no-sdk', 'true'), DA_LOGIN_SHELL_RETRY_MS: '1' },
     'for (let i = 0; i < 3; i++) await dev.listAndroid(); return {};');
   assert.equal(sameAnswer.probes.length, 2, `a shell that answered is asked once: ${sameAnswer.probes}`);
   console.log('ok   an answered probe is kept');
 
-  // A hung rc: the probe gives up, its whole group goes with it, and it is asked again.
+  const quits = shell('rc-quits', 'exit 0');
+  const unanswered = launchd({ SHELL: quits },
+    "for (let i = 0; i < 3; i++) await dev.listAndroid(); return { exitListeners: process.listenerCount('exit') };");
+  assert.deepEqual(unanswered.probes, [`${quits} -l`], 'a shell that did not answer is not asked again at once');
+  assert.ok(unanswered.wallMs < 5000, `took ${unanswered.wallMs}ms on a shell that quit`);
+  assert.equal(unanswered.exitListeners, 0);
+  console.log('ok   an unanswered probe waits before it is asked again');
+
+  // A hung rc: the probe gives up and its whole group goes with it. The retry hangs too,
+  // without holding up its caller, and the one after it answers.
   const PID = path.join(BASE, 'hung.pid');
-  const ONCE = path.join(BASE, 'hung-once');
-  const hung = launchd({
-    SHELL: shell('rc-hung', `${HOME_RC}; [ "$1" = -i ] && [ ! -f '${ONCE}' ] && { touch '${ONCE}'; sleep 600 & echo $! > '${PID}'; wait; }`),
-    DA_LOGIN_SHELL_TIMEOUT_MS: '2000', DA_LOGIN_SHELL_RETRY_MS: '1',
-  }, `const first = await dev.listAndroid();
-    const second = await dev.listAndroid();
-    return { first: first.length, second: second.length };`);
-  assert.deepEqual([hung.first, hung.second], [0, 1], 'nothing on the hung probe; the AVD once asked again');
-  assert.ok(hung.wallMs < 8000, `took ${hung.wallMs}ms on a 2s probe`);
-  assert.ok(gone(PID), 'the hung rc outlived the probe');
-  fs.rmSync(ONCE);
-  const exited = launchd({ SHELL: path.join(BASE, 'rc-hung'), DA_LOGIN_SHELL_TIMEOUT_MS: '10000' },
-    'dev.listAndroid(); await new Promise((r) => setTimeout(r, 300)); process.exit(0);');
+  const HANG = path.join(BASE, 'hang');
+  const hungShell = shell('rc-hung', `${HOME_RC}; [ "$1" = -i ] && [ -f '${HANG}' ] && { sleep 600 & echo $! > '${PID}'; wait; }`);
+  fs.writeFileSync(HANG, '');
+  const hung = launchd({ SHELL: hungShell, DA_LOGIN_SHELL_TIMEOUT_MS: '3000', DA_LOGIN_SHELL_RETRY_MS: '1' },
+    `const pidFile = ${JSON.stringify(PID)};
+    const first = (await dev.listAndroid()).length;
+    const pids = [fs.readFileSync(pidFile, 'utf8').trim()];
+    fs.rmSync(pidFile);
+    await sleep(5);
+    const t = Date.now();
+    await dev.listAndroid();
+    const retryMs = Date.now() - t;
+    while (!fs.existsSync(pidFile)) await sleep(20);
+    pids.push(fs.readFileSync(pidFile, 'utf8').trim());
+    fs.rmSync(${JSON.stringify(HANG)});
+    let then = 0;
+    for (let i = 0; i < 300 && !then; i++) { await sleep(50); then = (await dev.listAndroid()).length; }
+    return { first, retryMs, then, pids };`);
+  assert.deepEqual([hung.first, hung.then], [0, 1], 'nothing on the hung probe; the AVD once asked again');
+  assert.ok(hung.retryMs < 1000, `a retry held its caller for ${hung.retryMs}ms`);
+  assert.equal(hung.probes.length, 6, `one probe, then one retry at a time: ${hung.probes}`);
+  assert.ok(hung.ms >= 6000 && hung.wallMs < 15000, `listed after ${hung.ms}ms on two hung 3s probes, one at a time`);
+  for (const pid of hung.pids) assert.ok(gone(Number(pid)), 'a hung rc outlived its probe');
+  fs.writeFileSync(HANG, '');
+  fs.rmSync(PID);
+  const exited = launchd({ SHELL: hungShell },
+    `dev.listAndroid();
+    while (!fs.existsSync(${JSON.stringify(PID)})) await sleep(20);
+    process.exit(0);`);
   assert.ok(exited.wallMs < 5000);
-  assert.ok(gone(PID), 'the hung rc outlived the process that started it');
+  assert.ok(gone(Number(fs.readFileSync(PID, 'utf8'))), 'the hung rc outlived the process that started it');
   console.log('ok   hung rc: probe times out, shell group killed, asked again');
 
-  const NO_SHEBANG = script(path.join(BASE, 'no-shebang'), '');
-  fs.writeFileSync(NO_SHEBANG, 'echo hi\n');
-  for (const SHELL of [path.join(BASE, 'no-such-shell'), NO_SHEBANG]) {
+  for (const SHELL of [path.join(BASE, 'no-such-shell'), path.join(ADB, 'sh')]) {
     assert.deepEqual(launchd({ SHELL }).devices, [], `SHELL=${SHELL}`);
   }
   console.log('ok   a shell that cannot start');

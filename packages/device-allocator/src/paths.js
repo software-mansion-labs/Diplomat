@@ -71,28 +71,30 @@ const onPath = (name, dirs = '') => dirs.split(path.delimiter).filter(Boolean)
 // A bare name no PATH entry holds is looked up where the operator's terminal would
 // find it: the SDK under the ANDROID_HOME / ANDROID_SDK_ROOT their shell's rc files
 // export, else on that shell's PATH. A daemon launchd started inherits neither. Run
-// before either binary. A shell that answered is not asked again in this process; one
-// that did not is asked again LOGIN_SHELL_RETRY_MS later.
+// before either binary. Callers wait on the first probe only. A shell that answered is
+// not asked again in this process; one that did not is asked again, in the background,
+// LOGIN_SHELL_RETRY_MS later.
 let located;
 let retryAt = 0;
 export function locateAndroidTools() {
-  if (!located || (retryAt && Date.now() >= retryAt)) {
-    retryAt = 0;
-    located = (async () => {
-      const missing = (bin, name) => bin === name && !onPath(name, process.env.PATH);
-      if (!missing(ADB_BIN, 'adb') && !missing(EMULATOR_BIN, 'emulator')) return;
-      const env = await loginShellEnv(['ANDROID_HOME', 'ANDROID_SDK_ROOT', 'PATH']);
-      if (!env) { retryAt = Date.now() + LOGIN_SHELL_RETRY_MS; return; }
-      const root = env.ANDROID_HOME || env.ANDROID_SDK_ROOT;
-      const find = (dir, name) => {
-        const sdk = root && path.join(root, dir, name);
-        return sdk && isExecutableFile(sdk) ? sdk : onPath(name, env.PATH);
-      };
-      if (missing(ADB_BIN, 'adb')) ADB_BIN = find('platform-tools', 'adb') || ADB_BIN;
-      if (missing(EMULATOR_BIN, 'emulator')) EMULATOR_BIN = find('emulator', 'emulator') || EMULATOR_BIN;
-    })();
-  }
+  if (!located) located = probeAndroidTools();
+  else if (retryAt && Date.now() >= retryAt) probeAndroidTools();
   return located;
+}
+
+async function probeAndroidTools() {
+  retryAt = 0;
+  const missing = (bin, name) => bin === name && !onPath(name, process.env.PATH);
+  if (!missing(ADB_BIN, 'adb') && !missing(EMULATOR_BIN, 'emulator')) return;
+  const env = await loginShellEnv(['ANDROID_HOME', 'ANDROID_SDK_ROOT', 'PATH']);
+  if (!env) { retryAt = Date.now() + LOGIN_SHELL_RETRY_MS; return; }
+  const root = env.ANDROID_HOME || env.ANDROID_SDK_ROOT;
+  const find = (dir, name) => {
+    const sdk = root && path.join(root, dir, name);
+    return sdk && isExecutableFile(sdk) ? sdk : onPath(name, env.PATH);
+  };
+  if (missing(ADB_BIN, 'adb')) ADB_BIN = find('platform-tools', 'adb') || ADB_BIN;
+  if (missing(EMULATOR_BIN, 'emulator')) EMULATOR_BIN = find('emulator', 'emulator') || EMULATOR_BIN;
 }
 
 const ENV_MARK = 'diplomat-env:';
