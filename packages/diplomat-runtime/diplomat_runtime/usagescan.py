@@ -1,4 +1,4 @@
-"""Where the token half of the telemetry comes from: the agents' own transcripts.
+"""Where the token half of the telemetry comes from: the runners' own transcripts.
 
 Claude Code's are read off disk and are most of this module; an OpenCode run keeps
 its own elsewhere, and "The other runner's transcript" below is where it is priced.
