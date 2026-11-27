@@ -1198,7 +1198,9 @@ func statusText(for outcome: Store.DispatchOutcome, terminal: String) -> String 
     switch outcome {
     case .spawned: return "Launched \(terminal) · \(Fmt.clock(Date()))"
     case .inFlight: return "An agent is already on this PR — see its session above."
-    case .banned: return "Author is banned for prompt injection — un-ban to review."
+    case .banned:
+        return BanList.readFile().isUnreadable ? "The prompt-injection ban list could not be read."
+            : "Author is banned for prompt injection — un-ban to review."
     case .notAllowed: return "Author is outside the auto-review list."
     case .atCapacity: return "This machine is at its cap of concurrent automatic tasks."
     case .unaffordable: return "Too little rate limit left for automatic work."

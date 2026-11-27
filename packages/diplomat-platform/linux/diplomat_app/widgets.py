@@ -1009,7 +1009,10 @@ def dispatch_status_text(verdict: str, terminal_title: str, *,
     if verdict == autofix.VERDICT_IN_FLIGHT:
         return "An agent is already on this PR - see its session above."
     if verdict == autofix.VERDICT_BANNED:
-        return "Author is banned for prompt injection - un-ban to review."
+        from . import bans
+
+        return ("The prompt-injection ban list could not be read." if bans.unreadable()
+                else "Author is banned for prompt injection - un-ban to review.")
     # A wizard SPAWN is a panel dispatch, so none of the task cap, the disk floor and
     # the rate-limit budget applies to it, and the allowlist speaks for the review
     # monitor's own finds. Spelled out anyway, and matching the Swift twin word for

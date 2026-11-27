@@ -104,7 +104,8 @@ class BannedAuthor:
 
 
 def read() -> list[BannedAuthor]:
-    """The current banned authors; empty when the file is absent or malformed."""
+    """The current banned authors; empty when the file is absent or malformed, which a
+    gate tells apart (:func:`unreadable`): a malformed list could be banning anyone."""
     try:
         obj = json.loads(banned_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -133,6 +134,10 @@ def unreadable() -> bool:
     path = banned_path()
     data = atomicjson.read_object(path)
     return path.exists() if data is None else not isinstance(data.get("banned", []), list)
+
+
+#: Why a gate refused work while the list is :func:`unreadable`.
+UNREADABLE = "the prompt-injection ban list could not be read"
 
 
 def is_banned(login: str, banned: list[BannedAuthor]) -> bool:

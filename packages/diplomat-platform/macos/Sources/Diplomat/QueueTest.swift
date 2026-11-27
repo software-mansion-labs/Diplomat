@@ -66,6 +66,12 @@ enum QueueTest {
             .appendingPathComponent("diplomat-queuetest-agents-\(UUID().uuidString)")
         setenv("DIPLOMAT_AGENTS_DIR", agents.path, 1)
         defer { try? FileManager.default.removeItem(at: agents) }
+        // And the ban list, which every gate reads.
+        let bans = FileManager.default.temporaryDirectory
+            .appendingPathComponent("diplomat-queuetest-bans-\(UUID().uuidString)")
+        setenv("DA_BAN_DIR", bans.path, 1)
+        try? FileManager.default.createDirectory(at: bans, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: bans) }
         // And the machine the book is resolved against. `emptyBook()` below controls the
         // records; it cannot control `ps`, and the cap load is not a fold over records
         // alone — `AgentState.synthesizeUntracked` makes every live agent with no record
@@ -621,6 +627,20 @@ enum QueueTest {
         store.queueCommunityIssues([filed(72, minutes: 2), filed(73, minutes: 3)], root: argent, me: store.effectiveMe)
         check("…and what is filed after it as before",
               store.requestedWork.map(\.key) == [key("issues", 73)])
+        store.requestedWork = []
+        store.queuedTasks = []
+        let listedBan = Data(#"{"banned":[{"login":"mallory"}]}"#.utf8)
+        let laterIssues = [filed(74, minutes: 4, author: "mallory"), filed(75, minutes: 5)]
+        try? Data("{".utf8).write(to: BanList.fileURL)
+        store.queueCommunityIssues(laterIssues, root: argent, me: store.effectiveMe)
+        check("an unreadable ban list queues no issue", store.requestedWork.isEmpty)
+        try? listedBan.write(to: BanList.fileURL)
+        store.queueCommunityIssues(laterIssues, root: argent, me: store.effectiveMe)
+        let banSkip = AuditLog.read().first { $0.action == "ban-skip" }?.detail ?? "<none>"
+        check("…and keeps the mark, so each is judged once it reads: \(banSkip)",
+              store.requestedWork.map(\.key) == [key("issues", 75)]
+                  && banSkip == "Issue #74 by @mallory — author is banned, not queued")
+        try? FileManager.default.removeItem(at: BanList.fileURL)
         store.requestedWork = []
         store.queuedTasks = []
 
@@ -1635,8 +1655,14 @@ enum QueueTest {
 
         // The review-request twin, its reads failing while the PRs read.
         heldAnswer("review-requested", "beta", requestedPR("o2/beta", 90010))
-        await store.runAutofixPollOnce()
         let heldReq = AgentTaskQueue.key(auditAction: "review-req", item: "o2/beta#90010")
+        try? Data("{".utf8).write(to: BanList.fileURL)
+        await store.runAutofixPollOnce()
+        check("an unreadable ban list holds a review request, recording no attempt",
+              !store.queuedTasks.map(\.id).contains(heldReq)
+                  && heldRecords("reviewReqAttempts", as: ReviewAttempt.self)["o2/beta#90010"] == nil)
+        try? FileManager.default.removeItem(at: BanList.fileURL)
+        await store.runAutofixPollOnce()
         check("a root's review request queues while it reads",
               store.queuedTasks.map(\.id).contains(heldReq))
         store.headlessJSON?["reviewReqAttempts"] = try? JSONEncoder().encode(["o2/beta#90006": concludedLongAgo])

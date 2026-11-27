@@ -988,6 +988,62 @@ enum CommsTest {
         try? FileManager.default.removeItem(at: bansFile)
         store.refreshBanList()
 
+        // MARK: a ban list this app cannot read at all
+        let unread = "the prompt-injection ban list could not be read"
+        let victorAsk = from("U0VICTOR", "victor", "the nightly build is broken",
+                             CommsDecision(action: .investigate, number: 0,
+                                           summary: "Nightly build broken", reason: "r"))
+        await apply([victorAsk])
+        let victorKey = "investigate:\(CommsTS.number(victorAsk.message.ts)!)"
+        let listed = Data(#"{"banned":[{"login":"keep-me","at":"2026-07-01T10:00:00.000Z"}]}"#.utf8)
+        try? listed.write(to: bansFile)
+        store.refreshBanList()
+        let notifiedBeforeUnread = notified.count
+        try? Data("{".utf8).write(to: bansFile)
+        store.refreshBanList()
+        check("an unreadable list leaves the panel's last read standing",
+              store.bannedAuthors.map(\.login) == ["keep-me"] && store.banListUnreadable)
+        check("…holds the tick: \(store.commsHeldTick()?.error ?? "<not held>")",
+              store.commsHeldTick()?.error == unread)
+        let strandedAsk = from("U0WENDY", "wendy", "review #90060 please",
+                               CommsDecision(action: .review, number: 90060, summary: "", reason: "r"))
+        CommsLog.append(CommsEvent(kind: .ping, id: strandedAsk.message.id, message: strandedAsk.message))
+        CommsLog.append(CommsEvent(kind: .decision, id: strandedAsk.message.id,
+                                   decision: strandedAsk.decision))
+        await store.applyComms(CommsTickResult(me: nil, items: [], error: unread))
+        check("…and acts on no stranded ask: \(outcome(strandedAsk))", outcome(strandedAsk) == "<none>")
+        // A paused queue holds whatever the gate lets through, so this probe spawns nothing.
+        var probe: Store.DispatchOutcome?
+        let victorJob = store.queuedTasks.first { $0.id == victorKey }?.job
+        if let victorJob {
+            let autoRun = store.queueAutoRun
+            store.queueAutoRun = false
+            probe = await store.dispatchAgent(victorJob, source: .auto)
+            store.queueAutoRun = autoRun
+        }
+        check("its gate refuses whoever's work reaches it: \(probe.map { "\($0)" } ?? "<not queued>")",
+              probe == .banned)
+        store.error = nil
+        if probe == .banned { await store.executeQueuedTask(victorKey) }
+        let victorLabel = victorJob?.label ?? "<not queued>"
+        check("…saying why in the feed, the panel and the ping, never that anyone is banned",
+              feed("ban-skip").first?.detail == "\(victorLabel) — \(unread) (the ask is dropped)"
+                && store.error == "\(victorLabel): \(unread) (the ask is dropped)."
+                && outcome(victorAsk) == "\(Store.commsLeftQueueOutcome) (\(unread))"
+                && folded(victorAsk).map(Store.commsStoppedByBan) == false)
+        check("…as does a wizard",
+              statusText(for: .banned, terminal: "T") == "The prompt-injection ban list could not be read.")
+        store.error = nil
+        try? listed.write(to: bansFile)
+        store.refreshBanList()
+        check("read again, nothing on it is announced again",
+              notified.count == notifiedBeforeUnread && !store.banListUnreadable
+                && store.commsHeldTick() == nil)
+        await store.applyComms(CommsTickResult(me: nil, items: [], error: nil))
+        check("…and the stranded ask is acted on", outcome(strandedAsk) != "<none>")
+        try? FileManager.default.removeItem(at: bansFile)
+        store.refreshBanList()
+
         // MARK: where a Slack ban was
         check("a Slack ban's channel is its own place, with no ping logged for its message",
               store.commsPlace(of: BannedAuthor(login: "slack:U0ZED1",

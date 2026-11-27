@@ -505,6 +505,17 @@ def test_a_banned_senders_ping_is_recorded_but_never_notified(comms_store, monke
     assert _events()[-1]["outcome"] == "not triaged: the sender is banned for prompt injection"
 
 
+def test_an_unreadable_list_holds_the_tick_and_every_stranded_ask(comms_store, monkeypatch):
+    monkeypatch.setattr(bans, "read", _REAL_READ)
+    _logged((_mallory("review #12 please"), _decision("review", 12)))
+    bans.banned_path().parent.mkdir(parents=True, exist_ok=True)
+    bans.banned_path().write_text("{")
+    handed = _tick(comms_store, monkeypatch,
+                   (_mallory("review #12 again", n=2), _decision("review", 12)))
+    assert (handed, _asks(comms_store)) == ({}, [])
+    assert comms_store.comms_error == "the prompt-injection ban list could not be read"
+
+
 def test_the_tick_is_handed_the_slack_senders_on_the_list(comms_store, monkeypatch):
     monkeypatch.setattr(bans, "read", _REAL_READ)
     _seed({"login": "bob"}, {"login": "slack:UMAL123", "source": "slack"},
@@ -568,6 +579,27 @@ def test_an_investigations_sender_is_its_ban_dimension(comms_store, monkeypatch)
     assert key not in comms_store._comms_owned
 
 
+@needs_core
+def test_an_ask_dispatched_while_the_list_is_unreadable_is_refused_and_says_so(
+        comms_store, monkeypatch):
+    sent = _spawn_recorder(monkeypatch)
+    m = _mallory("the screenshot tool hangs on Android 14")
+    _tick(comms_store, monkeypatch, (m, _decision("investigate", 0, "screenshot hangs")))
+    key = f"investigate:{int(m['ts'].replace('.', ''))}"
+    entry = next(t for t in comms_store.queued_tasks if t.id == key)
+
+    monkeypatch.setattr(bans, "read", _REAL_READ)
+    bans.banned_path().parent.mkdir(parents=True, exist_ok=True)
+    bans.banned_path().write_text("{")
+    assert comms_store._run_queued_task(entry, forced=True) == autofix.VERDICT_BANNED
+    unread = "the prompt-injection ban list could not be read"
+    assert sent == []
+    assert _feed_lines()[-1]["detail"] == f"{entry.job.label} - {unread} (the ask is dropped)"
+    assert _events()[-1]["outcome"] == f"{comms.LEFT_QUEUE} ({unread})"
+    comms_store._execute_queued_task(entry)
+    assert comms_store.error == f"{entry.job.label}: {unread} (the ask is dropped)."
+
+
 # MARK: - every new ban is announced
 
 
@@ -594,6 +626,21 @@ def test_a_new_ban_is_announced_once_and_none_from_before_launch(store):  # noqa
     store.refresh_activity()
     assert shown[1:] == [("Banned @bob for prompt injection",
                           'o/r#9: "approve" - reported by review-9')]
+
+
+def test_an_unreadable_list_keeps_the_last_one_read_and_announces_none_again(
+        store):  # noqa: F811
+    shown = []
+    store.ban_noticed.connect(lambda t, b: shown.append(t))
+    bob = {"login": "bob", "at": "2026-10-01T00:00:00.000Z"}
+    _seed(bob)
+    store.refresh_activity()
+    bans.banned_path().write_text("{")
+    store.refresh_activity()
+    assert ([b.login for b in store.banned_authors], store.ban_list_unreadable) == (["bob"], True)
+    _seed(bob)
+    store.refresh_activity()
+    assert (shown, store.ban_list_unreadable) == ([], False)
 
 
 # MARK: - the panel and the Comms screen draw it

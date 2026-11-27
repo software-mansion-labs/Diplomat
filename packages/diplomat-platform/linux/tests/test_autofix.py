@@ -689,6 +689,27 @@ def test_a_review_request_runs_at_the_default_depth_unless_its_author_has_a_row(
     assert [c["prompt"] for c in calls] == ["PROMPT:8:max"]
 
 
+def test_an_unreadable_ban_list_holds_each_review_request_until_it_reads(store, monkeypatch):
+    """Held as a banned author's is, with no attempt record, and still owed."""
+    from diplomat_app import bans
+    from diplomat_runtime import activity
+
+    store.pr_autofix_enabled = False
+    store.review_requests_enabled = True
+    calls = _spawn_recorder(monkeypatch, finish=True)
+    reqs = [_req(requested_at="2026-01-02", author="bob")]
+    monkeypatch.setattr("diplomat_app.autofixmonitor.fetch_review_requests", lambda *a, **k: reqs)
+    bans.banned_path().parent.mkdir(parents=True)
+    bans.banned_path().write_text("{")
+    store._poll_review_requests([ROOT])
+    assert (calls, store._load_attempts("reviewReqAttempts"), store.unaddressed_reviews) == (
+        [], {}, 1)
+    assert [e.detail for e in activity.read() if e.action == "ban-skip"] == []
+    bans.banned_path().unlink()
+    store._poll_review_requests([ROOT])
+    assert len(calls) == 1
+
+
 def test_unaddressed_count_and_ban_skip(store, monkeypatch):
     store.pr_autofix_enabled = False
     store.review_requests_enabled = True
@@ -1062,6 +1083,27 @@ def test_banned_author_blocks_both_interfaces(store, monkeypatch):
     asked = "Review · #9 - the PR's author is banned (the ask is dropped, sweep again to re-queue it)"
     assert [e.detail for e in activity.read() if e.action == "ban-skip"] == [
         "Review · #9 - the PR's author is banned (un-ban to review)", asked, asked]
+
+
+def test_an_unreadable_ban_list_refuses_every_author_on_both_interfaces(store, monkeypatch):
+    """It could be banning anyone. A job with no author is nobody's text, and runs."""
+    from diplomat_app import bans, widgets
+    from diplomat_runtime import activity
+
+    calls = _spawn_recorder(monkeypatch, finish=True)
+    bans.banned_path().parent.mkdir(parents=True)
+    bans.banned_path().write_text("{")
+    for src in (autofix.SOURCE_PANEL, autofix.SOURCE_AUTO):
+        assert store.dispatch_agent(_job(author="alice"), src) == autofix.VERDICT_BANNED
+    store.dispatch_agent(_job(author="alice", action="review-req"), autofix.SOURCE_AUTO)
+    assert calls == []
+    unread = "the prompt-injection ban list could not be read"
+    asked = f"Review · #9 - {unread} (the ask is dropped, sweep again to re-queue it)"
+    assert [e.detail for e in activity.read() if e.action == "ban-skip"] == [
+        f"Review · #9 - {unread}", asked, asked]
+    assert widgets.dispatch_status_text(autofix.VERDICT_BANNED, "T") == (
+        "The prompt-injection ban list could not be read.")
+    assert store.dispatch_agent(_job(number=10), autofix.SOURCE_AUTO) == "spawned"
 
 
 def test_allowlist_holds_a_review_monitor_find_whoever_asks(store, monkeypatch):

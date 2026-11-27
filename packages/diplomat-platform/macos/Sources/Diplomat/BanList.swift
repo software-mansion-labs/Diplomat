@@ -114,7 +114,8 @@ enum BanList {
     static var fileURL: URL { dir.appendingPathComponent("banned.json") }
 
     /// Entry by entry: one without a string `login` is skipped, the rest still read.
-    /// Empty when the file is absent or unreadable.
+    /// Empty when the file is absent or unreadable, which a gate tells apart
+    /// (`File.isUnreadable`): an unreadable list could be banning anyone.
     static func read(_ file: File = BanList.readFile()) -> [BannedAuthor] {
         guard case .list(_, let entries) = file else { return [] }
         return entries.compactMap { raw in
@@ -132,7 +133,12 @@ enum BanList {
         /// The whole object, and its `banned` entries as stored, including any `read`
         /// skips: a rewrite keeps every entry and key it does not change.
         case list([String: Any], [Any])
+
+        var isUnreadable: Bool { if case .unreadable = self { true } else { false } }
     }
+
+    /// Why a gate refused work while the file is `.unreadable`.
+    static let unreadReason = "the prompt-injection ban list could not be read"
 
     static func readFile() -> File {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return .absent }

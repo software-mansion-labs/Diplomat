@@ -269,7 +269,7 @@ extension Store {
         if pipelineEnabled {
             let file = BanList.readFile()
             let banned = BanList.read(file)
-            let unreadable = if case .unreadable = file { true } else { false }
+            let unreadable = file.isUnreadable
             for effect in result.effects {
                 guard pipelineAsking(effect) else { continue }
                 guard var ask = pipelineAsk(effect) else { continue }

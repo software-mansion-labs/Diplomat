@@ -209,13 +209,17 @@ extension Store {
     }
 
     /// The tick a poll lands instead of the core's while the first root path does not
-    /// resolve (`primaryResolved`), else nil: a bare `#N` is read as the first root's,
-    /// which would be another repo's. Not private: the Comms self-test asks it.
+    /// resolve (`primaryResolved`), as a bare `#N` is read as the first root's, which would
+    /// be another repo's; or while the ban list cannot be read, as it could be banning any
+    /// sender. Else nil. Not private: the Comms self-test asks it.
     func commsHeldTick() -> CommsTickResult? {
-        guard !primaryResolved else { return nil }
-        let first = RepoPaths.rootPaths.first ?? ""
-        return CommsTickResult(me: nil, items: [], error: "waiting for the first repo root, \(first), "
-                                   + "to resolve to a GitHub or GitLab checkout")
+        if !primaryResolved {
+            let first = RepoPaths.rootPaths.first ?? ""
+            return CommsTickResult(me: nil, items: [], error: "waiting for the first repo root, \(first), "
+                                       + "to resolve to a GitHub or GitLab checkout")
+        }
+        guard BanList.readFile().isUnreadable else { return nil }
+        return CommsTickResult(me: nil, items: [], error: BanList.unreadReason)
     }
 
     /// Signs in the way a tick does, refreshing a dead login through Claude Code.
@@ -269,10 +273,10 @@ extension Store {
         let fresh = Set(result.items.map(\.message.id))
         var bannedNow = Set(settings.bannedSenders)
         if let reading = refreshComms() { await reading.value }
-        // Nothing logged is replayed while the tick is held (`commsHeldTick`): its "" repo
-        // would be the next root's.
+        // Nothing logged is replayed while the tick is held (`commsHeldTick`).
+        let held = commsHeldTick() != nil
         let stranded = commsItems.reversed().compactMap { i -> CommsTickResult.Item? in
-            guard primaryResolved, i.outcome == nil, !fresh.contains(i.message.id),
+            guard !held, i.outcome == nil, !fresh.contains(i.message.id),
                   let d = i.decision else {
                 return nil
             }
@@ -679,8 +683,9 @@ extension Store {
         let owners = commsItems.filter { $0.queueKey == entry.id && Store.commsUnstarted($0) }
         guard !owners.isEmpty else { return }
         if outcome == .banned {
-            let who = BanList.refusedWho(entry.job.authorLogin ?? "")
-            let why = Store.commsLeftQueueOutcome + " (\(who) \(Store.commsBanRefusal))"
+            let banned = "\(BanList.refusedWho(entry.job.authorLogin ?? "")) \(Store.commsBanRefusal)"
+            let why = Store.commsLeftQueueOutcome
+                + " (\(BanList.readFile().isUnreadable ? BanList.unreadReason : banned))"
             recordComms(owners.filter { !Store.commsLeftQueue($0) }.map {
                 CommsEvent(kind: .action, id: $0.message.id, outcome: why)
             })

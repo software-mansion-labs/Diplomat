@@ -122,6 +122,7 @@ triage too, and also while Comms is switched off mid-poll: a ban has no switch. 
 its batch was triaged was notified when it landed, an injection included. An
 investigation of theirs still waiting in the queue is dropped when its turn comes, and its ping says
 why. Reviews or fixes they asked for earlier stay queued: those agents read GitHub, not the message.
+While the list cannot be read, it could be banning any sender, so Comms reads no Slack until it does.
 
 Every ban is announced:
 

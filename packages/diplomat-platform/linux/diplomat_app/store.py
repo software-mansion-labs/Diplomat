@@ -1937,7 +1937,7 @@ class Store(QObject):
         if not self.community_issues_enabled:
             return
         marks = self._community_marks()
-        banned = bans.read()
+        banned, unreadable = bans.read(), bans.unreadable()
         read: list[LocalRepo] = []
         failed: list[tuple[LocalRepo, Exception]] = []
         for root in roots:
@@ -1950,6 +1950,8 @@ class Store(QObject):
                 failed.append((root, exc))
                 continue
             read.append(root)
+            if unreadable:
+                continue
             try:
                 since = datetime.fromisoformat(marks.get(key, ""))
             except ValueError:
@@ -2003,7 +2005,7 @@ class Store(QObject):
         self._held_keys |= {r.key for r, _ in failed}
         complete = complete and not failed
         now = time.time()
-        banned = bans.read()
+        banned, unreadable = bans.read(), bans.unreadable()
         key = "reviewReqAttempts"
         prior = self._load_attempts(key)
         # An author outside the allowlist is dropped here rather than carried down as a
@@ -2029,11 +2031,12 @@ class Store(QObject):
         for r in owed:
             k = r.item
             stamp = r.stamp
+            # An unreadable list holds the request, which stays owed.
             action, val = autofix.decide(
                 prior.get(k),
                 stamp,
                 self._in_flight(r.url),
-                bans.is_banned(r.author, banned),
+                unreadable or bans.is_banned(r.author, banned),
                 now,
             )
             if action == "concluded":
@@ -2064,14 +2067,19 @@ class Store(QObject):
     @staticmethod
     def ban_refusal(job: autofix.AgentJob) -> str:
         """Who a dispatch refused for a ban is about, and what follows (macOS
-        ``refusedWho`` and ``banRemedy``). A monitor's find comes back on its own once the
-        ban lifts; an ask is retired (:meth:`_settle_requested`), and only a sweep re-asks
-        for one, never for a Comms investigation."""
+        ``banRefusal``). A monitor's find comes back on its own once the ban lifts; an ask
+        is retired (:meth:`_settle_requested`), and only a sweep re-asks for one, never for
+        a Comms investigation. While the list cannot be read it says so, and a monitor's
+        find comes back once it reads."""
         if (job.author_login or "").startswith(bans.SLACK_PREFIX):
-            return "the sender is banned (the ask is dropped)"
-        remedy = ("the ask is dropped, sweep again to re-queue it"
-                  if job.requested else "un-ban to review")
-        return f"the PR's author is banned ({remedy})"
+            who, remedy = "the sender", "the ask is dropped"
+        else:
+            who = "the PR's author"
+            remedy = ("the ask is dropped, sweep again to re-queue it"
+                      if job.requested else "un-ban to review")
+        if not bans.unreadable():
+            return f"{who} is banned ({remedy})"
+        return f"{bans.UNREADABLE} ({remedy})" if job.requested else bans.UNREADABLE
 
     def dispatch_agent(self, job: autofix.AgentJob, source: str, attempt: int = 1,
                        bypass_capacity: bool = False,
@@ -2125,9 +2133,9 @@ class Store(QObject):
                     return autofix.VERDICT_IN_FLIGHT
                 self._dispatching_prs.add(item)
         try:
-            banned = bool(job.author_login) and bans.is_banned(
-                job.author_login, bans.read()
-            )
+            # An unreadable list could be banning anyone.
+            banned = bool(job.author_login) and (
+                bans.unreadable() or bans.is_banned(job.author_login, bans.read()))
             # The allowlist speaks for the review monitor's work and nothing else, so
             # the counter - which is what makes a job that monitor's - is the whole
             # test. A sweep, a wizard press and both reconcilers over my own PRs carry
@@ -4524,13 +4532,16 @@ class Store(QObject):
     def _comms_poll_once(self) -> dict:
         """The slow half of a tick, off the Qt thread. Changes nothing in the queue.
         Held while the first root path does not resolve: the core reads a bare ``#N``
-        as the first root's, which would be another repo's."""
+        as the first root's, which would be another repo's. Held too while the ban list
+        cannot be read: it could be banning any sender."""
         at = datetime.now().astimezone()
         if not review.primary_resolved():
             return {"at": at, "me": None, "pings": [], "items": [],
                     "error": f"waiting for the first repo root, "
                              f"{review.repo_root_paths()[0]}, to resolve to a GitHub "
                              f"or GitLab checkout"}
+        if bans.unreadable():
+            return {"at": at, "me": None, "pings": [], "items": [], "error": bans.UNREADABLE}
         settings = self.comms_settings_payload()
         result = comms.tick(settings)
         toggles = self.comms_toggles()
@@ -5034,14 +5045,14 @@ class Store(QObject):
         (:meth:`_settle_requested`): each ping that owned it says so, and why."""
         who = ("the sender" if (entry.job.author_login or "").startswith(bans.SLACK_PREFIX)
                else "the PR's author")
+        why = bans.UNREADABLE if bans.unreadable() else f"{who} {self.COMMS_BAN_REFUSAL}"
         with self._comms_feed_lock:
             owners = self._comms_owned.get(entry.id)
             if not owners:
                 return
             self._comms_owned = {k: v for k, v in self._comms_owned.items() if k != entry.id}
             for msg_id in sorted(owners):
-                comms.append_event("action", msg_id, outcome=(
-                    f"{comms.LEFT_QUEUE} ({who} {self.COMMS_BAN_REFUSAL})"))
+                comms.append_event("action", msg_id, outcome=f"{comms.LEFT_QUEUE} ({why})")
             self.refresh_comms_feed()
         self.comms_changed.emit()
 
@@ -6569,14 +6580,16 @@ class Store(QObject):
 
     def refresh_activity(self) -> None:
         """Re-read the shared activity feed (audit.jsonl) and ban list (cheap tail /
-        small-file reads) and signal on change. Runs on the panel's 8s poll."""
+        small-file reads) and signal on change. Runs on the panel's 8s poll. An unreadable
+        ban list leaves the last read standing."""
         from diplomat_runtime import activity
         from . import bans
 
         new_audit = activity.read()
-        new_bans = bans.read()
         unreadable = bans.unreadable()
-        self._notice_new_bans(new_bans)
+        new_bans = self.banned_authors if unreadable else bans.read()
+        if not unreadable:
+            self._notice_new_bans(new_bans)
         bans_changed = new_bans != self.banned_authors
         if new_audit != self.audit_entries or bans_changed:
             self.audit_entries = new_audit
