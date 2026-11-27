@@ -2342,6 +2342,10 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     check(item(renamed.result, prURL(11))?.rating == rating(.high, .low) && renamed.events.contains {
         $0.detail.contains("renames .github/workflows/release.yml, a denied path")
     }, "a denied path renamed away: \(renamed.events.map(\.detail))")
+    let quoted = diffRated("renamed-quoted", "diff --git \"a/vendor/x/tab\\tname.c\" b/src/x.c\n"
+        + "similarity index 100%\nrename from \"vendor/x/tab\\tname.c\"\nrename to src/x.c\n")
+    check(item(quoted.result, prURL(11))?.rating == rating(.high, .low), "a quoted denied path renamed away: "
+          + "\(quoted.events.map(\.detail))")
     let moved = diffRated("renamed", "diff --git a/src/a.swift b/src/b.swift\nsimilarity index 100%\n"
         + "rename from src/a.swift\nrename to src/b.swift\n")
     check(item(moved.result, prURL(11))?.rating == rating(.low, .low), "any other rename: \(moved.events.map(\.detail))")
@@ -5937,13 +5941,24 @@ private func pipelineLimits(base: URL, root: PipelineSettings.Root, team: Pipeli
     let listed = try cleared(widest, "listed"), unlisted = try cleared(widest, "unlisted") { $0.prs[0].moreFiles = 1 }
     check(merged(listed) && !merged(unlisted), "a file unlisted: \(listed.writes) \(unlisted.writes)")
     // A fast-track PR within it is rated again at its clean head, then merges.
-    let again = only([13, 27])
-    again.prs[0].labels = ["risk:medium", "complexity:low", "diplomat:fast-track"]
-    again.ratings["Clear the cache on logout"] = ["risk": "medium", "complexity": "low", "why": "cache eviction"]
-    let rerated = sync(again, PipelineSettings(roots: [riskier], rate: true, fastTrack: true, merge: true),
+    func atClean(_ diff: String? = nil) -> Trackers {
+        let t = only([13, 27])
+        t.prs[0].labels = ["risk:medium", "complexity:low", "diplomat:fast-track"]
+        t.ratings["Clear the cache on logout"] = ["risk": "medium", "complexity": "low", "why": "cache eviction"]
+        if let diff { t.diffs[13] = diff }
+        return t
+    }
+    let rerated = sync(atClean(), PipelineSettings(roots: [riskier], rate: true, fastTrack: true, merge: true),
                        dir("rerate"), t0)
     check(rerated.claude == ["opus Clear the cache on logout"] && merged(rerated),
           "rated again within it: \(rerated.claude) \(rerated.writes)")
+    // …unless its diff there floors it past the limit.
+    let binary = "diff --git a/src/codec.so b/src/codec.so\nBinary files a/src/codec.so and b/src/codec.so differ\n"
+    let binaryAgain = sync(atClean(binary), PipelineSettings(roots: [riskier], rate: true, fastTrack: true, merge: true),
+                           dir("rerate-binary"), t0)
+    check(binaryAgain.claude == ["opus Clear the cache on logout"] && !merged(binaryAgain)
+          && binaryAgain.writes.contains("+risk:high #13"),
+          "rated again past it by its diff: \(binaryAgain.claude) \(binaryAgain.writes)")
     let clears = try cleared(riskier, "clears") { $0.prs[0].labels.removeAll { $0 == "diplomat:cleared" } }
     check(clears.writes == ["label diplomat:cleared exists", "+diplomat:cleared #13", "merge #13 --squash \(sha("c3"))"],
           "cleared at a re-rate within it: \(clears.writes)")

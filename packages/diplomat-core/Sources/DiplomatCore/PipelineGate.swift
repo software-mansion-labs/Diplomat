@@ -133,7 +133,8 @@ public enum PipelineGate {
         }
         if let f = (try? CoreAssets.pipeline())?.floor {
             for line in lines where line.hasPrefix("rename from ") {
-                let path = String(line.dropFirst("rename from ".count))
+                // Unquoted: git quotes a path with a special character in it.
+                let path = String(line.dropFirst("rename from ".count)).trimmingCharacters(in: ["\""])
                 if isDenied(path, f) {
                     rating.risk = .high
                     reasons.append("renames \(path), a denied path")
