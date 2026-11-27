@@ -138,17 +138,17 @@ g "open -n $APP"
 check "a window comes up" within 20 has_window
 check "the launch marks that older login agent unattended" \
   within 5 g "[ \"\$(plutil -extract EnvironmentVariables.DIPLOMAT_BACKGROUND raw $AGENT)\" = 1 ]"
-check "…and has it start the binary through install/Diplomat" \
-  g "[ \"\$(plutil -extract ProgramArguments.0 raw $AGENT)\" = $LAUNCHER ] && \
-     [ \"\$(plutil -extract ProgramArguments.1 raw $AGENT)\" = $BIN ]"
-check "…and loads that older watchdog agent again, now starting install/Diplomat" \
-  within 10 g "launchctl print gui/\$(id -u)/com.ignacy.diplomat.watchdog | grep -q \"^.program = $LAUNCHER\\\$\""
-g "launchctl bootout gui/\$(id -u)/com.ignacy.diplomat.watchdog; rm -f $WATCHDOG"
 check "Diplomat is frontmost" within 5 front_is Diplomat
 check "it is a regular app, with a Dock icon" [ "$(app_type)" = "Foreground" ]
 shot 1-attended
 check "the main panel shows, not Settings" "$CACHE/ocr" "$OUT/1-attended.png" "AGENT TASKS"
 FIRST="$(pid)"
+check "the launch has that older login agent start the binary through install/Diplomat" \
+  g "[ \"\$(plutil -extract ProgramArguments.0 raw $AGENT)\" = $LAUNCHER ] && \
+     [ \"\$(plutil -extract ProgramArguments.1 raw $AGENT)\" = $BIN ]"
+check "…and loads that older watchdog agent again, now starting install/Diplomat" \
+  within 10 g "launchctl print gui/\$(id -u)/com.ignacy.diplomat.watchdog | grep -q \"^.program = $LAUNCHER\\\$\""
+g "launchctl bootout gui/\$(id -u)/com.ignacy.diplomat.watchdog; rm -f $WATCHDOG"
 
 echo "== the menu bar: Settings, close, reopen"
 vnc key alt-,
