@@ -998,6 +998,9 @@ def test_update_button_reports_a_relaunched_applet_that_dies(repos):
     assert _click_update(qapp, store, view) == "error", store.update_state
     assert store.update_state["error"] == \
         "the relaunched applet exited 3; this one is still the old build"
+    # Logged too: the view loses the reason once it is closed or the app restarts.
+    assert _log()[-1] == \
+        "update failed: the relaunched applet exited 3; this one is still the old build"
     _pump_until(qapp, store, lambda: "exited 3" in view._update_row.summary(),
                 "the view to show the failure", 5.0)
 
