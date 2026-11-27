@@ -189,12 +189,16 @@ def test_the_spread_entry_is_read_for_the_fields_its_comment_names(store, monkey
             read.add(key)
             return super().get(key, default)
 
+        def __getitem__(self, key):
+            read.add(key)
+            return super().__getitem__(key)
+
     entry = telemetryview._METRIC["limitSpread"]
     monkeypatch.setitem(telemetryview._METRIC, "limitSpread", Recording(entry))
     _seed()
     _view(store)
     named = re.findall(r"Only its (\w+) is read", entry["_comment"])
-    assert read == set(named)
+    assert read == set(named), "limitSpread's _comment must name what the screens read"
     swift = (Path(__file__).parents[2] / "macos" / "Sources" / "Diplomat"
              / "TelemetryView.swift").read_text(encoding="utf-8")
     assert re.findall(r'(\w*)\(?"limitSpread"', swift) == named

@@ -41,7 +41,7 @@
       "colorHex": "#FF9500"
     },
     {
-      "_comment": "Only its blurb is read, as the footnote of the limitPerTask card, which charts tasks priced against both windows at once. The two entries below are the SERIES: their titles name the two windows in the figures printed under the chart, and their colours the bars. The 5-hour series holds only tasks started while the ledger still had readings of that window. A task is a big slice of a 5-hour window and a sliver of a week, so the two humps sit far apart on the shared axis.",
+      "_comment": "Only its blurb is read, as the footnote of the limitPerTask card, which charts tasks priced against both windows at once. The rest must stay: the Swift core cannot load this file if any metric lacks one. The two entries below are the SERIES: their titles name the two windows in the figures printed under the chart, and their colours the bars. The 5-hour series holds only tasks started while the ledger still had readings of that window. A task is a big slice of a 5-hour window and a sliver of a week, so the two humps sit far apart on the shared axis.",
       "id": "limitSpread",
       "title": "Spread",
       "blurb": "Tasks priced against each rate-limit window, as a histogram with a confidence interval on its mean. The 5-hour series counts only tasks started while the ledger still had readings of that window.",
