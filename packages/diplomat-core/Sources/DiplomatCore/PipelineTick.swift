@@ -657,12 +657,17 @@ final class PipelineSync {
         cache[e.id].map { atLeastLabels($0.rating, e.labels) } ?? labelRating(e.labels)
     }
 
+    /// `e`'s first rating was pushed or retargeted past, so a rating of it now is its first.
+    func pushedPast(_ e: PipelineEntry) -> Bool {
+        guard settings.fastTrack, let c = cache[e.id], c.pending == true, c.first == true, let h = c.head
+        else { return false }
+        return (h != head(e) || (c.base ?? e.baseRef) != e.baseRef) && unworn(Set(e.labels.map { $0.lowercased() }))
+    }
+
     /// `e`'s first rating is to be rated again instead of finished (`PipelineCachedRating.first`).
     func rateAgain(_ e: PipelineEntry) -> Bool {
-        guard settings.rate, settings.fastTrack, let c = cache[e.id], c.pending == true, c.first == true,
-              let h = c.head, c.rating.atLeast(e.item.floor ?? c.rating).isFastTrack else { return false }
-        return (h != head(e) || (c.base ?? e.baseRef) != e.baseRef) && unworn(Set(e.labels.map { $0.lowercased() }))
-            && closesHold(e) == nil
+        guard pushedPast(e), let c = cache[e.id] else { return false }
+        return c.rating.atLeast(e.item.floor ?? c.rating).isFastTrack && closesHold(e) == nil
     }
 
     /// Each dimension wears `r`'s label and no other.
@@ -1230,12 +1235,13 @@ final class PipelineSync {
 
     /// Finishes the rating kept pending for `entries[i]`, never lower than the labels on it
     /// now, with no new rating asked for: with Rate off, only a first rating, as no first rating
-    /// (`PipelineCachedRating.first`). A PR's is dropped once its diff at the head this sync read
-    /// allows less.
+    /// if it was to be rated again (`PipelineCachedRating.first`). A PR's is dropped once its diff
+    /// at the head this sync read allows less.
     func finish(_ i: Int) {
         let id = entries[i].id
-        guard let kept = cache[id]?.rating, !rateAgain(entries[i]),
-              may(.rate) || cache[id]?.first == true else { return }
+        let again = rateAgain(entries[i])
+        guard let kept = cache[id]?.rating, may(.rate) ? !again : cache[id]?.first == true && may(.forced)
+        else { return }
         let head = entries[i].item.headSha
         guard recheck(i), entries[i].item.headSha == head else { return failed(id) }
         guard stops(entries[i]).isEmpty else { return }
@@ -1251,7 +1257,7 @@ final class PipelineSync {
                 return persist()
             }
         }
-        if !unworn(entries[i].labeled) || !may(.rate) { cache[id]?.first = nil }
+        if !unworn(entries[i].labeled) || again { cache[id]?.first = nil }
         cache[id]?.rating = rating
         state.retry[id] = nil
         entries[i].item.rating = rating
@@ -1360,7 +1366,7 @@ final class PipelineSync {
             (said, why) = answer
         }
         state.retry[e.id] = nil
-        let fresh = cache[e.id] == nil || rateAgain(e)
+        let fresh = cache[e.id] == nil || pushedPast(e)
         // Never below its labels, nor the rating kept for it before.
         var rating = atLeastLabels(said.atLeast(cache[e.id]?.rating ?? said), e.labels)
         var detail = describe(rating) + (why.isEmpty ? "" : ": " + why)
@@ -1377,8 +1383,7 @@ final class PipelineSync {
         }
         let counts = may(step) && banHold(e) == nil
         let allowed = counts && e.item.writable
-        // With Rate off, a first rating does not wait for Diplomat to write to the PR.
-        let first = counts && fresh && e.item.kind == .pr && may(.fastTrack) && (e.item.writable || may(.rate))
+        let first = counts && fresh && e.item.kind == .pr && may(.fastTrack)
         // Saved before what it leads to: a sync stopped there does not ask again.
         record(i, rating, why, detail, head: head, base: a.base, again: again, pending: allowed || first, first: first)
         guard allowed else { return }

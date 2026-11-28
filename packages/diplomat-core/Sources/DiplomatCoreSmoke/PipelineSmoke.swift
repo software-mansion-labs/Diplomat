@@ -6834,7 +6834,7 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
           && po.result.effects.isEmpty && stageOf(po.result, prURL(11)) == "human/human",
           "rated again, answered with Fast track off: \(paid.claudeCalls.count) \(po.writes) \(stageOf(po.result, prURL(11)))")
     // Its first rating pushed past on a PR that could not be fast-tracked for what it closes:
-    // finished at the new head, with no new rating.
+    // finished at the new head, with no new rating unless Rate now asks one, which is its first.
     let unjudged = "off the fast track until taken over: at its first rating it would close "
         + "https://github.com/acme/lib/issues/40, which Diplomat did not read or may not write to"
     for (what, closing, stage) in [
@@ -6844,17 +6844,22 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
             t.prs[0].closes = [4, 40]
         }, "human/human (\(unjudged))"),
     ] {
-        let t = fix(), d = dir("pushed-closing-" + what)
-        closing(t)
-        applying(t) { $0.prs[0].head = sha("a2") }
-        _ = sync(t, rateTrack, d, t0)
-        let nc = sync(t, rateTrack, d, later(5))
-        check(t.claudeCalls.count == 1 && nc.writes == ["+risk:low #11", "+complexity:low #11"] && nc.result.effects.isEmpty
-              && stageOf(nc.result, prURL(11)) == stage,
-              "pushed past, closing \(what): \(t.claudeCalls.count) \(nc.writes) \(stageOf(nc.result, prURL(11)))")
+        for pressed in [false, true] {
+            let t = fix(), d = dir("pushed-closing-\(what)-\(pressed)")
+            closing(t)
+            applying(t) { $0.prs[0].head = sha("a2") }
+            _ = sync(t, rateTrack, d, t0)
+            var now = rateTrack
+            if pressed { now.force = .init(rate: [prURL(11)]) }
+            let nc = sync(t, now, d, later(5))
+            check(t.claudeCalls.count == (pressed ? 2 : 1) && nc.writes == ["+risk:low #11", "+complexity:low #11"]
+                  && nc.result.effects.isEmpty && stageOf(nc.result, prURL(11)) == stage,
+                  "pushed past, closing \(what), Rate now \(pressed): \(t.claudeCalls.count) \(nc.writes) "
+                    + stageOf(nc.result, prURL(11)))
+        }
     }
     // Rate now with Rate off, or switched off as it runs, given to someone else by the read or the
-    // re-read applying it: its rating applied at once, and labelled once it is yours again.
+    // re-read applying it: its first rating waits, and is applied once it is yours again.
     let rateOff = PipelineSettings(roots: [root], fastTrack: true)
     for (at, switched) in [("read", false), ("re-read", false), ("read", true), ("re-read", true)] {
         let t = fix(), d = dir("rate-now-off-assigned-\(at)-\(switched)")
@@ -6876,8 +6881,7 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
         _ = sync(t, now, d, t0)
         t.prs[0].assignees = []
         let back = sync(t, rateOff, d, later(5))
-        check(t.claudeCalls.count == 1 && back.writes == ["+risk:low #11", "+complexity:low #11"]
-              && stageOf(back.result, prURL(11)) == "human/human",
+        check(t.claudeCalls.count == 1 && back.writes == tracked && back.result.effects == [reviewFX(11, sha("a1"))],
               "Rate now, Rate switched off \(switched), assigned at the \(at): \(back.writes) "
                 + stageOf(back.result, prURL(11)))
     }
@@ -6938,7 +6942,8 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
               "issue unwritable at the \(at), Fast track on: \(uf.result.effects) \(stageOf(uf.result, issueURL(1)))")
     }
     // A first rating waiting for Diplomat to write to the PR, or to read it again, as Rate is
-    // switched off: applied as no first rating once it may.
+    // switched off: applied once it may, as no first rating if the PR was retargeted meanwhile, as
+    // Rate off rates nothing again.
     let waiting: [(String, (Trackers) -> Void, (Trackers) -> Void)] = [
         ("given to someone else", { $0.prs[0].assignees = ["bob"] }, { $0.prs[0].assignees = [] }),
         ("stacked", { $0.prs[0].base = "feat-a" }, { $0.prs[0].base = "main" }),
@@ -6949,10 +6954,33 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
         wait(t)
         _ = sync(t, rateTrack, d, t0)
         done(t)
-        let wo = sync(t, rateOff, d, later(5))
-        check(t.claudeCalls.count == 1 && wo.writes == ["+risk:low #11", "+complexity:low #11"] && wo.result.effects.isEmpty
-              && stageOf(wo.result, prURL(11)) == "human/human",
+        let wo = sync(t, rateOff, d, later(5)), moved = what == "stacked"
+        check(t.claudeCalls.count == 1 && wo.writes == (moved ? ["+risk:low #11", "+complexity:low #11"] : tracked)
+              && wo.result.effects == (moved ? [] : [reviewFX(11, sha("a1"))])
+              && stageOf(wo.result, prURL(11)) == (moved ? "human/human" : "fast-track/fast"),
               "first rating waiting, \(what), Rate switched off: \(wo.writes) \(stageOf(wo.result, prURL(11)))")
+    }
+    // The pipeline switched off as a waiting first rating would be applied, with Rate on or off:
+    // it waits, and is fast-tracked once the pipeline runs again.
+    for rate in [true, false] {
+        let t = fix(), d = dir("waiting-switched-off-\(rate)")
+        applying(t) { $0.ghFails = true }
+        _ = sync(t, rateTrack, d, t0)
+        t.ghFails = false
+        var live = rate ? rateTrack : rateOff
+        (live.mirrorGitHub, live.mirrorLinear, live.mirrorScope) = (true, true, .all)
+        var off = PipelineControl(settings: live)
+        off.enabled = false
+        t.onGH = {
+            t.onGH = nil
+            off.save(in: d)
+        }
+        let so = sync(t, rate ? rateTrack : rateOff, d, later(5))
+        try? FileManager.default.removeItem(at: d.appendingPathComponent("control.json"))
+        let on = sync(t, rateTrack, d, later(10))
+        check(so.writes.isEmpty && t.claudeCalls.count == 1 && on.writes == tracked
+              && on.result.effects == [reviewFX(11, sha("a1"))],
+              "switched off as its first rating waits, Rate \(rate): \(so.writes) \(on.writes)")
     }
     // Its first rating left pending, then pushed to while given to someone else: rated at the new
     // head once it is yours again, and fast-tracked.

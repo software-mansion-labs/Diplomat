@@ -177,8 +177,8 @@ rating, your unrated open PRs and those to be rated again, unrated issues Diplom
 other unrated issues. An issue
 already split or being fixed is not rated, nor is a Linear issue whose team has no repo root. Until
 its answer is applied, an item is neither fixed nor merged. An ask its item has moved past (a PR
-pushed to, an item labelled or closed meanwhile) is dropped, its answer unread, and a PR asked about
-again at its new head; one you cancel in the queue is not made again until **Rate now**. A failed
+pushed to or retargeted, an item labelled or closed meanwhile) is dropped, its answer unread, and a
+PR asked about again; one you cancel in the queue is not made again until **Rate now**. A failed
 call is a notice, and the item is tried again 1, 2, 4 ... syncs later (a day at most), taking none
 of the four slots meanwhile.
 
@@ -190,12 +190,11 @@ model's answer, the rating kept and the diff floor, a dimension at a time. One a
 apply holds a PR off the fast track, and an issue from its fix, until a later sync does, tried again
 1, 2, 4 ... syncs later, unless a PR's diff at its head allows less: then it is dropped, and the PR
 is rated by its labels again, or rated anew without them. A first rating waits while Diplomat may not
-write to the PR, and only while **Rate issues and PRs** is on: with it off, one that would wait is
-applied as no first rating. A PR pushed to or retargeted meanwhile has it finished there, unless it
-is a first rating made while **Fast-track my PRs** was on, low/low within the floor of the PR's
-files, the switch is on still, and the PR wears no rating or fast-track label and would close only
-`candidate` issues: then the PR is rated again instead, never lower, and that is still its first
-rating.
+write to the PR. A PR pushed to or retargeted meanwhile has it finished there, unless it is a first
+rating made while **Fast-track my PRs** was on, low/low within the floor of the PR's files, the
+switch is on still, and the PR wears no rating or fast-track label and would close only `candidate`
+issues: then the PR is rated again instead, never lower, and that is still its first rating, or
+with **Rate issues and PRs** off it is finished there as no first rating.
 
 Where you [mirror](#settings) ratings, a finished one's labels are written at once, and a sync labels
 up to 10 more kept ratings an item does not wear yet (`pipeline.json` `labels.mirrorPerSync`), your
