@@ -154,7 +154,8 @@ def opencode_session_model() -> str:
 
 def build_prompt(config: dict) -> str:
     """Assemble a prompt by shelling out to diplomat-core. ``config`` is the JSON
-    payload whose ``kind`` is ``review`` | ``conflicts`` | ``audit``."""
+    payload whose ``kind`` is ``review`` | ``conflicts`` | ``audit`` | ``issues`` |
+    ``investigate`` | ``comms-classifier``."""
     binary = core_bin()
     env = dict(os.environ)
     env.setdefault("DIPLOMAT_CORE", str(core.assets_dir()))
