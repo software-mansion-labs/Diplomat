@@ -508,10 +508,11 @@ trackers' labels, this is what a sync needs:
   each sync.
 - `linear-login.json` - the [Linear login](#linear): its tokens, and who it is.
 
-The fix and review asks' attempt records are the app's own (`pipelineAttempts`): a run that reported
-back (a PR, a clean marker or nothing) concludes its ask, which is not made again while syncs owe it,
-nor for 30 days after. On Linux a sync is `diplomat-core pipeline-tick`, the same core, stopped when
-the app quits.
+The fix and review asks' attempt records are the app's own (`pipelineAttempts`): a run of the
+pipeline's that reported back (a PR, a clean marker or nothing) concludes its ask, which is not made
+again while syncs owe it, nor for 30 days after. Another asker's run, or one started from a wizard,
+concludes none, so the pipeline still asks for its own. On Linux a sync is
+`diplomat-core pipeline-tick`, the same core, stopped when the app quits.
 
 `DIPLOMAT_PIPELINE_SECS` overrides the five-minute sync (60 seconds to a day),
 `DIPLOMAT_LINEAR_API` Linear's endpoint, and `DIPLOMAT_CLAUDE` and `DIPLOMAT_GH` the binaries.

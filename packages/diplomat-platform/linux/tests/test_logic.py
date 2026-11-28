@@ -322,7 +322,7 @@ def test_poll_dispatch_does_not_self_deadlock_on_the_overlap_lock():
     # Keep dispatch offline and deterministic: no real terminal spawn.
     s._spawn_tracked = (
         lambda prompt, url, number, source, ledger_key="", label="", kind="",
-        checkout=None: True
+        checkout=None, pipeline=False: True
     )
     s._in_flight = lambda url: False
     s._auto_tasks_running = lambda: 0  # room under the cap; no `ps` scan either
