@@ -178,6 +178,8 @@ final class PipelineSync {
     var uncarried: [String: String] = [:]
     /// Each issue a merge this sync asked for may have closed, by its id as `byURL` keys it.
     var closedHere: Set<String> = []
+    /// The cleared PRs `merge` read again, which this sync told the end of.
+    var mergeRead: Set<String> = []
 
     init(settings: PipelineSettings, now: Date, dir: URL, io: PipelineIO) {
         self.settings = settings
@@ -240,6 +242,7 @@ final class PipelineSync {
         fracture()
         settle()
         if settings.merge { merge() }
+        confirmMerges()
         let effects = owed()
         for i in entries.indices {
             entries[i].item.rateRefused = rateRefusal(entries[i])
@@ -500,13 +503,14 @@ final class PipelineSync {
         }
     }
 
-    /// The ids of `settings.queued`, and of the ratings asked for, no read so far listed: a
-    /// front-end takes an ask or record back, and a sync drops a rating ask, only once a read
-    /// of its item judged it.
+    /// The ids of `settings.queued`, of the ratings asked for and of the merges whose end no
+    /// read saw, that no read so far listed: a front-end takes an ask or record back, a sync
+    /// drops a rating ask, and a merge is told, only once a read of its item judged it.
     func unlisted() -> [String] {
         let listed = Set(entries.map { PipelineRead.norm($0.id) })
         let queued = Set(settings.queued.map(PipelineRead.norm))
-        let asked = state.rateAsks.keys.sorted().filter { !queued.contains(PipelineRead.norm($0)) }
+        let asked = (state.rateAsks.keys.sorted() + state.merging.keys.sorted())
+            .filter { !queued.contains(PipelineRead.norm($0)) }
         return (settings.queued + asked).filter { !listed.contains(PipelineRead.norm($0)) }
     }
 
@@ -518,7 +522,8 @@ final class PipelineSync {
             guard let response = r.response, r.errors.isEmpty,
                   let e = PipelineRead.item(response, root: root, label: n == 0 ? "#\(number)" : "\(root.slug)#\(number)",
                                             model: model) else {
-                notice("\(id), which an ask or attempt record names, could not be read: \(r.why)")
+                notice("\(id), which an ask, an attempt record or a merge whose end no read saw names, "
+                       + "could not be read: \(r.why)")
                 continue
             }
             entries.append(done(e))
@@ -707,12 +712,13 @@ final class PipelineSync {
         return true
     }
 
-    /// False, with a notice when the tracker refused, when `name` is still on.
+    /// False, with a notice when the tracker refused, when `name` may still be on.
     @discardableResult
     func remove(_ i: Int, _ name: String, _ step: Step) -> Bool { takeOff(i, name, step) != nil }
 
     /// `remove`, telling who took it off: true when this call did, false when it was off
-    /// already, nil when it is still on.
+    /// already, nil when it may still be on: not asked off, or asked and the call failed,
+    /// which the tracker may have applied all the same.
     func takeOff(_ i: Int, _ name: String, _ step: Step) -> Bool? {
         let e = entries[i]
         guard e.item.writable else { return nil }
@@ -1495,10 +1501,10 @@ final class PipelineSync {
             let e = entries[i]
             guard own(e), open(e), has(e, model.labels.fastTrack), has(e, model.labels.cleared),
                   partial[e.item.repo] == nil, let head = e.item.headSha, e.item.cleanAt != reviewed(e),
-                  offTrack(e) == nil, recheck(i) else { continue }
+                  offTrack(e) == nil, may(.fastTrack), recheck(i) else { continue }
             let off = takeOff(i, model.labels.cleared, .fastTrack)
-            guard off != false else { continue }
-            // Also when gh failed: GitHub may have taken it off all the same.
+            // A failed call may have taken it off all the same.
+            guard off == true || off == nil && refresh(i) && !has(entries[i], model.labels.cleared) else { continue }
             state.cleared[e.id] = nil
             state.synced[e.id] = nil
             if off == true {
@@ -2184,8 +2190,9 @@ final class PipelineSync {
         for i in entries.indices where entries[i].item.stage == .cleared
             && [nil, PipelineGate.Hold.draft.code, PipelineGate.Hold.behind.code].contains(holdCodes[entries[i].id]) {
             let e = entries[i]
-            guard let root = e.root, let n = e.number, let head = e.item.headSha,
-                  may(.merge), let read = reread(e) else { continue }
+            guard let root = e.root, let n = e.number, let head = e.item.headSha, may(.merge) else { continue }
+            mergeRead.insert(e.id)
+            guard let read = reread(e) else { continue }
             // Linear first, so GitHub's last read sees whatever changed on the PR meanwhile.
             let judged = linearJudged(read)
             // Right before the hold is judged: the ban list goes into it.
@@ -2243,20 +2250,18 @@ final class PipelineSync {
                 persist()
                 continue
             }
+            state.merging[e.id] = PipelineMerge(head: head, flag: flag, at: now)
+            persist()
             let out = io.gh(["pr", "merge", "\(n)", "-R", root.name, "--admin", flag,
                              "--match-head-commit", head])
+            state.merging[e.id]?.merged = out.ok
+            persist()
             closedHere.formUnion((fresh.closing + judged.closing).map { PipelineRead.norm($0.id) })
             // gh exits 0 on a PR merged already, at any head and by anyone, and GitHub may merge
             // one all the same when gh fails: only a read after tells this merge's.
             let after = reread(e, out.ok ? "may have been merged" : "was not merged (\(out.why))")
-            guard let after, after.item.state == "merged" else {
-                if let after { notice("\(e.item.label) was not merged: " + (out.ok ? "it is still \(after.item.state)" : out.why)) }
+            guard let after, ended(e, after, head: head, flag: flag, ours: true, why: out.ok ? nil : out.why) else {
                 continue
-            }
-            if after.item.headSha == head, after.mergedBy?.lowercased() == root.me.lowercased() {
-                log(e.id, .merged, "merged \(head.prefix(7)) with --admin \(flag)")
-            } else {
-                notice("\(e.item.label) was merged, but not by this sync at \(head.prefix(7))")
             }
             entries[i].item.state = "merged"
             entries[i].item.writable = false
@@ -2274,6 +2279,53 @@ final class PipelineSync {
             }
             persist()
         }
+    }
+
+    /// `ended` for each merge an earlier sync asked of gh that no read after it saw, as its PR
+    /// reads now, read again only if this sync read it merged: this merge's only if gh said it
+    /// merged, as a person may have merged it since. One `merge` read again has told its own.
+    func confirmMerges() {
+        for (id, asked) in state.merging.sorted(by: { $0.key < $1.key }) where asked.at < now {
+            guard let i = pos[id] else { continue }
+            var e = entries[i]
+            // Read open or closed, it was not merged.
+            guard e.item.state == "merged" else {
+                if mergeRead.contains(id) {
+                    state.merging[id] = nil
+                } else {
+                    ended(e, e, head: asked.head, flag: asked.flag, ours: false, why: nil)
+                }
+                continue
+            }
+            // `reread` needs a head, and a merged PR's read names none.
+            e.item.headSha = asked.head
+            guard let after = reread(e, "may have been merged") else { continue }
+            ended(e, after, head: asked.head, flag: asked.flag, ours: asked.merged == true, why: nil)
+        }
+    }
+
+    /// Logs how the merge of `e` at `head` with `flag` ended, as `after` reads, and forgets
+    /// it: merged at that head by me, it is this merge if `ours`, else a notice; `why` gh
+    /// failed. True when `after` is merged.
+    @discardableResult
+    func ended(_ e: PipelineEntry, _ after: PipelineEntry, head: String, flag: String, ours: Bool,
+               why: String?) -> Bool {
+        state.merging[e.id] = nil
+        guard after.item.state == "merged" else {
+            notice("\(e.item.label) was not merged: " + (why ?? "it is still \(after.item.state)"))
+            return false
+        }
+        if after.item.headSha == head, after.mergedBy?.lowercased() == e.root?.me.lowercased() {
+            if ours {
+                log(e.id, .merged, "merged \(head.prefix(7)) with --admin \(flag)")
+            } else {
+                notice("\(e.item.label) was merged at \(head.prefix(7)), "
+                       + "but gh did not say it was this Diplomat's merge")
+            }
+        } else {
+            notice("\(e.item.label) was merged, but not by this Diplomat's merge at \(head.prefix(7))")
+        }
+        return true
     }
 
     /// Asks GitHub to merge `fresh`'s base into it at the head this sync read, logged `asked`

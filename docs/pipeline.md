@@ -74,7 +74,7 @@ A PR:
 | `fast-track` | yours, labelled `diplomat:fast-track`, closing only `candidate` issues, at least one unless taken over, no clean marker at its head | Fast |
 | `clean` | the same, with a clean marker at its head | Fast |
 | `cleared` | labelled `diplomat:cleared`, clean at its head, and rated low/low again there by this Diplomat (its state or log says so), or, taken over, labelled so there by this Diplomat; or at a later head carrying that one's change [unchanged](#the-merge) | Fast |
-| `merged`, `closed` | one of the repo's 20 merged or closed PRs updated last, carrying a pipeline label, or read for an ask waiting on it | Done |
+| `merged`, `closed` | one of the repo's 20 merged or closed PRs updated last, carrying a pipeline label, or read for an ask waiting on it or a merge whose end no read saw | Done |
 
 An issue labelled `wontfix`, `wont fix`, `won't fix`, `duplicate`, `invalid`, `question`,
 `enhancement`, `feature`, `feature request`, `improvement`, `discussion`, `proposal` or `rfc` in any
@@ -120,7 +120,8 @@ a Linear team was not read whole, no issue in the repo it maps to is fixed, spli
 
 A head no clean marker names, as after a push, takes `diplomat:cleared` off, and the PR goes back
 to `fast-track` for a review of that head, unless it carries the cleared change
-[unchanged](#the-merge). A person who takes `diplomat:cleared` off a PR before
+[unchanged](#the-merge). If `gh` fails to take it off and the read after cannot tell whether it went,
+the label found gone later counts as a person's removal. A person who takes `diplomat:cleared` off a PR before
 Diplomat does takes it off the fast track until you [take it over](#takeover): Diplomat neither
 labels, reviews nor merges it again, and takes `diplomat:fast-track` off too, so the labels say so. One who
 takes `diplomat:fast-track` off leaves it to a person: Diplomat puts that label back only for a takeover.
@@ -361,8 +362,9 @@ its base merged in again whenever it falls behind first. A head carrying any oth
 
 A hold shows on the card and is logged each time it changes. A merge `gh` refuses (no admin rights, a
 head that moved) is a notice, and the next sync tries again. The PR is read again after every merge,
-as `gh` exits 0 on one merged already: it counts as Diplomat's merge only if GitHub then shows it
-merged at that head by you, and merged by anyone else or at another head, it is a notice.
+by a later sync if that read fails or the sync ends first, as `gh` exits 0 on one merged already:
+it counts as Diplomat's merge only if GitHub then shows it merged at that head by you and, read
+only by a later sync, `gh` had said it merged; any other merge is a notice.
 
 ## The Pipeline screen
 
@@ -499,7 +501,8 @@ trackers' labels, this is what a sync needs:
   try again; the issues that would not split and why, and those being split with the parts the
   model answered and those filed so far; and the issues Diplomat filed as parts, with the ban each
   carries; the ratings asked for and not yet applied, and the items whose rating was cancelled in
-  the queue. An item missing from a read keeps these until it is read merged or closed, or goes 90 days unseen. Also what was last
+  the queue. An item missing from a read keeps these until it is read merged or closed, or goes 90 days unseen. Also each
+  merge asked of `gh` whose end no read after it saw, until one does or for 90 days, and what was last
   logged, so the log does not repeat itself. A `state.json` or `ratings.json` that is there but
   cannot be read leaves every sync reading and showing only, with a notice.
 - `rate/` - each rating asked for: the call its job makes, and the answer it leaves for the next
@@ -529,9 +532,9 @@ the app quits.
   merged or closed PRs updated last, with the closed issues of the repo they link to.
 - Linear: the 300 open issues of the tracked teams updated last, and each one's first 10 attachments
   (more holds it).
-- Past either cap a notice says so. An item an ask or attempt record names that these reads miss (closed, archived
-  on Linear, or past a cap) is read by itself. A source that cannot be read, or is read only in part, is a
-  notice, and the sync goes on without what it missed: a root read past its cap fixes and splits
+- Past either cap a notice says so. An item these reads miss (closed, archived on Linear, or past a cap) is read by
+  itself when an ask, an attempt record or a merge whose end no read saw names it. A source that cannot be read,
+  or is read only in part, is a notice, and the sync goes on without what it missed: a root read past its cap fixes and splits
   none of its issues, one read with errors, or whose Linear team was not read, is only read and
   shown, and an item missing from a read keeps its guards.
 - One sync at a time: another started meanwhile reads nothing, with a notice in the activity feed,
