@@ -670,6 +670,11 @@ final class PipelineSync {
         return c.rating.atLeast(e.item.floor ?? c.rating).isFastTrack && closesHold(e) == nil
     }
 
+    /// `e`'s first rating waits to be rated again: Rate is on, or a Rate now asked for it stands.
+    func rerating(_ e: PipelineEntry) -> Bool {
+        rateAgain(e) && (settings.rate && control().rate || state.rateAsks[e.id]?.forced == true)
+    }
+
     /// Each dimension wears `r`'s label and no other.
     func wears(_ labels: [String], _ r: PipelineRating) -> Bool {
         [(model.labels.risk, r.risk), (model.labels.complexity, r.complexity)].allSatisfy { names, level in
@@ -1235,13 +1240,13 @@ final class PipelineSync {
 
     /// Finishes the rating kept pending for `entries[i]`, never lower than the labels on it
     /// now, with no new rating asked for: with Rate off, only a first rating, as no first rating
-    /// if it was to be rated again (`PipelineCachedRating.first`). A PR's is dropped once its diff
-    /// at the head this sync read allows less.
+    /// if it was to be rated again (`rerating`). A PR's is dropped once its diff at the head this
+    /// sync read allows less.
     func finish(_ i: Int) {
         let id = entries[i].id
         let again = rateAgain(entries[i])
-        guard let kept = cache[id]?.rating, may(.rate) ? !again : cache[id]?.first == true && may(.forced)
-        else { return }
+        guard let kept = cache[id]?.rating, !rerating(entries[i]),
+              may(.rate) || cache[id]?.first == true && may(.forced) else { return }
         let head = entries[i].item.headSha
         guard recheck(i), entries[i].item.headSha == head else { return failed(id) }
         guard stops(entries[i]).isEmpty else { return }
@@ -2008,9 +2013,10 @@ final class PipelineSync {
                 stage = e.item.rating == nil ? .unrated : .human
                 if own(e), let r = e.item.rating, r.atLeast(floor).isFastTrack {
                     hold = e.unwritable.map { "off the fast track: \($0)" }
-                        ?? (rateAgain(e) ? (state.declined.contains(e.id)
+                        ?? (rerating(e) ? (state.declined.contains(e.id)
                                 ? "off the fast track until Rate now: a rating asked for it was cancelled"
                                 : "off the fast track until it is rated again")
+                            : rateAgain(e) ? nil
                             : cache[e.id]?.pending == true ? "off the fast track until a sync reads it again"
                             : !state.untracked.contains(e.id) ? state.keptOff[e.id]
                             : "off the fast track: \(model.labels.fastTrack) could not be put on at its first rating")

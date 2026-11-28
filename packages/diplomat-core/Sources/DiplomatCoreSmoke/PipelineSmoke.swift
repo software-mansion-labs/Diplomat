@@ -6452,7 +6452,8 @@ private func pipelineMirror(base: URL, root: PipelineSettings.Root, team: Pipeli
     let (wip, wipRead) = try stopped("stopped", labels: ["wip"]), (late, lateRead) = try stopped("stopped-late", labels: [])
     check(wip.writes.isEmpty && wipRead.isEmpty && late.writes.isEmpty && lateRead == [1],
           "a stop label against the mirror: \(wip.writes) \(wipRead) \(late.writes) \(lateRead)")
-    // Nor is a rating still pending, one of a banned author, or one in a root read in part.
+    // Nor is a rating still pending, with Rate off or switched off live, one of a banned author, or
+    // one in a root read in part.
     func untouched(_ name: String, _ t: Trackers, _ kept: [String: Any], _ s: PipelineSettings = capped)
         throws -> (Synced, Set<Int>) {
         try fm.createDirectory(at: dir(name), withIntermediateDirectories: true)
@@ -6467,6 +6468,14 @@ private func pipelineMirror(base: URL, root: PipelineSettings.Root, team: Pipeli
     fixing.fix = true
     let (pend, pendRead) = try untouched("pending", only([1]), ["rating": ["risk": "low", "complexity": "low"], "why": "",
                                                                "pending": true], fixing)
+    var rateLive = fixing
+    rateLive.rate = true
+    var liveOff = PipelineControl(settings: rateLive)
+    liveOff.rate = false
+    try fm.createDirectory(at: dir("pending-rate-off"), withIntermediateDirectories: true)
+    liveOff.save(in: dir("pending-rate-off"))
+    let (pendOff, pendOffRead) = try untouched("pending-rate-off", only([1]), ["rating": ["risk": "low", "complexity": "low"],
+                                                                               "why": "", "pending": true], rateLive)
     var take = fixing
     take.force = .init(takeover: [issueURL(1)])
     let (taken, _) = try untouched("pending-taken", only([1]), ["rating": ["risk": "low", "complexity": "low"], "why": "",
@@ -6488,10 +6497,12 @@ private func pipelineMirror(base: URL, root: PipelineSettings.Root, team: Pipeli
     let (bannedRetried, partRetried) = (try retried("banned"), try retried("partial"))
     check(pend.writes.isEmpty && pendRead.isEmpty && pend.result.effects.isEmpty
           && stageOf(pend.result, issueURL(1)) == "candidate/fast (its rating waits for a sync that reads it again)"
+          && pendOff.writes.isEmpty && pendOffRead.isEmpty
+          && stageOf(pendOff.result, issueURL(1)) == stageOf(pend.result, issueURL(1))
           && taken.result.effects.contains(fixFX(1))
           && banned.writes.isEmpty && bannedRead.isEmpty && !bannedRetried
           && part.writes.isEmpty && partRead.isEmpty && !partRetried,
-          "the mirror against a pending rating, a ban, a read in part: \(pend.writes) \(pendRead) "
+          "the mirror against a pending rating, a ban, a read in part: \(pend.writes) \(pendRead) \(pendOff.writes) "
           + "\(stageOf(pend.result, issueURL(1))) \(taken.result.effects) \(banned.writes) \(bannedRead) \(part.writes) \(partRead)")
     // A mirror write refused, or onto an item changed since the read, backs it off; one that
     // lands clears that.
@@ -6960,11 +6971,11 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
               && stageOf(wo.result, prURL(11)) == (moved ? "human/human" : "fast-track/fast"),
               "first rating waiting, \(what), Rate switched off: \(wo.writes) \(stageOf(wo.result, prURL(11)))")
     }
-    // The pipeline switched off as a waiting first rating would be applied, with Rate on or off:
-    // it waits, and is fast-tracked once the pipeline runs again.
-    for rate in [true, false] {
-        let t = fix(), d = dir("waiting-switched-off-\(rate)")
-        applying(t) { $0.ghFails = true }
+    // The pipeline switched off as a waiting first rating would be applied, with Rate on or off,
+    // or as one pushed past would be rated again: it waits, and is fast-tracked once it runs.
+    for (rate, pushed) in [(true, false), (false, false), (true, true)] {
+        let t = fix(), d = dir("waiting-switched-off-\(rate)-\(pushed)")
+        applying(t) { if pushed { $0.prs[0].head = sha("a2") } else { $0.ghFails = true } }
         _ = sync(t, rateTrack, d, t0)
         t.ghFails = false
         var live = rate ? rateTrack : rateOff
@@ -6978,9 +6989,43 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
         let so = sync(t, rate ? rateTrack : rateOff, d, later(5))
         try? FileManager.default.removeItem(at: d.appendingPathComponent("control.json"))
         let on = sync(t, rateTrack, d, later(10))
-        check(so.writes.isEmpty && t.claudeCalls.count == 1 && on.writes == tracked
-              && on.result.effects == [reviewFX(11, sha("a1"))],
-              "switched off as its first rating waits, Rate \(rate): \(so.writes) \(on.writes)")
+        check(so.writes.isEmpty && t.claudeCalls.count == (pushed ? 2 : 1) && on.writes == tracked
+              && on.result.effects == [reviewFX(11, sha(pushed ? "a2" : "a1"))]
+              && (!pushed || stageOf(so.result, prURL(11)) == "human/human (off the fast track until it is rated again)"),
+              "switched off as its first rating waits, Rate \(rate), pushed \(pushed): \(so.writes) \(on.writes) "
+                + stageOf(so.result, prURL(11)))
+    }
+    // Its first rating pushed past as it was applied, then Rate switched off and a sync failing to
+    // read it again: a person's, no hold naming a rating to come; or with Rate off and a Rate now
+    // asked meanwhile, a sync before its answer waits for it, and the answer is the first rating.
+    for pressed in [false, true] {
+        let t = fix(), d = dir("rate-off-pushed-\(pressed)")
+        applying(t) { $0.prs[0].head = sha("a2") }
+        _ = sync(t, rateTrack, d, t0)
+        let off = pressed ? rateOff : rateTrack
+        var now = off
+        if pressed {
+            now.force = .init(rate: [prURL(11)])
+        } else {
+            var live = rateTrack
+            (live.mirrorGitHub, live.mirrorLinear, live.mirrorScope) = (true, true, .all)
+            var switched = PipelineControl(settings: live)
+            switched.rate = false
+            switched.save(in: d)
+            applying(t) { $0.ghFails = true }
+        }
+        let asked = sync(t, now, d, later(5), drain: false)
+        t.ghFails = false
+        let mid = sync(t, off, d, later(10), drain: false)
+        for case .rate(_, _, let url, let stamp, _, _) in asked.result.effects {
+            _ = PipelineRateJob.run(item: url, stamp: stamp, dir: d, io: t.io())
+        }
+        let (held, end) = (pressed ? mid : asked, sync(t, off, d, later(15)))
+        check(held.writes.isEmpty && t.claudeCalls.count == (pressed ? 2 : 1)
+              && stageOf(held.result, prURL(11)) == "human/human" + (pressed ? " (off the fast track until it is rated again)" : "")
+              && end.writes == (pressed ? tracked : ["+risk:low #11", "+complexity:low #11"])
+              && end.result.effects == (pressed ? [reviewFX(11, sha("a2"))] : []),
+              "Rate off, pushed past, Rate now \(pressed): \(held.writes) \(stageOf(held.result, prURL(11))) \(end.writes)")
     }
     // Its first rating left pending, then pushed to while given to someone else: rated at the new
     // head once it is yours again, and fast-tracked.

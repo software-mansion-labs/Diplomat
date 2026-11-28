@@ -194,7 +194,7 @@ write to the PR. A PR pushed to or retargeted meanwhile has it finished there, u
 rating made while **Fast-track my PRs** was on, low/low within the floor of the PR's files, the
 switch is on still, and the PR wears no rating or fast-track label and would close only `candidate`
 issues: then the PR is rated again instead, never lower, and that is still its first rating, or
-with **Rate issues and PRs** off it is finished there as no first rating.
+with **Rate issues and PRs** off and no **Rate now** for it, it is finished there as no first rating.
 
 Where you [mirror](#settings) ratings, a finished one's labels are written at once, and a sync labels
 up to 10 more kept ratings an item does not wear yet (`pipeline.json` `labels.mirrorPerSync`), your
