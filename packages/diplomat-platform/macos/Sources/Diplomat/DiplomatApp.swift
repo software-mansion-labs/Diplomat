@@ -69,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             SingleInstance.terminateOthers()
             OperatorQuit.clear()
             Daemon.markLoginStartUnattended()
+            Daemon.startAgentsThroughLauncher()
 
             // First run from a terminal (`swift run`): offer to install as a login
             // daemon. If accepted, the detached installer builds + launches the
