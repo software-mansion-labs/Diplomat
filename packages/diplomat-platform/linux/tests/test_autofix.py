@@ -2282,7 +2282,7 @@ def test_agent_job_kind_comment_names_every_kind_on_both_platforms():
     for source, field in ((inspect.getsource(autofix.AgentJob), "kind: str"),
                           (swift[swift.index("struct AgentJob"):], "var kind: String")):
         above, line = re.search(rf"(.*)\n(\s*{field}\b.*)", source).groups()
-        assert set(re.findall(r'"(\w+)"', above + line)) == (
+        assert set(re.findall(r'"([\w-]+)"', above + line)) == (
             autofix.QUEUE_REQUESTED_ACTIONS | {"conflicts", "audit"}), field
 
 
