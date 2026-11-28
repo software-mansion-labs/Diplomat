@@ -1118,8 +1118,7 @@ def test_the_shell_is_asked_as_a_login_shell_running_an_interactive_one(monkeypa
     monkeypatch.setenv("DIPLOMAT_SHELL", "/bin/zsh")
     monkeypatch.setattr(usagescan.subprocess, "run", run)
     usagescan.opencode_binary()
-    probe = ("command -v opencode; "
-             "printf '\\n@@XDG_STATE_HOME=%s\\n' \"$(printenv XDG_STATE_HOME)\"")
+    probe = "command -v opencode; printf '\\n@@XDG_STATE_HOME=%s\\n' \"${XDG_STATE_HOME-}\""
     assert seen == {"argv": ["/bin/zsh", "-l", "-c", "/bin/zsh -i -c " + shlex.quote(probe)],
                     "stdin": usagescan.subprocess.DEVNULL}
 

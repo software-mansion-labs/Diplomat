@@ -1202,7 +1202,7 @@ extension OpenCodeCLI.Resolution { var fields: [String?] { [path, stateHome] } }
 // The resolver: one login shell, an interactive one inside it, and a probe that prints
 // the path and then the shell's state root on a marked line.
 check(OpenCodeCLI.resolverArguments(shell: "/bin/zsh")
-        == ["-l", "-c", "'/bin/zsh' -i -c 'command -v opencode; printf '\\''\\n@@XDG_STATE_HOME=%s\\n'\\'' \"$(printenv XDG_STATE_HOME)\"'"],
+        == ["-l", "-c", "'/bin/zsh' -i -c 'command -v opencode; printf '\\''\\n@@XDG_STATE_HOME=%s\\n'\\'' \"${XDG_STATE_HOME-}\"'"],
       "the resolver's shape: \(OpenCodeCLI.resolverArguments(shell: "/bin/zsh"))")
 let executables: Set<String> = ["/opt/a/opencode", "/opt/b/opencode"]
 let found = OpenCodeCLI.parseResolution(
