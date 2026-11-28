@@ -101,14 +101,14 @@ a Linear team was not read whole, no issue in the repo it maps to is fixed, spli
    `Fixes ENG-12` in its PR's description.
 2. The PR is rated on its own (**Rate issues and PRs**), from its text and diff, never below its
    [diff floor](#the-diff-floor). Every open PR of yours is rated, not only the ones Diplomat opened.
-3. Low/low at its first rating (none was kept for it before, or only one it was pushed past, and its
-   timeline showed no rating or fast-track label) and closing only `candidate` issues (the fast
-   track is for the fixes the pipeline asks for), it is labelled `diplomat:fast-track` (**Fast-track
-   my PRs**); a PR rated while that is off, rated anything else, that the label could not be put on,
-   or that would also close an issue no read judged stays a person's, the last two with a hold saying
-   so. A max-depth review run is queued for its head. It reviews the
-   PR and fixes what it finds on the branch until a full pass at the head finds nothing, LOW
-   findings included, then posts one COMMENT review whose body begins
+3. Low/low at its first rating (none was kept for it before, or only one it was pushed or
+   retargeted past, and its timeline showed no rating or fast-track label) and closing only
+   `candidate` issues (the fast track is for the fixes the pipeline asks for), it is labelled
+   `diplomat:fast-track` (**Fast-track my PRs**); a PR rated while that is off, rated anything else,
+   that the label could not be put on, or that would also close an issue no read judged stays a
+   person's, the last two with a hold saying so. A max-depth review run is queued for its head. It
+   reviews the PR and fixes what it finds on the branch until a full pass at the head finds nothing,
+   LOW findings included, then posts one COMMENT review whose body begins
    `Clean at <head sha>`: the **clean marker**. A marker counts only on your own review, submitted
    at the commit it names.
 4. At the clean head the PR is rated again, once per head: the answer is recorded as it arrives,
@@ -189,10 +189,11 @@ model's answer, the rating kept and the diff floor, a dimension at a time. One a
 apply holds a PR off the fast track, and an issue from its fix, until a later sync does, tried again
 1, 2, 4 ... syncs later, unless a PR's diff at its head allows less: then it is dropped, and the PR
 is rated by its labels again, or rated anew without them. A first rating waits while Diplomat may not
-write to the PR. A PR pushed to meanwhile has it finished at the new head, unless it is a first
-rating made while **Fast-track my PRs** was on, low/low within the new head's diff floor, the switch
-is on still and the PR wears no rating or fast-track label: then the PR is rated again at the new
-head instead, never lower, and that is still its first rating.
+write to the PR; one **Rate now** made then, with **Rate issues and PRs** off, is applied at once, as
+no first rating. A PR pushed to or retargeted meanwhile has it finished there, unless it is a first
+rating made while **Fast-track my PRs** was on, low/low within the floor of the PR's files, the
+switch is on still, and the PR wears no rating or fast-track label and would close only `candidate`
+issues: then the PR is rated again instead, never lower, and that is still its first rating.
 
 Where you [mirror](#settings) ratings, a finished one's labels are written at once, and a sync labels
 up to 10 more kept ratings an item does not wear yet (`pipeline.json` `labels.mirrorPerSync`), your

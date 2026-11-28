@@ -657,12 +657,18 @@ final class PipelineSync {
         cache[e.id].map { atLeastLabels($0.rating, e.labels) } ?? labelRating(e.labels)
     }
 
-    /// `e`'s first rating is to be rated again at its head instead of finished
-    /// (`PipelineCachedRating.first`).
-    func rateAgain(_ e: PipelineEntry) -> Bool {
-        guard settings.fastTrack, let c = cache[e.id], c.pending == true, c.first == true, let h = c.head,
+    /// `e`'s pending first rating was made at another head or base, is low/low within the floor of
+    /// `e`'s files, and `e` wears no rating or fast-track label.
+    func pushedPast(_ e: PipelineEntry) -> Bool {
+        guard let c = cache[e.id], c.pending == true, c.first == true, let h = c.head,
               c.rating.atLeast(e.item.floor ?? c.rating).isFastTrack else { return false }
-        return h != head(e) && unworn(Set(e.labels.map { $0.lowercased() }))
+        return (h != head(e) || (c.base ?? e.baseRef) != e.baseRef) && unworn(Set(e.labels.map { $0.lowercased() }))
+    }
+
+    /// `e`'s first rating is to be rated again instead of finished, as it could put `e` on the fast
+    /// track (`PipelineCachedRating.first`).
+    func rateAgain(_ e: PipelineEntry) -> Bool {
+        settings.fastTrack && pushedPast(e) && closesHold(e) == nil
     }
 
     /// Each dimension wears `r`'s label and no other.
@@ -1118,7 +1124,7 @@ final class PipelineSync {
         }
         answers()
         // A Rate now ask refused now, or of an item gone from a whole read, is dropped; one
-        // whose PR was pushed to, or whose job is gone, is asked again.
+        // whose PR was pushed to or retargeted, or whose job is gone, is asked again.
         for (id, a) in state.rateAsks.sorted(by: { $0.key < $1.key }) where a.forced {
             guard let i = pos[id], !waits(entries[i]) else {
                 if pos[id] == nil && readAll { state.rateAsks[id] = nil }
@@ -1128,7 +1134,7 @@ final class PipelineSync {
             if let why = rateRefusal(entries[i]) {
                 notice("\(entries[i].item.label) was not rated: \(why)")
                 state.rateAsks[id] = nil
-            } else if a.head != head(entries[i]) || !queued(id, a) {
+            } else if !reads(a, entries[i]) || !queued(id, a) {
                 state.rateAsks[id] = nil
                 if !forced.contains(i) { forced.append(i) }
             }
@@ -1150,7 +1156,7 @@ final class PipelineSync {
                 if pos[id] == nil && readAll { state.rateAsks[id] = nil } else { waiting += 1 }
                 continue
             }
-            if wanted.contains(i) && a.head == head(entries[i]) && a.again == awaitingRerate(entries[i]) && queued(id, a) {
+            if wanted.contains(i) && reads(a, entries[i]) && a.again == awaitingRerate(entries[i]) && queued(id, a) {
                 waiting += 1
             } else {
                 state.rateAsks[id] = nil
@@ -1196,10 +1202,15 @@ final class PipelineSync {
     /// The head a rating of `e` reads the diff at; nil for an issue.
     func head(_ e: PipelineEntry) -> String? { e.item.kind == .pr ? e.item.headSha : nil }
 
+    /// Whether ask `a` rates the diff a rating of `e` would read now.
+    func reads(_ a: PipelineRateAsk, _ e: PipelineEntry) -> Bool {
+        a.head == head(e) && (a.base ?? e.baseRef) == e.baseRef
+    }
+
     /// Applies each answer a rating job left for a current ask, in the order they were
     /// asked for, and drops each ask an answer shows is no longer worth applying. An answer
     /// for an item this sync did not read in full, or that a switch keeps from applying
-    /// now, waits; one at a head the item has left is `rate`'s to drop.
+    /// now, waits; one at a head or base the item has left is `rate`'s to drop.
     func answers() {
         let current = PipelineRateJob.answers(in: dir).filter { state.rateAsks[$0.item]?.stamp == $0.stamp }
         for answer in current.sorted(by: { asked(state.rateAsks[$0.item]!, before: state.rateAsks[$1.item]!) }) {
@@ -1211,11 +1222,13 @@ final class PipelineSync {
                 persist()
                 continue
             }
-            guard a.head == head(entries[i]), may(a.forced ? .forced : .rate) else { continue }
+            guard reads(a, entries[i]), may(a.forced ? .forced : .rate) else { continue }
             state.rateAsks[id] = nil
             persist()
+            // A first rating asked again is wanted with Fast track off since: its answer is paid for.
             let current = a.forced ? rateRefusal(entries[i]) == nil
-                : eligible(entries[i]) && band(entries[i]) != nil && a.again == awaitingRerate(entries[i])
+                : eligible(entries[i]) && (band(entries[i]) != nil || pushedPast(entries[i]))
+                    && a.again == awaitingRerate(entries[i])
             if current { rated(i, answer.exit, a) }
         }
     }
@@ -1293,8 +1306,8 @@ final class PipelineSync {
     }
 
     /// Asks a queued job to rate `entries[i]`: its call saved in `rate/` and the ask in the
-    /// state, for `owed` to hand the front-end. An ask at its current head stands, Rate now
-    /// marking it forced. False when it was not asked.
+    /// state, for `owed` to hand the front-end. An ask at its current head and base stands,
+    /// Rate now marking it forced. False when it was not asked.
     @discardableResult
     func ask(_ i: Int, forced: Bool) -> Bool {
         let e = entries[i]
@@ -1304,7 +1317,7 @@ final class PipelineSync {
             return false
         }
         if forced { state.declined.removeAll { $0 == e.id } }
-        if let a = state.rateAsks[e.id], a.head == head(e) {
+        if let a = state.rateAsks[e.id], reads(a, e) {
             if forced { state.rateAsks[e.id]?.forced = true }
             return true
         }
@@ -1328,7 +1341,8 @@ final class PipelineSync {
             notice("\(e.item.label) was not rated: its rating could not be saved for the queue")
             return false
         }
-        state.rateAsks[e.id] = PipelineRateAsk(stamp: job.stamp, head: head(e), again: awaitingRerate(e),
+        state.rateAsks[e.id] = PipelineRateAsk(stamp: job.stamp, head: head(e),
+                                               base: e.item.kind == .pr ? e.baseRef : nil, again: awaitingRerate(e),
                                                forced: forced, floor: floor?.rating, reasons: floor?.reasons ?? [])
         persist()
         return true
@@ -1366,9 +1380,10 @@ final class PipelineSync {
         }
         let counts = may(step) && banHold(e) == nil
         let allowed = counts && e.item.writable
-        let first = counts && fresh && e.item.kind == .pr && may(.fastTrack)
+        // Unwritable, it waits for `finish`, which Rate off never reaches.
+        let first = counts && fresh && e.item.kind == .pr && may(.fastTrack) && (e.item.writable || may(.rate))
         // Saved before what it leads to: a sync stopped there does not ask again.
-        record(i, rating, why, detail, head: head, again: again, pending: allowed || first, first: first)
+        record(i, rating, why, detail, head: head, base: a.base, again: again, pending: allowed || first, first: first)
         guard allowed else { return }
         guard recheck(i), entries[i].item.headSha == e.item.headSha else { return failed(e.id) }
         // Left pending, for `finish` once the stop label is off.
@@ -1376,15 +1391,15 @@ final class PipelineSync {
         // A label put on meanwhile.
         if atLeastLabels(rating, entries[i].labels) != rating {
             rating = atLeastLabels(rating, entries[i].labels)
-            record(i, rating, why, describe(rating) + ", as labelled meanwhile", head: head, again: again, pending: true,
-                   first: first)
+            record(i, rating, why, describe(rating) + ", as labelled meanwhile", head: head, base: a.base, again: again,
+                   pending: true, first: first)
         }
         if !unworn(entries[i].labeled) { cache[e.id]?.first = nil }
         apply(i, rating)
     }
 
-    func record(_ i: Int, _ rating: PipelineRating, _ why: String, _ detail: String, head: String?, again: Bool,
-                pending: Bool, first: Bool) {
+    func record(_ i: Int, _ rating: PipelineRating, _ why: String, _ detail: String, head: String?, base: String?,
+                again: Bool, pending: Bool, first: Bool) {
         let e = entries[i]
         if again, let head {
             state.rerated[e.id, default: [:]][head] = rating
@@ -1392,7 +1407,7 @@ final class PipelineSync {
         }
         log(e.id, again ? .rerated : .rated, detail, head: head, rating: rating)
         cache[e.id] = PipelineCachedRating(rating: rating, why: why, pending: pending ? true : nil,
-                                           first: first ? true : nil, head: head)
+                                           first: first ? true : nil, head: head, base: base)
         entries[i].item.why = why
         entries[i].item.rating = rating
         entries[i].item.ratedBy = "local"
@@ -1986,7 +2001,7 @@ final class PipelineSync {
                     hold = e.unwritable.map { "off the fast track: \($0)" }
                         ?? (rateAgain(e) ? (state.declined.contains(e.id)
                                 ? "off the fast track until Rate now: a rating asked for it was cancelled"
-                                : "off the fast track until it is rated at its new head")
+                                : "off the fast track until it is rated again")
                             : cache[e.id]?.pending == true ? "off the fast track until a sync reads it again"
                             : !state.untracked.contains(e.id) ? state.keptOff[e.id]
                             : "off the fast track: \(model.labels.fastTrack) could not be put on at its first rating")
