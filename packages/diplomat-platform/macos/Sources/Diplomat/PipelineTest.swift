@@ -280,12 +280,12 @@ enum PipelineTest {
         print("\npipeline: a run that answered")
         let t1 = t0.addingTimeInterval(2 * 3600)
         let fixRun = AgentState.RunRecord(runID: "r-fix", dispatchedAt: t1.timeIntervalSince1970 + 60,
-                                          prURL: issue, kind: AgentTaskQueue.issuesAction)
+                                          prURL: issue, kind: AgentTaskQueue.issuesAction, pipeline: true)
         let otherRun = AgentState.RunRecord(runID: "r-other", dispatchedAt: t1.timeIntervalSince1970 + 60,
                                             prURL: "https://github.com/o/r/issues/90099",
-                                            kind: AgentTaskQueue.issuesAction)
+                                            kind: AgentTaskQueue.issuesAction, pipeline: true)
         let linearRun = AgentState.RunRecord(runID: "r-linear", dispatchedAt: t1.timeIntervalSince1970 + 60,
-                                             prURL: linear, kind: AgentTaskQueue.issuesAction)
+                                             prURL: linear, kind: AgentTaskQueue.issuesAction, pipeline: true)
         let concluded = Store.pipelineConcluded(store.loadPipelineAttempts(),
                                                 runs: [fixRun, otherRun], at: t1)
         check("a fix run concludes its issue's record, and no other",
@@ -300,15 +300,16 @@ enum PipelineTest {
               Store.pipelineConcluded(records, runs: [renamedRun], at: t1)
                   .filter { $0.value.concludedAt != nil }.keys.sorted() == [fixLinear.key])
         let reviewRun = AgentState.RunRecord(runID: "r-rev", dispatchedAt: t1.timeIntervalSince1970 + 60,
-                                             prNumber: 90011, prURL: pr, kind: AgentTaskQueue.reviewAction)
+                                             prNumber: 90011, prURL: pr, kind: AgentTaskQueue.reviewAction,
+                                             pipeline: true)
         check("a review run concludes its PR's review record, not a fix's",
               Store.pipelineConcluded(records.filter { [review.key, fix.key].contains($0.key) },
                                       runs: [reviewRun], at: t1)
                   .mapValues { $0.concludedAt != nil } == [review.key: true, fix.key: false])
-        var replyRun = reviewRun
-        replyRun.ledgerKey = "review-reply:\(pr)@aaa111"
-        check("…nor does a monitor's run on that PR",
-              Store.pipelineConcluded(records, runs: [replyRun], at: t1) == records)
+        var unasked = reviewRun
+        unasked.pipeline = false
+        check("…nor does a run on that PR the pipeline did not dispatch: a monitor's, another asker's or a wizard's",
+              Store.pipelineConcluded(records, runs: [unasked], at: t1) == records)
         func spawned(_ kind: String, _ url: String) -> Store.AgentJob {
             Store.AgentJob(kind: kind, auditAction: kind, label: "", prompt: "", prURL: url,
                            prNumber: nil, authorLogin: nil, counter: .pipeline)
@@ -1100,6 +1101,118 @@ enum PipelineTest {
         store.endStarting(fixKey)
         clearQueue()
         store.savePipelineAttempts([:])
+        /// `task` dispatched, with its run booked as `dispatchAgent` books it, and its agent's turn
+        /// reported over.
+        func report(_ task: Store.QueuedAgentTask?) {
+            guard let task else { return check("a task to run", false) }
+            store.recordQueuedAttempt(task)
+            store.forgetRequested(task.id)
+            store.dropQueuedTask(task.id)
+            let run = AgentState.RunRecord(runID: "r-\(task.id)", dispatchedAt: now.timeIntervalSince1970,
+                                           prNumber: task.job.prNumber, prURL: task.job.prURL ?? "",
+                                           kind: task.job.kind, pipeline: task.job.counter == .pipeline)
+            store.savePipelineAttempts(Store.pipelineConcluded(store.loadPipelineAttempts(), runs: [run], at: now))
+        }
+        for (effect, other) in [(review, sweptReview), (fix, community)] {
+            await store.applyPipeline(result([effect]), now: now)
+            store.requestOne(other)
+            report(store.queuedTasks.first)
+            let read = Store.pipelineQueued(store.requestedWork, attempts: store.loadPipelineAttempts()) == [effect.url]
+            await store.applyPipeline(result([effect]), now: now)
+            check("the run of an ask that took the pipeline's place answers none of its effects: "
+                  + "it asks for its own, as a first attempt (\(other.key))",
+                  store.queuedTasks.map(\.job.counter) == [.pipeline]
+                      && store.loadPipelineAttempts()[effect.key]?.attempts == 1)
+            check("…its item still the core's to read past its cap meanwhile (\(other.key))", read)
+            clearQueue()
+            store.savePipelineAttempts([:])
+        }
+        await store.applyPipeline(result([review]), now: now)
+        store.requestOne(sweptReview)
+        report(store.queuedTasks.first)
+        await store.applyPipeline(result([pushed]), now: now.addingTimeInterval(60))
+        let waited = store.queuedTasks.isEmpty
+        await store.applyPipeline(result([pushed]), now: now.addingTimeInterval(ReviewReconcile.reRequestCooldown))
+        check("…and a new head's waits the hour from when the pipeline's was queued",
+              waited && store.queuedTasks.map(\.job.counter) == [.pipeline])
+        clearQueue()
+        store.savePipelineAttempts([:])
+        for (effect, other) in [(review, sweptReview), (fix, community)] {
+            await store.applyPipeline(result([effect]), now: now)
+            store.requestOne(other)
+            store.cancelRequestedWork(other.key)
+            let open = store.loadPipelineAttempts()[effect.key].map { $0.concludedAt == nil } == true
+            await store.applyPipeline(result([effect]), now: now)
+            check("cancelling an ask that took the pipeline's place concludes none of its records: "
+                  + "it asks for its own (\(other.key))", open && store.queuedTasks.map(\.job.counter) == [.pipeline])
+            clearQueue()
+            store.savePipelineAttempts([:])
+        }
+        let spread = [review.key: ReviewAttempt(requestedAt: "aaa111", lastDispatchedAt: now, attempts: 2),
+                      "pipeline-review:https://github.com/O/R/pull/90011":
+                          ReviewAttempt(requestedAt: "old", lastDispatchedAt: t0, attempts: 1, concludedAt: t0),
+                      "pipeline-review:https://github.com/o/r/pull/90012":
+                          ReviewAttempt(requestedAt: "x", lastDispatchedAt: now, attempts: 1),
+                      "pipeline-fix:https://github.com/o/r/issues/90011":
+                          ReviewAttempt(requestedAt: "fix", lastDispatchedAt: now, attempts: 1)]
+        var zeroed = spread
+        zeroed[review.key]?.attempts = 0
+        let marked = Store.pipelinePreempted(spread, by: store.pipelineAsk(review).map { [$0] } ?? [])
+        check("a takeover sets only its item's open record to no attempts", marked == zeroed)
+        for (effect, other, off) in [(review, sweptReview, \Store.pipelineFastTrack), (fix, community, \Store.pipelineFix)] {
+            await store.applyPipeline(result([effect]), now: now)
+            if !store.requestedWork.isEmpty { store.requestedWork[0].offered = "task-1" }
+            let taken = store.requestOne(other)
+            store[keyPath: off] = false
+            check("another ask takes the place of one the network carries, as of one whose run started here, "
+                  + "and outlives a withdrawal; the network's run stays the pipeline's (\(other.key))",
+                  taken && store.requestedWork == [other] && store.queuedTasks.map(\.job.counter) == [nil]
+                      && store.loadPipelineAttempts()[effect.key]?.attempts == 1)
+            store[keyPath: off] = true
+            clearQueue()
+            store.savePipelineAttempts([:])
+        }
+        for (effect, other, off) in [(review, sweptReview, \Store.pipelineFastTrack), (fix, community, \Store.pipelineFix)] {
+            for gone in ["died", "switched off", "died, then a wizard's"] {
+                await store.applyPipeline(result([effect]), now: now)
+                if gone == "switched off" {
+                    store[keyPath: off] = false
+                    store[keyPath: off] = true
+                } else if let own = store.queuedTasks.first {
+                    store.recordQueuedAttempt(own)
+                    store.forgetRequested(own.id)
+                    store.dropQueuedTask(own.id)
+                }
+                if gone == "died, then a wizard's" {
+                    let hand = AgentState.RunRecord(runID: "r-hand", dispatchedAt: now.timeIntervalSince1970,
+                                                    prURL: effect.url, kind: other.config.action, source: "panel")
+                    store.savePipelineAttempts(Store.pipelineConcluded(store.loadPipelineAttempts(),
+                                                                       runs: [hand], at: now))
+                } else {
+                    store.requestOne(other)
+                    report(store.queuedTasks.first)
+                }
+                await store.applyPipeline(result([effect]), now: now.addingTimeInterval(ReviewReconcile.retryMaxBackoff))
+                check("with no ask of the pipeline's for it (\(gone), \(other.key)), another's run answers none of "
+                      + "its records: it asks for its own", store.queuedTasks.map(\.job.counter) == [.pipeline])
+                clearQueue()
+                store.savePipelineAttempts([:])
+            }
+        }
+        await store.applyPipeline(result([fix]), now: now)
+        if let own = store.queuedTasks.first {
+            store.recordQueuedAttempt(own)
+            store.forgetRequested(own.id)
+            store.dropQueuedTask(own.id)
+            store.requestOne(community)
+            report(store.queuedTasks.first)
+            report(own)
+        }
+        await store.applyPipeline(result([fix]), now: now.addingTimeInterval(ReviewReconcile.retryMaxBackoff))
+        check("another asker's fix started beside the pipeline's running one takes no ask's place: "
+              + "a run concludes its record, and no third is asked for", store.queuedTasks.isEmpty)
+        clearQueue()
+        store.savePipelineAttempts([:])
         check("a result dated in the second its sync began is that sync's",
               Store.pipelineRan(PipelineTickResult(at: Date(timeIntervalSince1970: 100)),
                                 started: Date(timeIntervalSince1970: 100.7))
@@ -1337,7 +1450,7 @@ enum PipelineTest {
         await store.applyPipeline(result([fix]), now: t0)
         let answered = AgentState.RunRecord(runID: AgentRegistry.newRunID(now: Date().timeIntervalSince1970),
                                             dispatchedAt: Date().timeIntervalSince1970 - 600, prURL: issue,
-                                            kind: AgentTaskQueue.issuesAction, pid: 4242)
+                                            kind: AgentTaskQueue.issuesAction, pid: 4242, pipeline: true)
         AgentRegistry.createRun(answered, prompt: "fix")
         try? "idle \(Date().timeIntervalSince1970)\n"
             .write(to: AgentRegistry.activityPath(answered.runID), atomically: true, encoding: .utf8)
@@ -1349,7 +1462,7 @@ enum PipelineTest {
         await store.applyPipeline(result([fix]), now: t0)
         let exited = AgentState.RunRecord(runID: AgentRegistry.newRunID(now: Date().timeIntervalSince1970),
                                           dispatchedAt: Date().timeIntervalSince1970 - 600, prURL: issue,
-                                          kind: AgentTaskQueue.issuesAction, pid: 4242)
+                                          kind: AgentTaskQueue.issuesAction, pid: 4242, pipeline: true)
         AgentRegistry.createRun(exited, prompt: "fix")
         try? "1\n".write(to: AgentRegistry.donePath(exited.runID), atomically: true, encoding: .utf8)
         _ = await store.settleAgents()

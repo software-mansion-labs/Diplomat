@@ -69,7 +69,7 @@ enum AgentRegistryCommand {
             "tty": r.tty, "quietDigest": r.quietDigest,
             "quietSince": r.quietSince.map { $0 as Any } ?? NSNull(),
             "reapRefusedAt": r.reapRefusedAt.map { $0 as Any } ?? NSNull(),
-            "untracked": r.untracked, "released": r.released,
+            "untracked": r.untracked, "released": r.released, "pipeline": r.pipeline,
         ]
         if let task = r.network { out["network"] = task }
         return out
@@ -92,6 +92,7 @@ enum AgentRegistryCommand {
             reapRefusedAt: AgentRegistry.number(d["reapRefusedAt"]),
             untracked: JSONInput.flag(d["untracked"]),
             released: JSONInput.flag(d["released"]),
-            network: (d["network"] as? String).flatMap { $0.isEmpty ? nil : $0 })
+            network: (d["network"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            pipeline: JSONInput.flag(d["pipeline"]))
     }
 }
