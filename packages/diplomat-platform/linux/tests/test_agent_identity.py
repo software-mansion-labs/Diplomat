@@ -44,7 +44,10 @@ def _stub_agent(tmp_path: Path, body: str = 'sleep 30') -> Path:
 
 def _run_agent(tmp_path: Path, bindir: Path, prompt: str = "do the thing"):
     """Run the real spawn command (minus the terminal emulator and tmux, which only
-    add windows) and return the Popen plus the three run-dir paths."""
+    add windows) and return the Popen plus the three run-dir paths.
+
+    Its stdin is a pipe held open, as a terminal's input is: at EOF the closing
+    ``exec "$SHELL" -i`` exits, and the outer shell's pid dies with the agent's."""
     run = tmp_path / "run"
     run.mkdir(exist_ok=True)
     prompt_file, pid_file, done_file = run / "prompt.txt", run / "pid", run / "done"
@@ -52,7 +55,7 @@ def _run_agent(tmp_path: Path, bindir: Path, prompt: str = "do the thing"):
     cmd = review.shell_command(str(prompt_file), str(done_file), str(pid_file))
     env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}
     proc = subprocess.Popen([review.user_shell(), "-i", "-c", cmd], env=env,
-                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, start_new_session=True)
     return proc, pid_file, done_file
 
@@ -220,6 +223,8 @@ def test_the_recorded_pid_dies_with_the_agent(tmp_path):
             time.sleep(0.05)
         assert not _cmdline(pid), \
             f"pid {pid} outlived the agent — it is {_cmdline(pid)!r}"
+        assert proc.poll() is None, \
+            "the window's shell exited too, so a dead pid shows nothing"
     finally:
         _kill(proc)
 
@@ -265,3 +270,5 @@ def _kill(proc: subprocess.Popen) -> None:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         pass
+    if proc.stdin:
+        proc.stdin.close()
