@@ -657,6 +657,14 @@ final class PipelineSync {
         cache[e.id].map { atLeastLabels($0.rating, e.labels) } ?? labelRating(e.labels)
     }
 
+    /// `e`'s first rating is to be rated again at its head instead of finished
+    /// (`PipelineCachedRating.first`).
+    func rateAgain(_ e: PipelineEntry) -> Bool {
+        guard settings.fastTrack, let c = cache[e.id], c.pending == true, c.first == true, let h = c.head
+        else { return false }
+        return h != head(e) && unworn(Set(e.labels.map { $0.lowercased() }))
+    }
+
     /// Each dimension wears `r`'s label and no other.
     func wears(_ labels: [String], _ r: PipelineRating) -> Bool {
         [(model.labels.risk, r.risk), (model.labels.complexity, r.complexity)].allSatisfy { names, level in
@@ -1149,8 +1157,9 @@ final class PipelineSync {
             }
         }
         guard settings.rate else { return persist() }
+        // A first rating pushed past is rated again only once its answer could be applied.
         for i in bands.joined() where waiting < model.rater.asks && !forced.contains(i)
-            && state.rateAsks[entries[i].id] == nil {
+            && state.rateAsks[entries[i].id] == nil && (entries[i].item.writable || !rateAgain(entries[i])) {
             if ask(i, forced: false) { waiting += 1 }
         }
         persist()
@@ -1173,11 +1182,11 @@ final class PipelineSync {
     }
 
     /// Where `e` stands in the order a sync asks for ratings, nil for none: a fast-track PR
-    /// at its clean head, an unrated PR of mine, an unrated issue Diplomat may write to,
-    /// another unrated issue.
+    /// at its clean head, an unrated PR of mine or one to be rated again (`rateAgain`), an
+    /// unrated issue Diplomat may write to, another unrated issue.
     func band(_ e: PipelineEntry) -> Int? {
         if settings.fastTrack && awaitingRerate(e) { return 0 }
-        guard e.item.rating == nil, open(e) else { return nil }
+        guard e.item.rating == nil || rateAgain(e), open(e) else { return nil }
         if e.item.kind == .pr { return own(e) ? 1 : nil }
         guard e.root != nil, !settled(e) else { return nil }
         return e.item.writable ? 2 : 3
@@ -1215,7 +1224,7 @@ final class PipelineSync {
     /// read allows less.
     func finish(_ i: Int) {
         let id = entries[i].id
-        guard let kept = cache[id]?.rating, may(.rate) else { return }
+        guard let kept = cache[id]?.rating, !rateAgain(entries[i]), may(.rate) else { return }
         let head = entries[i].item.headSha
         guard recheck(i), entries[i].item.headSha == head else { return failed(id) }
         guard stops(entries[i]).isEmpty else { return }
@@ -1339,7 +1348,7 @@ final class PipelineSync {
             (said, why) = answer
         }
         state.retry[e.id] = nil
-        let fresh = cache[e.id] == nil
+        let fresh = cache[e.id] == nil || rateAgain(e)
         // Never below its labels, nor the rating kept for it before.
         var rating = atLeastLabels(said.atLeast(cache[e.id]?.rating ?? said), e.labels)
         var detail = describe(rating) + (why.isEmpty ? "" : ": " + why)
@@ -1354,18 +1363,13 @@ final class PipelineSync {
             detail = describe(rating) + ", floored by its diff (" + reasons.joined(separator: "; ") + ")"
                 + (why.isEmpty ? "" : ": " + why)
         }
-        let allowed = e.item.writable && may(step) && banHold(e) == nil
-        let first = allowed && fresh && e.item.kind == .pr
+        let counts = may(step) && banHold(e) == nil
+        let allowed = counts && e.item.writable
+        let first = counts && fresh && e.item.kind == .pr && may(.fastTrack)
         // Saved before what it leads to: a sync stopped there does not ask again.
-        record(i, rating, why, detail, head: head, again: again, pending: allowed, first: first)
+        record(i, rating, why, detail, head: head, again: again, pending: allowed || first, first: first)
         guard allowed else { return }
-        guard recheck(i), entries[i].item.headSha == e.item.headSha else {
-            guard entries[i].item.writable else {
-                cache[e.id]?.pending = nil
-                return persist()
-            }
-            return failed(e.id)
-        }
+        guard recheck(i), entries[i].item.headSha == e.item.headSha else { return failed(e.id) }
         // Left pending, for `finish` once the stop label is off.
         guard stops(entries[i]).isEmpty else { return }
         // A label put on meanwhile.
@@ -1387,7 +1391,7 @@ final class PipelineSync {
         }
         log(e.id, again ? .rerated : .rated, detail, head: head, rating: rating)
         cache[e.id] = PipelineCachedRating(rating: rating, why: why, pending: pending ? true : nil,
-                                           first: first ? true : nil)
+                                           first: first ? true : nil, head: head)
         entries[i].item.why = why
         entries[i].item.rating = rating
         entries[i].item.ratedBy = "local"
@@ -1403,12 +1407,19 @@ final class PipelineSync {
 
     /// Puts `fastTrack` on a PR rated low/low that closes only candidates, at its first rating
     /// only: one rated before, or that wore a rating or fast-track label, is a person's.
-    /// One it could not be put on is recorded.
+    /// One it could not be put on, that would also close what no read judged, or that an older
+    /// version left pending, its `first` set whatever the switch, is recorded.
     func trackFirst(_ i: Int, _ rating: PipelineRating) {
         let e = entries[i]
         guard e.item.kind == .pr, settings.fastTrack, rating.isFastTrack, cache[e.id]?.first == true,
-              closesHold(e) == nil else { return }
-        if add(i, model.labels.fastTrack, .fastTrack) {
+              fixesCandidate(e) else { return }
+        if let why = cache[e.id]?.head == nil ? "its first rating was left pending by an older version"
+            : closesHold(e).map({ "at its first rating it " + $0.message }) {
+            let hold = "off the fast track until taken over: " + why
+            log(e.id, .held, hold)
+            state.keptOff[e.id] = hold
+            persist()
+        } else if add(i, model.labels.fastTrack, .fastTrack) {
             log(e.id, .fastTrack, "+\(model.labels.fastTrack): rated \(describe(rating))")
         } else if !state.untracked.contains(e.id) {
             state.untracked.append(e.id)
@@ -1654,6 +1665,7 @@ final class PipelineSync {
                 }
                 state.decided.removeAll { $0 == id }
                 state.untracked.removeAll { $0 == id }
+                state.keptOff[id] = nil
                 state.cleared[id] = nil
             }
             state.takenOver[id] = e.item.kind
@@ -1971,8 +1983,10 @@ final class PipelineSync {
                 stage = e.item.rating == nil ? .unrated : .human
                 if own(e), let r = e.item.rating, r.atLeast(floor).isFastTrack {
                     hold = e.unwritable.map { "off the fast track: \($0)" }
-                        ?? (cache[e.id]?.pending == true ? "off the fast track until a sync reads it again"
-                            : !state.untracked.contains(e.id) ? nil
+                        ?? (rateAgain(e) && state.declined.contains(e.id)
+                            ? "off the fast track until Rate now: the rating asked at its new head was cancelled"
+                            : cache[e.id]?.pending == true ? "off the fast track until a sync reads it again"
+                            : !state.untracked.contains(e.id) ? state.keptOff[e.id]
                             : "off the fast track: \(model.labels.fastTrack) could not be put on at its first rating")
                 }
             } else if let why = partial[e.item.repo] {
