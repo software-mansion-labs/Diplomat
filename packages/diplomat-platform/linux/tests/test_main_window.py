@@ -287,7 +287,8 @@ def _install(tmp_path: Path, core_builds: bool = True):
 
 def test_the_login_entry_starts_in_the_background_and_the_menu_entry_does_not(tmp_path):
     """The ``Exec`` lines the installer writes are run as written."""
-    _launcher, env, record, login, menu, _ = _install(tmp_path)
+    _launcher, env, record, login, menu, stderr = _install(tmp_path)
+    assert stderr == ""
     for entry, expected in ((login, "bg=1"), (menu, "bg=")):
         subprocess.run(_desktop_exec(entry), env=env, check=True)
         assert record.read_text().splitlines() == [expected], entry
@@ -298,9 +299,9 @@ def test_the_login_entry_starts_in_the_background_and_the_menu_entry_does_not(tm
 def test_a_failed_core_build_warns_of_everything_that_needs_the_binary(tmp_path):
     *_, stderr = _install(tmp_path, core_builds=False)
     assert stderr == (
-        "warning: diplomat-core not built (need a Swift toolchain) - every agent spawn,\n"
-        "         Comms, the Pipeline and the Linear login fail until install/build-core.sh\n"
-        "         succeeds.\n")
+        "warning: diplomat-core not built - Review, Fix issues, Conflicts, Audit, Comms,\n"
+        "         the Pipeline and the Linear login need it; build it later with\n"
+        "         install/build-core.sh.\n")
 
 
 # ---- an install from before unattended starts were hidden ------------------------
