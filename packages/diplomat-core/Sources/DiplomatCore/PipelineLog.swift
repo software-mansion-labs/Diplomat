@@ -69,8 +69,7 @@ struct PipelineState: Codable, Equatable {
     var takenOver: [String: PipelineKind] = [:]
     /// PRs the fast-track label could not be put on at their first rating.
     var untracked: [String] = []
-    /// PRs kept off the fast track at their first rating for what they would close, and the
-    /// hold saying so.
+    /// PRs kept off the fast track at their first rating, and the hold saying why.
     var keptOff: [String: String] = [:]
     /// Issues that would not split, or whose split stopped part-way, and why: not tried
     /// again unless forced.

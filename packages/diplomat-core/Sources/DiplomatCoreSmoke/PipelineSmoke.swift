@@ -6433,7 +6433,7 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
           && stageOf(lon.result, prURL(11)) == "human/human",
           "Fast track switched on as a sync with it off rated: \(lon.writes) \(stageOf(lon.result, prURL(11)))")
     // Held by a stop label as its first rating was applied, then labelled by a person: theirs,
-    // pushed to or not.
+    // pushed to or not, with no new rating.
     for pushed in [false, true] {
         let t = fix()
         applying(t) { $0.prs[0].labels = ["wip"] }
@@ -6441,7 +6441,7 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
         t.prs[0].labels = ["risk:low", "complexity:low"]
         if pushed { t.prs[0].head = sha("a2") }
         let hb = (1...2).map { sync(t, rateTrack, dir("held-labelled-\(pushed)"), later(Double(5 * $0))) }
-        check(hb.flatMap(\.claude) == (pushed ? ["opus Fix the docs link"] : []) && hb.flatMap(\.writes).isEmpty
+        check(hb.flatMap(\.claude).isEmpty && hb.flatMap(\.writes).isEmpty
               && hb.allSatisfy { $0.result.effects.isEmpty && stageOf($0.result, prURL(11)) == "human/human" },
               "held, labelled by a person, pushed \(pushed): \(hb.map(\.claude)) \(hb.map(\.writes)) "
                 + "\(hb.map { stageOf($0.result, prURL(11)) })")
@@ -6509,15 +6509,77 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
     let pa = sync(assigned, rateTrack, dir("pushed-assigned"), later(5))
     check(pa.claude == ["opus Fix the docs link"] && pa.writes == tracked && pa.result.effects == [reviewFX(11, sha("a2"))],
           "pushed to and assigned as it was applied: \(pa.claude) \(pa.writes) \(stageOf(pa.result, prURL(11)))")
+    // Given to someone else as its first rating is applied: fast-tracked once it is yours again.
+    let lent = fix()
+    applying(lent) { $0.prs[0].assignees = ["bob"] }
+    _ = sync(lent, rateTrack, dir("assigned"), t0)
+    lent.prs[0].assignees = []
+    let la = sync(lent, rateTrack, dir("assigned"), later(5))
+    check(la.claude.isEmpty && la.writes == tracked && la.result.effects == [reviewFX(11, sha("a1"))],
+          "assigned as it was applied: \(la.claude) \(la.writes) \(stageOf(la.result, prURL(11)))")
+    // Pushed to as its first rating is applied, the rating asked at the new head cancelled: the
+    // rating kept shows meanwhile.
+    let dropped = fix()
+    applying(dropped) { $0.prs[0].head = sha("a2") }
+    _ = sync(dropped, rateTrack, dir("pushed-cancelled"), t0)
+    let dq = sync(dropped, rateTrack, dir("pushed-cancelled"), later(5), drain: false)
+    for case .rate(_, _, let url, let stamp, _, _) in dq.result.effects {
+        _ = PipelineRateJob.cancel(item: url, stamp: stamp, dir: dir("pushed-cancelled"))
+    }
+    let dc = sync(dropped, rateTrack, dir("pushed-cancelled"), later(10))
+    check(dc.claude.isEmpty && dc.writes.isEmpty && item(dc.result, prURL(11))?.rating == rating(.low, .low)
+          && stageOf(dc.result, prURL(11)) == "human/human (off the fast track until a sync reads it again)",
+          "pushed to, its new rating cancelled: \(dc.writes) \(stageOf(dc.result, prURL(11)))")
+    // Pushed to as its first rating is applied while four asks already wait: asked at the new
+    // head once one is in, not held back for having waited.
+    let capped = fix()
+    let cappedPRs = capped.prs
+    capped.prs = []
+    for n in 1...4 {
+        capped.issues.append(.init(number: 40 + n, title: "Item \(n)", updated: at(String(format: "10:%02d", 10 - n))))
+        capped.ratings["Item \(n)"] = ["risk": "high", "complexity": "high", "why": "x"]
+    }
+    let cd = dir("pushed-capped")
+    func asked11(_ s: Synced) -> Bool {
+        s.result.effects.contains { if case .rate(_, 11, _, _, _, _) = $0 { return true }; return false }
+    }
+    func answer(_ s: Synced, _ pick: (String) -> Bool) {
+        for case .rate(_, _, let url, let stamp, _, _) in s.result.effects where pick(url) {
+            _ = PipelineRateJob.run(item: url, stamp: stamp, dir: cd, io: capped.io())
+        }
+    }
+    _ = sync(capped, rateTrack, cd, t0, drain: false)
+    capped.prs = cappedPRs
+    var rateNow11 = rateTrack
+    rateNow11.force = .init(rate: [prURL(11)])
+    answer(sync(capped, rateNow11, cd, later(5), drain: false)) { $0 == prURL(11) }
+    applying(capped) { $0.prs[0].head = sha("a2") }
+    _ = sync(capped, rateTrack, cd, later(5), drain: false)
+    let full = sync(capped, rateTrack, cd, later(10), drain: false)
+    answer(full) { $0 != prURL(11) }
+    let freed = sync(capped, rateTrack, cd, later(15), drain: false)
+    check(!asked11(full) && asked11(freed), "pushed to, four asks waiting: \(asked11(full)) then \(asked11(freed))")
     // A pending first rating saved with no head, as before heads were kept, whatever the switch
-    // then: finished, not as a first rating.
+    // then: finished, kept off the fast track with a hold saying so.
     try FileManager.default.createDirectory(at: dir("headless"), withIntermediateDirectories: true)
     try json([prURL(11): ["rating": ["risk": "low", "complexity": "low"], "why": "", "pending": true, "first": true]])
         .write(to: dir("headless").appendingPathComponent("ratings.json"))
     let hl = sync(fix(), rateTrack, dir("headless"), t0)
-    check(hl.claude.isEmpty && hl.writes == ["+risk:low #11", "+complexity:low #11"]
-          && hl.result.effects.isEmpty && stageOf(hl.result, prURL(11)) == "human/human",
+    let older = "off the fast track until taken over: its first rating was left pending by an older version"
+    check(hl.claude.isEmpty && hl.writes == ["+risk:low #11", "+complexity:low #11"] && hl.result.effects.isEmpty
+          && hl.events.filter { $0.kind == .held }.map(\.detail) == [older]
+          && stageOf(hl.result, prURL(11)) == "human/human (\(older))",
           "a pending rating with no head: \(hl.claude) \(hl.writes) \(stageOf(hl.result, prURL(11)))")
+    // Wearing diplomat:fast-track as its first rating is applied, not read again, pushed to: not
+    // a first rating, so finished at the new head.
+    let worn = fix()
+    worn.prs[0].labels = ["diplomat:fast-track"]
+    applying(worn) { $0.ghFails = true }
+    _ = sync(worn, rateTrack, dir("worn-pushed"), t0)
+    (worn.ghFails, worn.prs[0].head) = (false, sha("a2"))
+    let wp = sync(worn, rateTrack, dir("worn-pushed"), later(5))
+    check(wp.claude.isEmpty && wp.writes == ["+risk:low #11", "+complexity:low #11"],
+          "wearing diplomat:fast-track, pushed to: \(wp.claude) \(wp.writes) \(stageOf(wp.result, prURL(11)))")
     // A first rating left pending, then Rate now at the same head: not a first rating.
     let again = fix()
     applying(again) { $0.ghFails = true }
@@ -6603,19 +6665,23 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
               && stageOf(k1.result, prURL(11)) == "human/human (\(why))" && stageOf(k2.result, prURL(11)) == "human/human (\(why))",
               "first rated, closing \(unread) unread: \(k1.writes) \(k2.writes) \(stageOf(k2.result, prURL(11)))")
     }
-    // Kept off, then closing a candidate only: a push and Rate now leave it a person's.
-    let edited = only([4, 11])
-    _ = sync(edited, rateTrack, dir("kept-off-edited"), t0)
-    (edited.prs[0].body, edited.prs[0].head) = ("Fixes #4.", sha("a2"))
-    let e1 = sync(edited, rateTrack, dir("kept-off-edited"), later(5))
-    var rateNowEdited = rateTrack
-    rateNowEdited.force = .init(rate: [prURL(11)])
-    let e2 = sync(edited, rateNowEdited, dir("kept-off-edited"), later(10))
+    // Kept off, then closing a candidate only: a push and Rate now leave it a person's, mirrored
+    // or not.
     let eng3 = "human/human (off the fast track until taken over: at its first rating it would close ENG-3, "
         + "which Diplomat did not read or may not write to)"
-    check(e1.claude.isEmpty && e2.claude == ["opus Fix the docs link"] && (e1.writes + e2.writes).isEmpty
-          && (e1.result.effects + e2.result.effects).isEmpty && stageOf(e2.result, prURL(11)) == eng3,
-          "kept off, edited, pushed to, Rate now: \(e1.claude) \(e1.writes) \(e2.writes) \(stageOf(e2.result, prURL(11)))")
+    for mirror in [PipelineMirrorScope.all, nil] {
+        let edited = only([4, 11]), d = dir("kept-off-edited-\(mirror == nil)")
+        _ = sync(edited, rateTrack, d, t0, mirror: mirror)
+        (edited.prs[0].body, edited.prs[0].head) = ("Fixes #4.", sha("a2"))
+        let e1 = sync(edited, rateTrack, d, later(5), mirror: mirror)
+        var rateNowEdited = rateTrack
+        rateNowEdited.force = .init(rate: [prURL(11)])
+        let e2 = sync(edited, rateNowEdited, d, later(10), mirror: mirror)
+        check(e1.claude.isEmpty && e2.claude == ["opus Fix the docs link"] && (e1.writes + e2.writes).isEmpty
+              && (e1.result.effects + e2.result.effects).isEmpty && stageOf(e2.result, prURL(11)) == eng3,
+              "kept off, edited, pushed to, Rate now, mirrored \(mirror != nil): \(e1.claude) \(e1.writes) "
+                + "\(e2.writes) \(stageOf(e2.result, prURL(11)))")
+    }
     // Kept off as its rating is applied, before another item's pending rating is finished: the
     // hold is saved by then.
     let saved = only([1, 4, 11])
