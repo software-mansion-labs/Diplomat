@@ -461,8 +461,8 @@ public enum Telemetry {
         public let at: Double
         /// Percent of each window left, or nil when that reading is missing — the
         /// probe was offline, Claude Code was logged out, or (for the 5-hour window)
-        /// the sample postdates its readings. Nil is NOT zero, and a chart must break
-        /// its line rather than draw a plunge to the floor.
+        /// the sample postdates its readings. Nil is NOT zero, and a chart must never
+        /// draw it as a plunge to the floor.
         public let sessionPct: Double?
         public let weekPct: Double?
     }

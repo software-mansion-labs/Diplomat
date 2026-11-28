@@ -21,7 +21,8 @@ default 14):
   holds such readings. The axis is pinned to 0-100% rather than scaled to the data,
   so "we never dropped below 60%" and a week of exhaustion cannot come out as the
   same picture. A missing reading is a probe that could not answer, not an empty
-  window, so the line breaks across one instead of diving to the floor and back.
+  window, so the line never dives to the floor and back: it is drawn through a
+  silence of up to an hour and breaks across a longer one.
 - **Owed work** over time - work the monitors had found but nobody had started yet,
   auto-reviews and conflict fixes stacked into one area on a count axis. Stacked
   because both queue for the same executors, with reviews taking a free slot first:
