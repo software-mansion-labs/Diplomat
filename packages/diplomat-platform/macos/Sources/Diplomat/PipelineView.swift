@@ -99,7 +99,7 @@ struct PipelineView: View {
                           unread: Bool = false, reads: Bool = true) -> String {
         if !enabled {
             return "The pipeline is off. Switched on in Settings, it rates every open issue and your own PRs, "
-                + "sends the low-risk, low-complexity ones down the fast track and shows them here."
+                + "sends the ones within their repo's limit down the fast track and shows them here."
         }
         guard synced else {
             return "Nothing read yet: the first sync lists every open issue and PR of the GitHub roots "

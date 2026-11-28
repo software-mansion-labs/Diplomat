@@ -72,8 +72,9 @@ public enum PipelineGate {
         if changedFiles > f.maxFiles {
             raise(&complexity, to: .medium, "changes \(changedFiles) files (limit \(f.maxFiles))")
         }
+        // High risk, as what the read did not list could be a denied path.
         if files.count < changedFiles {
-            raise(&complexity, to: .medium, "changes files the read did not list")
+            raise(&risk, to: .high, "changes files the read did not list")
         }
         for file in files {
             if isDenied(file.path, f) {
@@ -108,12 +109,14 @@ public enum PipelineGate {
     }
 
     /// What the diff's text adds to `floor`. A moved submodule is high risk: GitHub lists it
-    /// as one modified line whatever it pulls in.
+    /// as one modified line whatever it pulls in. So is what the rater cannot read: a diff past
+    /// its length, or a binary file's content; and a denied path renamed away, which the
+    /// files list names by its new path only.
     static func diffFloor(_ diff: String, diffChars: Int) -> (rating: PipelineRating, reasons: [String]) {
         var rating = PipelineRating(risk: .low, complexity: .low)
         var reasons: [String] = []
         if diff.count > diffChars {
-            rating.complexity = .medium
+            rating.risk = .high
             reasons.append("its diff is longer than the \(diffChars) characters the rater reads")
         }
         let moved = diff.split(separator: "\n").contains {
@@ -122,6 +125,21 @@ public enum PipelineGate {
         if moved {
             rating.risk = .high
             reasons.append("moves a submodule")
+        }
+        let lines = diff.split(separator: "\n")
+        if lines.contains(where: { $0.hasPrefix("Binary files ") && $0.hasSuffix(" differ") }) {
+            rating.risk = .high
+            reasons.append("changes a binary file")
+        }
+        if let f = (try? CoreAssets.pipeline())?.floor {
+            for line in lines where line.hasPrefix("rename from ") {
+                // Unquoted: git quotes a path with a special character in it.
+                let path = String(line.dropFirst("rename from ".count)).trimmingCharacters(in: ["\""])
+                if isDenied(path, f) {
+                    rating.risk = .high
+                    reasons.append("renames \(path), a denied path")
+                }
+            }
         }
         return (rating, reasons)
     }
@@ -141,6 +159,8 @@ public enum PipelineGate {
         public var unresolvedThreads: Int
         public var rating: PipelineRating?
         public var floor: PipelineRating
+        /// Its root's: the highest rating and floor it may merge at.
+        public var limit: PipelineRating
         public var mergeable: String
         public var headSha: String
         /// The commit `ciState` was read for, which a lagging index can leave behind
@@ -156,7 +176,7 @@ public enum PipelineGate {
         public var foreignCommits: [String]
         /// Both of Diplomat's fast-track labels are on it.
         public var trackLabels: Bool
-        /// Every issue it closes is a candidate: low risk, low complexity or taken over, and one
+        /// Every issue it closes is a candidate: within its root's limit or taken over, and one
         /// Diplomat may act on; and it closes one, unless it is taken over itself.
         public var fixesCandidate: Bool
         /// The issues it would close that Diplomat did not read.
@@ -196,7 +216,8 @@ public enum PipelineGate {
                     closesUnwritable: [String] = [], ciRan: Bool = true, wasReady: Bool = false,
                     mergeState: String = "CLEAN", behindBy: Int? = 0, mergeQueue: Bool = false, stopLabels: [String] = [],
                     requiredChecks: [String]? = [], passedChecks: Set<String> = [], baseRules: [String]? = [],
-                    unsignedCommits: Bool = false, mergeFlag: String = "--squash", takenOver: Bool = false) {
+                    unsignedCommits: Bool = false, mergeFlag: String = "--squash", takenOver: Bool = false,
+                    limit: PipelineRating = .low) {
             self.state = state
             self.author = author
             self.isCrossRepository = isCrossRepository
@@ -208,6 +229,7 @@ public enum PipelineGate {
             self.unresolvedThreads = unresolvedThreads
             self.rating = rating
             self.floor = floor
+            self.limit = limit
             self.mergeable = mergeable
             self.headSha = headSha
             self.ciCommit = ciCommit
@@ -384,8 +406,8 @@ public enum PipelineGate {
         if let label = c.stopLabels.first { return .stopLabel(label) }
         if !c.trackLabels { return .offTrack }
         if let held = closes(c.fixesCandidate, c.closesUnwritable) { return held }
-        if !c.takenOver && c.rating?.isFastTrack != true { return .rated(c.rating) }
-        if !c.takenOver && !c.floor.isFastTrack { return .floor(c.floor) }
+        if !c.takenOver && c.rating?.fits(c.limit) != true { return .rated(c.rating) }
+        if !c.takenOver && !c.floor.fits(c.limit) { return .floor(c.floor) }
         if c.mergeable == "CONFLICTING" { return .conflicting }
         if c.mergeable != "MERGEABLE" || ["", "UNKNOWN"].contains(c.mergeState) { return .mergeabilityUnknown }
         // `--admin` merges a PR behind its base without testing it against the base; GitHub

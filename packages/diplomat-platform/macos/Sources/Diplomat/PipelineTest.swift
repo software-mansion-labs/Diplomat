@@ -56,6 +56,7 @@ enum PipelineTest {
         store.pipelineFastTrack = true
         store.pipelineMerge = true
         store.pipelineFracture = false
+        store.pipelineLimits = [:]
         store.pipelineLinearTeamsRaw = "ENG=o/r"
         store.pipelineForce = PipelineSettings.Force()
 
@@ -70,6 +71,42 @@ enum PipelineTest {
         check("the Linear teams", settings.linearTeams == [PipelineSettings.LinearTeam(key: "ENG", repo: "o/r")])
         check("no forces while none is asked for", settings.force == nil)
         check("no item while no ask or attempt record is held", settings.queued.isEmpty)
+        let raised = PipelineRating(risk: .medium, complexity: .high)
+        let rootsBefore = store.roots
+        store.pinRoots([PRRef.LocalRepo(owner: "O", repo: "R", path: scratch.path),
+                        PRRef.LocalRepo(owner: "o", repo: "other", path: scratch.path)])
+        store.pipelineLimits = ["o/r": raised]
+        check("each root's limit by its slug lowercased, a root missing from them low/low",
+              store.pipelineSettings.roots.map { "\($0.slug) \($0.limit.risk) \($0.limit.complexity)" }
+                  == ["O/R medium high", "o/other low low"])
+        store.pinRoots(rootsBefore)
+        store.pipelineLimits = [:]
+        let limitsJSON = #"{"o/r":{"complexity":"medium","risk":"low"}}"#
+        check("the limits are stored in the Linux store's shape",
+              Store.pipelineLimitsJSON(["o/r": PipelineRating(risk: .low, complexity: .medium)]) == limitsJSON)
+        check("…and read back from it, an absent or unreadable one as none",
+              Store.pipelineLimits(limitsJSON) == ["o/r": PipelineRating(risk: .low, complexity: .medium)]
+                  && Store.pipelineLimits(#"{"o/r": {"risk": "medium", "complexity": "high"}}"#) == ["o/r": raised]
+                  && Store.pipelineLimits(nil).isEmpty && Store.pipelineLimits("not json").isEmpty
+                  && Store.pipelineLimits("[]").isEmpty)
+        check("…a hand-edited one by its slug lowercased, low where it is no level, risk stopping at medium",
+              Store.pipelineLimits(#"{"O/R": {"risk": "high", "complexity": "high"}}"#) == ["o/r": raised]
+                  && Store.pipelineLimits(#"{"o/r": {"risk": "severe", "complexity": 2}, "a/b": "medium", "c/d": {}}"#)
+                      == ["o/r": .low, "a/b": .low, "c/d": .low]
+                  && Store.pipelineLimits(#"{"o/r": {"complexity": "medium", "extra": "high"}}"#)
+                      == ["o/r": PipelineRating(risk: .low, complexity: .medium)])
+        let epoch = store.pipelineEpoch
+        store.pipelineLimits = ["o/r": raised]
+        check("a limit raised cuts no sync short", store.pipelineEpoch == epoch)
+        store.pipelineLimits = ["o/r": PipelineRating(risk: .medium, complexity: .medium)]
+        check("…one lowered in either dimension does, as a switch turned off does", store.pipelineEpoch == epoch + 1)
+        store.pipelineLimits = ["o/r": PipelineRating(risk: .low, complexity: .high)]
+        check("…one down and one up too", store.pipelineEpoch == epoch + 2)
+        store.pipelineLimits = [:]
+        check("…and one taken out of them, back to low/low", store.pipelineEpoch == epoch + 3)
+        store.pipelineLimits = ["o/x": .low]
+        check("…but not one put in at low/low", store.pipelineEpoch == epoch + 3)
+        store.pipelineLimits = [:]
         // The argument domain outranks every stored one and lives only in this process.
         let arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
         func launched(_ stored: [String: Any]) -> Store {
@@ -97,8 +134,8 @@ enum PipelineTest {
                       == "ENG → o/r · OPS → o/x")
         check("Fast-track my PRs names only a PR closing only candidate issues, rated while it is on",
               SettingsView.pipelineFastTrackSummary
-                  == "Labels diplomat:fast-track each low/low PR of yours that closes a candidate issue, "
-                  + "or that you take over, and reviews it until clean"
+                  == "Labels diplomat:fast-track each PR of yours within its repo's limit that closes a candidate "
+                  + "issue, or that you take over, and reviews it until clean"
                   && SettingsView.pipelineFastTrackDetail.hasPrefix(
                       "Only your own PRs from the repo itself into its default branch that close only "
                           + "candidate issues: the fixes the pipeline asks for.")
@@ -962,10 +999,15 @@ enum PipelineTest {
         try? FileManager.default.createDirectory(at: PipelineLog.dir, withIntermediateDirectories: true)
         chmod(PipelineLog.dir.path, 0o755)
         store.pipelineMerge = false
-        check("a switch writes every switch as it stands, the mirror scope by name",
+        check("a switch writes every switch as it stands, the mirror scope by name, and the limits, none set",
               switches() == ["enabled": true, "rate": true, "mirrorGitHub": true, "mirrorLinear": false,
                              "mirrorScope": "mine", "fix": true, "fastTrack": true, "merge": false,
-                             "fracture": false] as NSDictionary)
+                             "fracture": false, "limits": NSDictionary()] as NSDictionary)
+        store.pipelineLimits = ["o/r": PipelineRating(risk: .low, complexity: .medium)]
+        check("a limit set writes each by its slug lowercased",
+              switches()?["limits"] as? [String: [String: String]] == ["o/r": ["risk": "low", "complexity": "medium"]]
+                  && switches()?["merge"] as? Bool == false)
+        store.pipelineLimits = [:]
         func mode(_ url: URL) -> Int? {
             (try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? Int
         }
@@ -1349,6 +1391,25 @@ enum PipelineTest {
             await store.runPipelineSyncOnce()
             check("…which the next sync drops", store.loadPipelineAttempts().isEmpty)
         }
+        store.pipelineLimits = ["o/r": PipelineRating(risk: .low, complexity: .medium)]
+        store.savePipelineAttempts([fix.key: lapsed])
+        var limited: [PipelineRating] = []
+        Store.pipelineTickOverride = { settings in
+            limited = settings.roots.map(\.limit)
+            store.pipelineLimits = [:]
+            return result([])
+        }
+        await store.runPipelineSyncOnce()
+        check("a sync is handed each root's limit", limited == [PipelineRating(risk: .low, complexity: .medium)])
+        check("…and one whose repo's limit was lowered during it keeps the records of the asks it left out",
+              store.loadPipelineAttempts() == [fix.key: lapsed])
+        Store.pipelineTickOverride = { _ in
+            store.pipelineLimits = ["o/r": PipelineRating(risk: .low, complexity: .medium)]
+            return result([])
+        }
+        await store.runPipelineSyncOnce()
+        check("…while one raised during it drops them", store.loadPipelineAttempts().isEmpty)
+        store.pipelineLimits = [:]
         Store.pipelineTickOverride = nil
 
         print("\npipeline: a queued Linear fix read otherwise")

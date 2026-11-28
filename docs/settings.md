@@ -255,8 +255,9 @@ swaps the panel to a settings screen:
   [Comms → Settings](comms.md#settings).
 - **Pipeline** - the [Pipeline](pipeline.md) (**default off**): the switch, one switch per thing it
   may do (rate, mirror the ratings to GitHub and to Linear as labels, open fix PRs, fast-track your
-  PRs, merge cleared PRs with your admin rights, split big issues), which items the mirrors label, the
-  Linear teams and the Linear login, signed in through the browser. Every one is
+  PRs, merge cleared PRs with your admin rights, split big issues), which items the mirrors label,
+  each GitHub root's fast-track limits, the Linear teams and the Linear login, signed in through the
+  browser. Every one is
   described in [Pipeline → Settings](pipeline.md#settings), the login in
   [Pipeline → Linear](pipeline.md#linear).
 - **Update** - pull the checkout, rebuild, and relaunch in place. Shows how many

@@ -1019,6 +1019,17 @@ final class Store: ObservableObject {
             pipelineSwitched(on: pipelineFracture && !oldValue)
         }
     }
+    /// Each GitHub root's fast-track limit by its `LocalRepo.key`; a root missing from it
+    /// is low/low (`PipelineSettings.Root.limit`).
+    @Published var pipelineLimits: [String: PipelineRating] {
+        didSet {
+            guard pipelineLimits != oldValue else { return }
+            if Store.pipelineLimitLowered(from: oldValue, to: pipelineLimits) { pipelineCut() }
+            persist(Store.pipelineLimitsJSON(pipelineLimits), forKey: Keys.pipelineLimits)
+            writePipelineControl()
+            pipelineSwitched(on: true)
+        }
+    }
     /// As typed: `ENG=owner/repo, OPS=owner/other` (`Store.pipelineTeams`).
     @Published var pipelineLinearTeamsRaw: String {
         didSet { persist(pipelineLinearTeamsRaw, forKey: Keys.pipelineLinearTeams) }
@@ -1213,6 +1224,7 @@ final class Store: ObservableObject {
         static let pipelineFastTrack = "pipelineFastTrack"
         static let pipelineMerge = "pipelineMerge"
         static let pipelineFracture = "pipelineFracture"
+        static let pipelineLimits = "pipelineLimits"
         static let pipelineLinearTeams = "pipelineLinearTeams"
         static let pipelineAttempts = "pipelineAttempts"
         /// The name this list has always been stored under. Kept when it widened
@@ -1444,6 +1456,7 @@ final class Store: ObservableObject {
         pipelineFastTrack = defaults.bool(forKey: Keys.pipelineFastTrack)
         pipelineMerge = defaults.bool(forKey: Keys.pipelineMerge)
         pipelineFracture = defaults.bool(forKey: Keys.pipelineFracture)
+        pipelineLimits = Store.pipelineLimits(defaults.string(forKey: Keys.pipelineLimits))
         pipelineLinearTeamsRaw = defaults.string(forKey: Keys.pipelineLinearTeams) ?? ""
         queuedTaskOrder = (defaults.stringArray(forKey: Keys.queuedTaskOrder) ?? [])
             .map { PRRef.migrateQueueKey($0, primary: primary) }

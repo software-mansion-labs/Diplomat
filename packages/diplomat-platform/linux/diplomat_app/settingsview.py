@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QComboBox,
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -1407,19 +1408,32 @@ class SettingsView(QWidget):
             sw.toggled.connect(lambda _on: self._refresh_pipeline_mirror())
         self._sw_pipeline_fix = self._pipeline_switch(
             inner, "Open fix PRs", st.pipeline_fix, "pipeline_fix",
-            "Queues an agent that fixes each low-risk, low-complexity issue, and each you take over",
+            "Queues an agent that fixes each issue within its repo's fast-track limit, and each "
+            "you take over",
             "Only an issue unassigned or assigned to you that no open PR fixes, in its "
             "repo root; a Linear issue is fixed in the root its team names below.")
         self._sw_pipeline_fast = self._pipeline_switch(
             inner, "Fast-track my PRs", st.pipeline_fast_track, "pipeline_fast_track",
-            "Labels diplomat:fast-track each low/low PR of yours that closes a candidate "
-            "issue, or that you take over, and reviews it until clean",
+            "Labels diplomat:fast-track each PR of yours within its repo's limit that "
+            "closes a candidate issue, or that you take over, and reviews it until clean",
             "Only your own PRs from the repo itself into its default branch that close only "
             "candidate issues: the fixes the pipeline asks for. Reviews of it are queued "
             "until one finds nothing at its head; at that clean head it is rated again: "
-            "still low/low, it is labelled diplomat:cleared, else it leaves the fast track; "
-            "one you took over is labelled so with no second rating. A PR rated while this "
-            "is off stays a person's.")
+            "still within its repo's limit, it is labelled diplomat:cleared, else it leaves "
+            "the fast track; one you took over is labelled so with no second rating. A PR "
+            "rated while this is off stays a person's.")
+        self._pipeline_limits = QWidget()
+        self._pipeline_limits_list = QVBoxLayout(self._pipeline_limits)
+        self._pipeline_limits_list.setContentsMargins(0, 0, 0, 0)
+        self._pipeline_limits_list.setSpacing(8)
+        inner.addWidget(self._track(SettingRow(
+            "Fast-track limits", self._pipeline_limits, stacked=True,
+            summary="The highest rating each repo's fast track fixes, reviews and merges",
+            detail="Low/low unless set. Risk stops at medium: a high-risk item goes down the "
+                   "fast track only taken over. A Linear team's issues go by the repo it maps "
+                   "to.")))
+        self.store.local_repos_changed.connect(self._refresh_pipeline_limits)
+        self._refresh_pipeline_limits()
         self._sw_pipeline_merge = self._pipeline_switch(
             inner, "Merge cleared PRs", st.pipeline_merge, "pipeline_merge",
             "Merges past the review requirement with admin rights (gh pr merge --admin): "
@@ -1431,7 +1445,8 @@ class SettingsView(QWidget):
             "is required.")
         self._sw_pipeline_fracture = self._pipeline_switch(
             inner, "Split big issues", st.pipeline_fracture, "pipeline_fracture",
-            "One medium- or high-complexity issue a sync becomes low-complexity child issues",
+            "Each sync splits one issue more complex than its repo's limit into "
+            "low-complexity child issues",
             "Only an issue Diplomat may write to, not rated high risk, with no children "
             "and no open PR fixing it, whose code shows two or more independent fixes, or "
             "groups of fixes, to split it into. Each child is a real sub-issue and comes back "
@@ -1487,6 +1502,58 @@ class SettingsView(QWidget):
         sw.toggled.connect(lambda v: self._on_pipeline_option(attr, v))
         layout.addWidget(self._track(SettingRow(title, sw, summary=summary, detail=detail)))
         return sw
+
+    def _refresh_pipeline_limits(self) -> None:
+        """A Complexity and a Risk slider per root a sync is handed."""
+        while self._pipeline_limits_list.count():
+            item = self._pipeline_limits_list.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._pipeline_limit_sliders: dict[str, dict[str, SliderSetting]] = {}
+        limits = self.store.pipeline_limits
+        roots = [r for r in review.repo_roots() if not r.is_gitlab]
+        for r in roots:
+            self._pipeline_limits_list.addWidget(
+                self._pipeline_limit_row(r.slug, pipeline.limit(limits.get(r.slug.lower()))))
+        if not roots:
+            none = QLabel("No GitHub repo root is set")
+            none.setStyleSheet(muted(10))
+            self._pipeline_limits_list.addWidget(none)
+
+    def _pipeline_limit_row(self, slug: str, limit: dict) -> QWidget:
+        host = QWidget()
+        grid = QGridLayout(host)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(2)
+        grid.setColumnStretch(1, 1)
+        name = QLabel(slug)
+        name.setTextFormat(Qt.TextFormat.PlainText)
+        name.setStyleSheet(muted(10, mono=True, bold=True))
+        grid.addWidget(name, 0, 0, 1, 2)
+        sliders = {}
+        for row, (dim, title) in enumerate((("complexity", "Complexity"), ("risk", "Risk")), 1):
+            levels = pipeline.LEVELS[:pipeline.LEVELS.index(pipeline.MAX_LIMIT[dim]) + 1]
+            slider = SliderSetting(label=f"{slug} {title.lower()} limit", minimum=0,
+                                   maximum=len(levels) - 1, min_label=levels[0],
+                                   max_label=levels[-1], tint=_INDIGO)
+            slider.set_badge_text(lambda i, levels=levels: levels[i])
+            slider.set_value(levels.index(limit[dim]))
+            slider.changed.connect(lambda _i, slug=slug: self._on_pipeline_limit(slug))
+            label = QLabel(title)
+            label.setStyleSheet(muted(10))
+            grid.addWidget(label, row, 0, Qt.AlignmentFlag.AlignTop)
+            grid.addWidget(slider, row, 1)
+            sliders[dim] = slider
+        self._pipeline_limit_sliders[slug] = sliders
+        return host
+
+    def _on_pipeline_limit(self, slug: str) -> None:
+        """A raise acts at once too, not a sync period later."""
+        sliders = self._pipeline_limit_sliders[slug]
+        self.store.set_pipeline_limit(
+            slug, {dim: pipeline.LEVELS[s.value()] for dim, s in sliders.items()})
+        self.store.run_pipeline_sync_async()
 
     def _on_pipeline_toggled(self, on: bool) -> None:
         self.store.pipeline_enabled = on

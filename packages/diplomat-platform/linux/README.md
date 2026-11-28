@@ -264,8 +264,8 @@ beside the cap, which live in the shared `~/.diplomat/config.json` ([`appconfig.
   opens a terminal on the spot is never gated, and nothing is held at all while the
   usage probe cannot read a window. In `~/.diplomat/config.json`, like the cap above.
 - **Pipeline** - the [Pipeline](../../../docs/pipeline.md) (default **off**): the master
-  switch, one per thing it may do, the Linear teams, and the Linear login, signed in through the
-  browser (`$DIPLOMAT_LINEAR_TOKEN` wins over it).
+  switch, one per thing it may do, each GitHub root's fast-track limits, the Linear teams,
+  and the Linear login, signed in through the browser (`$DIPLOMAT_LINEAR_TOKEN` wins over it).
 - **Claude API errors** — the tmux watcher toggle, plus a count of nudges sent.
 - **Tools — colour & visibility** — retint or hide any tool card. (SKILL.md PRs
   and Installer/CLI PRs ship hidden.)

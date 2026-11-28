@@ -322,6 +322,11 @@ final class PipelineSync {
             notice("\(name) is switched off, so this sync took no \(name.lowercased()) step past that")
             return false
         }
+        if [.fix, .fastTrack, .merge].contains(step),
+           let root = settings.roots.first(where: { c.limit($0.slug).map($0.limit.fits) == false }) {
+            notice("\(root.slug)'s fast-track limit was lowered, so this sync took no \(name.lowercased()) step past that")
+            return false
+        }
         return true
     }
 
@@ -906,10 +911,12 @@ final class PipelineSync {
             + entries.indices.filter { entries[$0].item.source == .linear && PipelineRead.closes(pr, linear: entries[$0]) }
     }
 
+    func limit(_ e: PipelineEntry) -> PipelineRating { e.root?.limit ?? .low }
+
     /// `lifted`: whatever its rating or triage, as when taken over.
     func isCandidate(_ x: PipelineEntry, lifted: Bool = false) -> Bool {
         x.item.kind == .issue && x.item.writable
-            && (lifted || takenOver(x) || rating(x)?.isFastTrack == true && triaged(x) == nil)
+            && (lifted || takenOver(x) || rating(x)?.fits(limit(x)) == true && triaged(x) == nil)
             && stops(x).isEmpty && onGitHub(x) == nil && twinHold(x) == nil && twinsUnread(x) == nil
             && !has(x, model.labels.fractured) && x.children.isEmpty && banHold(x) == nil && x.root != nil
     }
@@ -1070,17 +1077,17 @@ final class PipelineSync {
     func awaitingRerate(_ e: PipelineEntry) -> Bool {
         guard !takenOver(e), own(e), open(e), e.item.writable, has(e, model.labels.fastTrack),
               let head = reviewed(e), e.item.cleanAt == head, rerates[e.id]?[head] == nil,
-              let r = e.item.rating, r.atLeast(e.item.floor ?? r).isFastTrack,
+              let r = e.item.rating, r.atLeast(e.item.floor ?? r).fits(limit(e)),
               offTrack(e) == nil else { return false }
         return closesHold(e) == nil
     }
 
     /// `cleared`, with a clean marker at its `reviewed` head, at which this Diplomat rated it
-    /// low/low again, or, taken over, put `cleared` on. The label alone is no proof of either:
-    /// anyone with triage rights can add it.
+    /// within its limit again, or, taken over, put `cleared` on. The label alone is no proof of
+    /// either: anyone with triage rights can add it.
     func clearedByMe(_ e: PipelineEntry) -> Bool {
         guard has(e, model.labels.cleared), let head = reviewed(e), e.item.cleanAt == head else { return false }
-        return takenOver(e) ? state.cleared[e.id] == head : rerates[e.id]?[head]?.isFastTrack == true
+        return takenOver(e) ? state.cleared[e.id] == head : rerates[e.id]?[head]?.fits(limit(e)) == true
     }
 
     /// The head a PR's clean marker, second rating and clear count at: its own, or for a head
@@ -1405,13 +1412,13 @@ final class PipelineSync {
         return labeled?.isDisjoint(with: history.map { $0.lowercased() }) == true
     }
 
-    /// Puts `fastTrack` on a PR rated low/low that closes only candidates, at its first rating
-    /// only: one rated before, or that wore a rating or fast-track label, is a person's.
+    /// Puts `fastTrack` on a PR rated within its limit that closes only candidates, at its first
+    /// rating only: one rated before, or that wore a rating or fast-track label, is a person's.
     /// One it could not be put on, that would also close what no read judged, or that an older
     /// version left pending, its `first` set whatever the switch, is recorded.
     func trackFirst(_ i: Int, _ rating: PipelineRating) {
         let e = entries[i]
-        guard e.item.kind == .pr, settings.fastTrack, rating.isFastTrack, cache[e.id]?.first == true,
+        guard e.item.kind == .pr, settings.fastTrack, rating.fits(limit(e)), cache[e.id]?.first == true,
               fixesCandidate(e) else { return }
         if let why = cache[e.id]?.head == nil ? "its first rating was left pending by an older version"
             : closesHold(e).map({ "at its first rating it " + $0.message }) {
@@ -1449,7 +1456,7 @@ final class PipelineSync {
     func offTrack(_ e: PipelineEntry) -> String? {
         let head = reviewed(e) ?? ""
         let taken = takenOver(e)
-        let above = taken ? [:] : (rerates[e.id] ?? [:]).filter { !$0.value.isFastTrack }
+        let above = taken ? [:] : (rerates[e.id] ?? [:]).filter { !$0.value.fits(limit(e)) }
         if let h = above[head] != nil ? head : above.keys.sorted().first, let r = above[h] {
             return "re-rated \(describe(r)) at " + (h == head ? "this head" : String(h.prefix(7)))
         }
@@ -1479,7 +1486,7 @@ final class PipelineSync {
             return persist()
         }
         guard has(e, ft), let head = reviewed(e), e.item.cleanAt == head,
-              takenOver(e) ? closesHold(e) == nil : rerates[e.id]?[head]?.isFastTrack == true,
+              takenOver(e) ? closesHold(e) == nil : rerates[e.id]?[head]?.fits(limit(e)) == true,
               !has(e, cl) || state.cleared[e.id] != head else { return }
         if !has(e, cl) {
             guard recheck(i), entries[i].item.headSha == e.item.headSha, has(entries[i], ft), add(i, cl, .fastTrack)
@@ -1698,7 +1705,7 @@ final class PipelineSync {
                 // A takeover is for the issue as it stands.
                 guard !picks.contains(i), !takenOver(e), fractureRefusal(e) == nil, state.unsplit[e.id] == nil,
                       !backingOff(e.id), let r = e.item.rating else { return false }
-                return r.complexity >= .medium && r.risk != .high
+                return r.complexity > limit(e).complexity && r.risk != .high
             }.sorted(by: newer)
             picks += auto.prefix(1)
         }
@@ -1981,7 +1988,7 @@ final class PipelineSync {
             let floor = e.item.floor ?? PipelineRating(risk: .low, complexity: .low)
             if !own(e) || !has(e, model.labels.fastTrack) {
                 stage = e.item.rating == nil ? .unrated : .human
-                if own(e), let r = e.item.rating, r.atLeast(floor).isFastTrack {
+                if own(e), let r = e.item.rating, r.atLeast(floor).fits(limit(e)) {
                     hold = e.unwritable.map { "off the fast track: \($0)" }
                         ?? (rateAgain(e) && state.declined.contains(e.id)
                             ? "off the fast track until Rate now: the rating asked at its new head was cancelled"
@@ -1999,10 +2006,10 @@ final class PipelineSync {
                 hold = "off the fast track until taken over: \(why)"
             } else if !takenOver(e), e.item.rating == nil {
                 stage = .unrated
-            } else if !takenOver(e), let r = e.item.rating, !r.isFastTrack {
+            } else if !takenOver(e), let r = e.item.rating, !r.fits(limit(e)) {
                 stage = .human
                 hold = "off the fast track: it is " + PipelineGate.Hold.rated(r).message
-            } else if !takenOver(e), !floor.isFastTrack {
+            } else if !takenOver(e), !floor.fits(limit(e)) {
                 stage = .human
                 hold = "off the fast track: " + PipelineGate.Hold.floor(floor).message
             } else if clearedByMe(e) {
@@ -2054,7 +2061,7 @@ final class PipelineSync {
                 (stage, lane) = (.candidate, .fast)
                 hold = candidateHold(e)
             } else if let r = e.item.rating {
-                if r.isFastTrack && e.item.writable && triaged(e) == nil && onGitHub(e) == nil && twinHold(e) == nil {
+                if r.fits(limit(e)) && e.item.writable && triaged(e) == nil && onGitHub(e) == nil && twinHold(e) == nil {
                     (stage, lane) = (.candidate, .fast)
                     hold = candidateHold(e)
                 } else {
@@ -2154,7 +2161,7 @@ final class PipelineSync {
             stopLabels: stops(e),
             requiredChecks: e.gate.map(\.requiredChecks) ?? [], passedChecks: e.gate?.passedChecks ?? [],
             baseRules: e.gate.map(\.baseRules) ?? [], unsignedCommits: e.gate?.unsignedCommits ?? false,
-            mergeFlag: mergeFlag(e) ?? "", takenOver: takenOver(e)),
+            mergeFlag: mergeFlag(e) ?? "", takenOver: takenOver(e), limit: limit(e)),
             me: e.root?.me ?? "")
     }
 

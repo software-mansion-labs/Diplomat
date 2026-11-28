@@ -269,7 +269,8 @@ struct PipelineCachedRating: Codable, Equatable {
 extension PipelineControl {
     static func url(in dir: URL) -> URL { dir.appendingPathComponent("control.json") }
 
-    /// nil when `control.json` is missing or does not hold every switch as a boolean.
+    /// nil when `control.json` is missing, does not hold every switch as a boolean, or holds a
+    /// limit that is no rating.
     public static func read(in dir: URL = PipelineLog.dir) -> PipelineControl? {
         guard let data = try? Data(contentsOf: url(in: dir)) else { return nil }
         return try? JSONDecoder().decode(PipelineControl.self, from: data)

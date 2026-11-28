@@ -1072,7 +1072,7 @@ func pipelineSmoke() throws {
          nil, low),
         ("7 files", [("src/a.swift", 1, 0, "MODIFIED")] + (1...6).map { ("tests/t\($0)_test.py", 1, 0, "MODIFIED") },
          nil, rating(.low, .medium)),
-        ("files the read did not list", [("src/a.swift", 1, 0, "MODIFIED"), test], 3, rating(.low, .medium)),
+        ("files the read did not list", [("src/a.swift", 1, 0, "MODIFIED"), test], 3, rating(.high, .low)),
         ("package.json", [("package.json", 1, 1, "MODIFIED"), test], nil, rating(.high, .low)),
         ("a workflow", [(".github/workflows/ci.yml", 1, 1, "MODIFIED"), test], nil, rating(.high, .low)),
         ("a vendored file, any case", [("Vendor/lib.c", 1, 1, "MODIFIED"), test], nil, rating(.high, .low)),
@@ -2434,10 +2434,32 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     check(item(sm.result, prURL(11))?.rating == rating(.high, .low)
           && sm.events.contains { $0.kind == .rated && $0.detail.contains("moves a submodule") },
           "a submodule bump: \(sm.events.map(\.detail))")
+    func diffRated(_ name: String, _ diff: String) -> Synced {
+        let t = only([4, 11])
+        t.diffs[11] = diff
+        return sync(t, rateOwn, dir(name), t0)
+    }
+    let renamed = diffRated("renamed-denied", "diff --git a/.github/workflows/release.yml b/docs/release.yml\n"
+        + "similarity index 100%\nrename from .github/workflows/release.yml\nrename to docs/release.yml\n")
+    check(item(renamed.result, prURL(11))?.rating == rating(.high, .low) && renamed.events.contains {
+        $0.detail.contains("renames .github/workflows/release.yml, a denied path")
+    }, "a denied path renamed away: \(renamed.events.map(\.detail))")
+    let quoted = diffRated("renamed-quoted", "diff --git \"a/vendor/x/tab\\tname.c\" b/src/x.c\n"
+        + "similarity index 100%\nrename from \"vendor/x/tab\\tname.c\"\nrename to src/x.c\n")
+    check(item(quoted.result, prURL(11))?.rating == rating(.high, .low), "a quoted denied path renamed away: "
+          + "\(quoted.events.map(\.detail))")
+    let moved = diffRated("renamed", "diff --git a/src/a.swift b/src/b.swift\nsimilarity index 100%\n"
+        + "rename from src/a.swift\nrename to src/b.swift\n")
+    check(item(moved.result, prURL(11))?.rating == rating(.low, .low), "any other rename: \(moved.events.map(\.detail))")
+    let binary = diffRated("binary", "diff --git a/assets/logo.png b/assets/logo.png\nindex 1..2 100644\n"
+        + "Binary files a/assets/logo.png and b/assets/logo.png differ\n")
+    check(item(binary.result, prURL(11))?.rating == rating(.high, .low)
+          && binary.events.contains { $0.detail.contains("changes a binary file") },
+          "a binary file: \(binary.events.map(\.detail))")
     let long = only([4, 11])
     long.diffs[11] = "diff --git a/src/a.swift b/src/a.swift\n" + String(repeating: "+x\n", count: model.rater.diffChars / 3 + 1)
     let lg = sync(long, rateOwn, dir("long-diff"), t0)
-    check(item(lg.result, prURL(11))?.rating == rating(.low, .medium) && lg.events.contains {
+    check(item(lg.result, prURL(11))?.rating == rating(.high, .low) && lg.events.contains {
         $0.detail.contains("its diff is longer than the \(model.rater.diffChars) characters the rater reads")
     }, "a diff past the rater's cut: \(lg.events.map(\.detail))")
 
@@ -2564,6 +2586,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     try pipelineGatePass1(base: base, root: root, team: team, t0: t0)
     try pipelineClearsAndMerges(base: base, root: root, t0: t0)
     try pipelineTakeover(base: base, root: root, team: team, t0: t0)
+    try pipelineLimits(base: base, root: root, team: team, t0: t0)
     try pipelineBaseSync(base: base, root: root, t0: t0)
 }
 
@@ -4361,7 +4384,7 @@ private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: Pipeli
     let unlisted = only([4, 11])
     unlisted.prs[0].moreFiles = 5
     let ul = sync(unlisted, PipelineSettings(roots: [root], rate: true), dir("files-unlisted"), t0)
-    check(item(ul.result, prURL(11))?.rating == rating(.low, .medium), "7 files, 2 listed: \(ul.writes)")
+    check(item(ul.result, prURL(11))?.rating == rating(.high, .medium), "7 files, 2 listed: \(ul.writes)")
     // The read before a write must be whole, and the item still writable.
     let takenOff = #"{"decided": ["\#(prURL(13))"]}"#
     try state("refresh-errors", takenOff)
@@ -5271,7 +5294,7 @@ private func pipelineCoverage8(base: URL, root: PipelineSettings.Root, team: Pip
     check(cut.stdin == ["BEGIN UNTRUSTED TRACKER TEXT", "| Fix the docs link", "|", body, "| [cut at 6000 characters]", "|"]
             + diff + ["| [cut at 20000 characters]", "END UNTRUSTED TRACKER TEXT"],
           "the rater's stdin, a 20001-character diff and a 6001-character body: \(cut.stdin.map(\.count))")
-    check(cut.details == ["low risk, medium complexity, floored by its diff (its diff is longer than the 20000 characters "
+    check(cut.details == ["high risk, low complexity, floored by its diff (its diff is longer than the 20000 characters "
                           + "the rater reads): a link and its test"],
           "a 20001-character diff's rating: \(cut.details)")
 }
@@ -6322,6 +6345,163 @@ private func pipelineRatingPass1(base: URL, root: PipelineSettings.Root, team: P
     check(lost.writes.first == "-diplomat:cleared #15" && cl.writes.isEmpty
           && stageOf(cl.result, prURL(15)) == "fast-track/fast" && cl.result.effects == [reviewFX(15, sha("e5"))],
           "cleared taken off, gh failing: \(lost.writes) \(stageOf(cl.result, prURL(15)))")
+}
+
+/// A root's fast-track limit: what each step takes in it, and one lowered mid-sync.
+private func pipelineLimits(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
+                            t0: Date) throws {
+    section("pipeline limits")
+    func dir(_ name: String) -> URL { base.appendingPathComponent("limits-" + name) }
+    let mediumRisk = rating(.medium, .low)
+    func limited(_ limit: PipelineRating) -> PipelineSettings.Root {
+        PipelineSettings.Root(owner: root.owner, repo: root.repo, path: root.path, me: root.me, limit: limit)
+    }
+    let riskier = limited(mediumRisk)
+
+    check(mediumRisk.fits(mediumRisk) && low.fits(mediumRisk) && !rating(.medium, .medium).fits(mediumRisk)
+          && !rating(.low, .high).fits(rating(.medium, .medium)), "a rating fits a limit in both dimensions")
+    check(limited(rating(.high, .high)).limit == rating(.medium, .high), "high risk is no limit")
+    let decoded = try CommsLog.decoder.decode(PipelineSettings.Root.self, from: Data(
+        #"{"owner":"acme","repo":"app","path":"/w","me":"op","limit":{"risk":"high","complexity":"medium"}}"#.utf8))
+    check(decoded.limit == rating(.medium, .medium), "a limit read is capped too: \(decoded.limit)")
+    check(try CommsLog.decoder.decode(PipelineSettings.Root.self, from: CommsLog.encoder.encode(decoded)) == decoded,
+          "a root's limit round-trips")
+
+    let controlDir = dir("control")
+    let control = PipelineControl(enabled: true, rate: true, mirrorGitHub: true, mirrorLinear: true, mirrorScope: .all,
+                                  fix: true, fastTrack: true, merge: true, fracture: true, limits: ["acme/app": mediumRisk])
+    check(control.save(in: controlDir) && PipelineControl.read(in: controlDir) == control, "control.json's limits round-trip")
+    let controlFile = controlDir.appendingPathComponent("control.json")
+    let switches = #""enabled":true,"rate":true,"mirrorGitHub":true,"mirrorLinear":true,"mirrorScope":"all","fix":true,"#
+        + #""fastTrack":true,"merge":true,"fracture":true"#
+    try Data(#"{\#(switches),"limits":{"acme/app":{"risk":"medium","complexity":"low"}}}"#.utf8).write(to: controlFile)
+    let read = PipelineControl.read(in: controlDir)
+    check(read?.limit("Acme/App") == mediumRisk && read?.limit("acme/lib") == low,
+          "a root's limit by its slug in any case, low/low when missing: \(String(describing: read))")
+    check(PipelineControl(enabled: true, rate: true, mirrorGitHub: true, mirrorLinear: true, mirrorScope: .all,
+                          fix: true, fastTrack: true, merge: true, fracture: true).limit("acme/app") == nil, "a control.json without limits stops nothing")
+    try Data(#"{\#(switches),"limits":{"acme/app":{"risk":"extreme","complexity":"low"}}}"#.utf8).write(to: controlFile)
+    check(PipelineControl.read(in: controlDir) == nil, "a control.json with an unreadable limit is no control")
+
+    var gate = PipelineGate.Candidate(
+        state: "open", author: "op", isCrossRepository: false, baseRef: "main", defaultBranch: "main",
+        participants: ["op"], reviewDecision: "", unresolvedThreads: 0, rating: mediumRisk, floor: mediumRisk,
+        mergeable: "MERGEABLE", headSha: "abc", ciCommit: "abc", ciState: "SUCCESS", limit: mediumRisk)
+    check(PipelineGate.hold(gate, me: "op") == nil, "a PR at its root's limit merges")
+    gate.limit = low
+    check(PipelineGate.hold(gate, me: "op") == .rated(mediumRisk), "a PR rated past it does not")
+    gate.rating = low
+    check(PipelineGate.hold(gate, me: "op") == .floor(mediumRisk), "nor one its diff floors past it")
+
+    // An issue is a candidate, and its fix asked for, within its root's limit.
+    func issue(_ r: PipelineSettings.Root, _ name: String) -> Synced {
+        let t = only([4])
+        t.issues[0].labels = ["risk:medium", "complexity:low"]
+        return sync(t, PipelineSettings(roots: [r], fix: true), dir("issue-" + name), t0)
+    }
+    let heldIssue = issue(root, "low"), fixedIssue = issue(riskier, "medium")
+    check(stageOf(heldIssue.result, issueURL(4)) == "human/human" && heldIssue.result.effects.isEmpty,
+          "medium risk past a low/low limit: \(stageOf(heldIssue.result, issueURL(4)))")
+    check(stageOf(fixedIssue.result, issueURL(4)) == "candidate/fast" && fixedIssue.result.effects == [fixFX(4)],
+          "medium risk within its limit: \(stageOf(fixedIssue.result, issueURL(4))) \(fixedIssue.result.effects)")
+
+    // A Linear issue goes by the limit of the root its team maps to.
+    func ticket(_ r: PipelineSettings.Root, _ name: String) -> Synced {
+        let t = only([])
+        t.tickets = [fixture().tickets[2]]
+        t.tickets[0].labels = ["lab-rm", "lab-cl"]
+        t.labelBook.append(("lab-rm", "risk:medium", nil))
+        return sync(t, PipelineSettings(roots: [r], linearTeams: [team], fix: true), dir("linear-" + name), t0)
+    }
+    let heldTicket = ticket(root, "low"), fixedTicket = ticket(riskier, "medium")
+    check(stageOf(heldTicket.result, linearURL("ENG-3")) == "human/human" && heldTicket.result.effects.isEmpty,
+          "a Linear issue past its root's limit: \(stageOf(heldTicket.result, linearURL("ENG-3")))")
+    check(stageOf(fixedTicket.result, linearURL("ENG-3")) == "candidate/fast"
+          && fixedTicket.result.effects.map(\.key) == ["pipeline-fix:" + linearURL("ENG-3")],
+          "a Linear issue within it: \(stageOf(fixedTicket.result, linearURL("ENG-3"))) \(fixedTicket.result.effects)")
+
+    // Split big issues splits only an issue more complex than its root's limit.
+    func split(_ r: PipelineSettings.Root, _ name: String) -> Synced {
+        let t = only([3])
+        t.issues[0].labels = ["risk:low", "complexity:medium"]
+        return sync(t, PipelineSettings(roots: [r], fracture: true), dir("split-" + name), t0)
+    }
+    let splitLow = split(root, "low"), splitMedium = split(limited(rating(.low, .medium)), "medium")
+    check(splitLow.claude == ["sonnet fracture Split the storage layer"], "split past its limit: \(splitLow.claude)")
+    check(splitMedium.claude.isEmpty && stageOf(splitMedium.result, issueURL(3)) == "candidate/fast",
+          "not split within it: \(splitMedium.claude) \(stageOf(splitMedium.result, issueURL(3)))")
+
+    // A PR's first rating puts it on the fast track within its root's limit.
+    func firstRating(_ r: PipelineSettings.Root, _ name: String) -> Synced {
+        let t = only([4, 11])
+        t.prs[0].body = "Fixes #4."
+        t.ratings["Fix the docs link"] = ["risk": "medium", "complexity": "low", "why": "a link and its test"]
+        return sync(t, PipelineSettings(roots: [r], rate: true, fastTrack: true), dir("first-" + name), t0)
+    }
+    let rated = firstRating(root, "low"), tracked = firstRating(riskier, "medium")
+    let labelled = ["label risk:medium exists", "+risk:medium #11", "+complexity:low #11"]
+    check(rated.writes == labelled, "rated past its limit: \(rated.writes)")
+    check(tracked.writes == labelled + ["label diplomat:fast-track exists", "+diplomat:fast-track #11"], "rated within it: \(tracked.writes)")
+
+    // A PR cleared at a re-rate within its root's limit merges; past it, it leaves the fast
+    // track for good; and a limit lowered mid-sync stops the merge.
+    func cleared(_ r: PipelineSettings.Root, _ name: String, _ change: (Trackers) -> Void = { _ in }) throws -> Synced {
+        let t = only([13, 27])
+        t.prs[0].labels = ["risk:medium", "complexity:low", "diplomat:fast-track", "diplomat:cleared"]
+        change(t)
+        try seed(dir(name), PipelineEvent(at: t0.addingTimeInterval(-3600), item: prURL(13), kind: .rerated,
+                                          detail: "medium risk, low complexity", head: sha("c3"), rating: mediumRisk))
+        return sync(t, PipelineSettings(roots: [r], fastTrack: true, merge: true), dir(name), t0)
+    }
+    // No test changed: a medium-risk floor, within the limit too.
+    let untested: (Trackers) -> Void = { $0.prs[0].files = [(path: "src/a.swift", add: 3, del: 1, type: "MODIFIED")] }
+    let past = try cleared(root, "merge-low"), within = try cleared(riskier, "merge-medium", untested)
+    check(past.writes == ["-diplomat:fast-track #13", "-diplomat:cleared #13"]
+          && past.events.contains { $0.kind == .labelled && $0.detail.contains("re-rated medium risk, low complexity at this head") }
+          && stageOf(past.result, prURL(13)) == "human/human",
+          "re-rated past its limit: \(past.writes) \(stageOf(past.result, prURL(13)))")
+    check(within.writes == ["merge #13 --squash \(sha("c3"))"], "re-rated within it: \(within.writes)")
+    // At the widest limit, a file the read did not list still holds the merge.
+    let widest = limited(PipelineRating.maxLimit)
+    let listed = try cleared(widest, "listed"), unlisted = try cleared(widest, "unlisted") { $0.prs[0].moreFiles = 1 }
+    check(merged(listed) && !merged(unlisted), "a file unlisted: \(listed.writes) \(unlisted.writes)")
+    // A fast-track PR within it is rated again at its clean head, then merges.
+    func atClean(_ diff: String? = nil) -> Trackers {
+        let t = only([13, 27])
+        t.prs[0].labels = ["risk:medium", "complexity:low", "diplomat:fast-track"]
+        t.ratings["Clear the cache on logout"] = ["risk": "medium", "complexity": "low", "why": "cache eviction"]
+        if let diff { t.diffs[13] = diff }
+        return t
+    }
+    let rerated = sync(atClean(), PipelineSettings(roots: [riskier], rate: true, fastTrack: true, merge: true),
+                       dir("rerate"), t0)
+    check(rerated.claude == ["opus Clear the cache on logout"] && merged(rerated),
+          "rated again within it: \(rerated.claude) \(rerated.writes)")
+    // …unless its diff there floors it past the limit.
+    let binary = "diff --git a/src/codec.so b/src/codec.so\nBinary files a/src/codec.so and b/src/codec.so differ\n"
+    let binaryAgain = sync(atClean(binary), PipelineSettings(roots: [riskier], rate: true, fastTrack: true, merge: true),
+                           dir("rerate-binary"), t0)
+    check(binaryAgain.claude == ["opus Clear the cache on logout"] && !merged(binaryAgain)
+          && binaryAgain.writes.contains("+risk:high #13"),
+          "rated again past it by its diff: \(binaryAgain.claude) \(binaryAgain.writes)")
+    let clears = try cleared(riskier, "clears") { $0.prs[0].labels.removeAll { $0 == "diplomat:cleared" } }
+    check(clears.writes == ["label diplomat:cleared exists", "+diplomat:cleared #13", "merge #13 --squash \(sha("c3"))"],
+          "cleared at a re-rate within it: \(clears.writes)")
+    func controlled(_ name: String, _ limit: PipelineRating) -> (Trackers) -> Void {
+        { t in
+            t.onReread = { _ in
+                PipelineControl(enabled: true, rate: false, mirrorGitHub: true, mirrorLinear: true, mirrorScope: .all,
+                                fix: false, fastTrack: true, merge: true, fracture: false,
+                                limits: ["acme/app": limit]).save(in: dir(name))
+            }
+        }
+    }
+    let lowered = try cleared(riskier, "lowered", controlled("lowered", low))
+    check(!merged(lowered) && lowered.result.notices
+          == ["merge", "fast track"].map { "acme/app's fast-track limit was lowered, so this sync took no \($0) step past that" },
+          "lowered mid-sync: \(lowered.writes) \(lowered.result.notices)")
+    let kept = try cleared(riskier, "kept", controlled("kept", mediumRisk))
+    check(merged(kept) && kept.result.notices.isEmpty, "kept mid-sync: \(kept.writes) \(kept.result.notices)")
 }
 
 /// Ratings kept here, and labels written only where a tracker's mirror and its scope say.

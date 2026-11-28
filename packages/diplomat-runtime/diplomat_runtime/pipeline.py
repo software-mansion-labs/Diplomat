@@ -48,11 +48,42 @@ CONTROL_KEYS = ("enabled", "rate", "mirrorGitHub", "mirrorLinear", "fix", "fastT
 #: ``PipelineMirrorScope``'s cases, narrowest first.
 MIRROR_SCOPES = ("prs", "mine", "all")
 
+#: ``PipelineLevel``, lowest first.
+LEVELS = ("low", "medium", "high")
+#: ``PipelineRating.maxLimit``.
+MAX_LIMIT = {"risk": "medium", "complexity": "high"}
+
+
+def limit(value: object) -> dict:
+    """A root's fast-track limit, ``{"risk", "complexity"}``, from what was stored: a
+    dimension missing or not a level reads low, and each is held to :data:`MAX_LIMIT`."""
+    value = value if isinstance(value, dict) else {}
+    out = {}
+    for dim, cap in MAX_LIMIT.items():
+        level = value.get(dim)
+        out[dim] = min(level if level in LEVELS else "low", cap, key=LEVELS.index)
+    return out
+
+
+def read_limits(raw: str) -> dict:
+    """The ``pipelineLimits`` setting's JSON, each root's :func:`limit` by its ``owner/repo``
+    lowercased; text that is no JSON object reads as none. Twin of ``Store.pipelineLimits(_:)``."""
+    try:
+        obj = json.loads(raw)
+    except ValueError:
+        return {}
+    return {slug.lower(): limit(v) for slug, v in obj.items()} if isinstance(obj, dict) else {}
+
+
+def lowered(old: dict, new: dict) -> bool:
+    """Twin of ``Store.pipelineLimitLowered``."""
+    return any(LEVELS.index(new[dim]) < LEVELS.index(old[dim]) for dim in MAX_LIMIT)
+
 
 def write_control(switches: dict) -> None:
-    """The switches, the mirror scope (``prs`` unless one of :data:`MIRROR_SCOPES`), and the
-    ``revoke`` asks (when any), which a running sync applies right before each merge and its
-    asks. Never raises: a sync that cannot read ``control.json``, or finds a key missing,
+    """The switches, the mirror scope (``prs`` unless one of :data:`MIRROR_SCOPES`), the limits,
+    and the ``revoke`` asks (when any), which a running sync applies right before each merge
+    and its asks. Never raises: a sync that cannot read ``control.json``, or finds a key missing,
     goes by the settings it was started with. Twin of ``Store.writePipelineControl``."""
     folder = pipeline_dir()
     tmp = folder / f"control.json.tmp-{os.getpid()}-{uuid.uuid4().hex}"
@@ -63,6 +94,7 @@ def write_control(switches: dict) -> None:
             control: dict = {k: bool(switches.get(k)) for k in CONTROL_KEYS}
             scope = switches.get("mirrorScope")
             control["mirrorScope"] = scope if scope in MIRROR_SCOPES else "prs"
+            control["limits"] = switches["limits"]
             if switches.get("revoke"):
                 control["revoke"] = sorted(switches["revoke"])
             json.dump(control, fh, sort_keys=True)
