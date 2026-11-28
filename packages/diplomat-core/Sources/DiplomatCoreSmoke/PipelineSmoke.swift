@@ -6732,19 +6732,101 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
     let la = sync(lent, rateTrack, dir("assigned"), later(5))
     check(la.claude.isEmpty && la.writes == tracked && la.result.effects == [reviewFX(11, sha("a1"))],
           "assigned as it was applied: \(la.claude) \(la.writes) \(stageOf(la.result, prURL(11)))")
-    // Pushed to as its first rating is applied, the rating asked at the new head cancelled: the
-    // rating kept shows meanwhile.
-    let dropped = fix()
-    applying(dropped) { $0.prs[0].head = sha("a2") }
-    _ = sync(dropped, rateTrack, dir("pushed-cancelled"), t0)
-    let dq = sync(dropped, rateTrack, dir("pushed-cancelled"), later(5), drain: false)
-    for case .rate(_, _, let url, let stamp, _, _) in dq.result.effects {
-        _ = PipelineRateJob.cancel(item: url, stamp: stamp, dir: dir("pushed-cancelled"))
+    // Pushed to as its first rating is applied, the rating asked at the new head with no re-read,
+    // then cancelled: the rating kept shows meanwhile, not floored by the new head's diff, with
+    // what lifts the hold.
+    for floored in [false, true] {
+        let t = fix(), d = dir("pushed-cancelled-\(floored)")
+        applying(t) { t in
+            t.prs[0].head = sha("a2")
+            if floored { t.prs[0].files = [("src/a.swift", 40, 0, "MODIFIED"), ("tests/aTests.swift", 5, 0, "MODIFIED")] }
+        }
+        _ = sync(t, rateTrack, d, t0)
+        var reads = 0
+        t.onItem = { if $0 == 11 { reads += 1 } }
+        let dq = sync(t, rateTrack, d, later(5), drain: false)
+        t.onItem = nil
+        for case .rate(_, _, let url, let stamp, _, _) in dq.result.effects {
+            _ = PipelineRateJob.cancel(item: url, stamp: stamp, dir: d)
+        }
+        let dc = sync(t, rateTrack, d, later(10))
+        let hold = " (off the fast track until Rate now: the rating asked at its new head was cancelled)"
+        check(reads == 0 && item(dq.result, prURL(11))?.rating == rating(.low, .low) && dc.claude.isEmpty && dc.writes.isEmpty
+              && item(dc.result, prURL(11))?.rating == rating(.low, .low)
+              && stageOf(dc.result, prURL(11)) == "human/human" + (floored ? "" : hold),
+              "pushed to, its new rating cancelled, floored \(floored): \(reads) \(dc.writes) \(stageOf(dc.result, prURL(11)))")
     }
-    let dc = sync(dropped, rateTrack, dir("pushed-cancelled"), later(10))
-    check(dc.claude.isEmpty && dc.writes.isEmpty && item(dc.result, prURL(11))?.rating == rating(.low, .low)
-          && stageOf(dc.result, prURL(11)) == "human/human (off the fast track until a sync reads it again)",
-          "pushed to, its new rating cancelled: \(dc.writes) \(stageOf(dc.result, prURL(11)))")
+    // Its first rating left pending, then pushed to while given to someone else: rated at the new
+    // head once it is yours again, and fast-tracked.
+    let pendingFor: [(String, (Trackers) -> Void)] = [
+        ("given to someone else", { $0.prs[0].assignees = ["bob"] }),
+        ("not read again", { $0.ghFails = true }),
+        ("held by a stop label", { $0.prs[0].labels = ["wip"] }),
+    ]
+    for (what, hold) in pendingFor {
+        let t = fix(), d = dir("away-pushed-" + what)
+        applying(t, hold)
+        _ = sync(t, rateTrack, d, t0)
+        (t.ghFails, t.prs[0].labels, t.prs[0].head, t.prs[0].assignees) = (false, [], sha("a2"), ["bob"])
+        let away = sync(t, rateTrack, d, later(5))
+        t.prs[0].assignees = []
+        let back = sync(t, rateTrack, d, later(10))
+        check(away.claude.isEmpty && away.writes.isEmpty && back.claude == ["opus Fix the docs link"]
+              && back.writes == tracked && back.result.effects == [reviewFX(11, sha("a2"))],
+              "\(what), then pushed to while assigned: \(away.claude) \(away.writes) then \(back.claude) \(back.writes)")
+    }
+    // Given to someone else as the rating asked at its new head runs: fast-tracked at that head
+    // once it is yours again, with no new rating.
+    let rerating = fix()
+    applying(rerating) { $0.prs[0].head = sha("a2") }
+    _ = sync(rerating, rateTrack, dir("assigned-rerating"), t0)
+    rerating.onClaude = { _ in
+        rerating.onClaude = nil
+        rerating.prs[0].assignees = ["bob"]
+    }
+    let rr = sync(rerating, rateTrack, dir("assigned-rerating"), later(5))
+    rerating.prs[0].assignees = []
+    let rb = sync(rerating, rateTrack, dir("assigned-rerating"), later(10))
+    check(rr.claude == ["opus Fix the docs link"] && rr.writes.isEmpty && rb.claude.isEmpty && rb.writes == tracked
+          && rb.result.effects == [reviewFX(11, sha("a2"))],
+          "assigned as its new rating ran: \(rr.claude) \(rr.writes) then \(rb.claude) \(rb.writes)")
+    // Given to someone else while its first rating is queued: fast-tracked once it is yours again.
+    let queued = fix()
+    queued.onClaude = { _ in
+        queued.onClaude = nil
+        queued.prs[0].assignees = ["bob"]
+    }
+    _ = sync(queued, rateTrack, dir("assigned-queued"), t0)
+    queued.prs[0].assignees = []
+    let qa = sync(queued, rateTrack, dir("assigned-queued"), later(5))
+    check(qa.claude.isEmpty && qa.writes == tracked && qa.result.effects == [reviewFX(11, sha("a1"))],
+          "assigned while queued: \(qa.claude) \(qa.writes) \(stageOf(qa.result, prURL(11)))")
+    // Rated with Fast track off, pushed to a head whose diff floors it higher and given to someone
+    // else at that read: dropped at the new head once it is yours again.
+    let floored = fix()
+    applying(floored) { t in
+        t.prs[0].head = sha("a2")
+        t.prs[0].files = [("src/a.swift", 40, 0, "MODIFIED"), ("tests/aTests.swift", 5, 0, "MODIFIED")]
+        t.prs[0].assignees = ["bob"]
+    }
+    _ = sync(floored, rateOnly, dir("pushed-assigned-floored"), t0)
+    floored.prs[0].assignees = []
+    let fl = sync(floored, rateOnly, dir("pushed-assigned-floored"), later(5))
+    check(fl.writes.isEmpty
+          && fl.result.notices.contains("#11: the rating kept for it is below what its diff allows now, so it was dropped"),
+          "rated with Fast track off, pushed and assigned: \(fl.writes) \(fl.result.notices)")
+    // Its first rating pushed past, with Fast track off since, or labels a person put on in any
+    // case: finished at the new head, with no new rating.
+    for (what, change) in [("Fast track off since", { (_: Trackers) in }),
+                           ("labelled Risk:Low", { $0.prs[0].labels = ["Risk:Low", "Complexity:Low"] })] {
+        let t = fix(), d = dir("pushed-past-" + what)
+        applying(t) { $0.prs[0].head = sha("a2") }
+        _ = sync(t, rateTrack, d, t0)
+        change(t)
+        let pp = sync(t, what == "Fast track off since" ? rateOnly : rateTrack, d, later(5))
+        check(pp.claude.isEmpty && pp.result.effects.isEmpty && stageOf(pp.result, prURL(11)) == "human/human",
+              "first rating pushed past, \(what): \(pp.claude) \(pp.writes) \(stageOf(pp.result, prURL(11)))")
+    }
     // Pushed to as its first rating is applied while four asks already wait: asked at the new
     // head once one is in, not held back for having waited.
     let capped = fix()

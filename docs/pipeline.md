@@ -183,13 +183,14 @@ of the four slots meanwhile.
 
 Each answer is kept on this machine as it arrives, so it is not paid for again, and labels can only
 raise it; on an item with none kept, labels for both dimensions are its rating (two of one dimension:
-the higher). A rated item is not rated again but for the fast track's second rating or when you ask,
-and a new rating is the higher of the labels already there, the model's answer, the rating kept and
-the diff floor, a dimension at a time. One a sync could not apply holds a PR off the fast track,
-and an issue from its fix, until a later sync does, tried again 1, 2, 4 ... syncs later, unless a
-PR's diff at its head allows less: then it is dropped, and the PR is rated by its labels again, or
-rated anew without them. A PR pushed to before a rating is applied has it finished at the new head,
-unless it is a first rating made while **Fast-track my PRs** was on and the PR wears no rating or
+the higher). A rated item is not rated again but for the fast track's second rating, a first rating
+pushed past (below) or when you ask, and a new rating is the higher of the labels already there, the
+model's answer, the rating kept and the diff floor, a dimension at a time. One a sync could not
+apply holds a PR off the fast track, and an issue from its fix, until a later sync does, tried again
+1, 2, 4 ... syncs later, unless a PR's diff at its head allows less: then it is dropped, and the PR
+is rated by its labels again, or rated anew without them. A first rating waits while Diplomat may not
+write to the PR. A PR pushed to meanwhile has it finished at the new head, unless it is a first
+rating made while **Fast-track my PRs** was on, the switch is on still and the PR wears no rating or
 fast-track label: then the PR is rated again at the new head instead, never lower, and that is still
 its first rating.
 
