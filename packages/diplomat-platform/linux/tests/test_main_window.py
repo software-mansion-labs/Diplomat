@@ -250,14 +250,15 @@ def _desktop_exec(entry: Path) -> list[str]:
     return line.removeprefix("Exec=").split()
 
 
-def _install(tmp_path: Path):
+def _install(tmp_path: Path, core_builds: bool = True):
     """Run the installer against a copy of the package whose launcher and helper
     scripts are stubs; the launcher records whether it started in the background."""
     pkg = tmp_path / "linux"
     (pkg / "install").mkdir(parents=True)
     shutil.copy(LINUX / "install" / "install-autostart.sh", pkg / "install")
     for helper in ("build-core.sh", "install-autoupdate.sh", "install-watchdog.sh"):
-        (pkg / "install" / helper).write_text("#!/usr/bin/env bash\nexit 0\n")
+        status = 1 if helper == "build-core.sh" and not core_builds else 0
+        (pkg / "install" / helper).write_text(f"#!/usr/bin/env bash\nexit {status}\n")
         (pkg / "install" / helper).chmod(0o755)
     record = tmp_path / "launched"
     launcher = pkg / "diplomat"
@@ -281,17 +282,25 @@ def _install(tmp_path: Path):
 
     login = home / ".config" / "autostart" / "diplomat.desktop"
     menu = home / ".local" / "share" / "applications" / "diplomat.desktop"
-    return launcher, env, record, login, menu
+    return launcher, env, record, login, menu, proc.stderr
 
 
 def test_the_login_entry_starts_in_the_background_and_the_menu_entry_does_not(tmp_path):
     """The ``Exec`` lines the installer writes are run as written."""
-    _launcher, env, record, login, menu = _install(tmp_path)
+    _launcher, env, record, login, menu, _ = _install(tmp_path)
     for entry, expected in ((login, "bg=1"), (menu, "bg=")):
         subprocess.run(_desktop_exec(entry), env=env, check=True)
         assert record.read_text().splitlines() == [expected], entry
         record.unlink()
     assert "X-GNOME-Autostart-enabled=true" in login.read_text()
+
+
+def test_a_failed_core_build_warns_of_everything_that_needs_the_binary(tmp_path):
+    *_, stderr = _install(tmp_path, core_builds=False)
+    assert stderr == (
+        "warning: diplomat-core not built (need a Swift toolchain) - every agent spawn,\n"
+        "         Comms, the Pipeline and the Linear login fail until install/build-core.sh\n"
+        "         succeeds.\n")
 
 
 # ---- an install from before unattended starts were hidden ------------------------
@@ -312,7 +321,7 @@ X-GNOME-Autostart-enabled=true
 def old_install(tmp_path, monkeypatch):
     """What the installer writes now, then the login entry the earlier installer
     wrote, and no menu entry - the state an existing machine is in."""
-    launcher, env, record, login, menu = _install(tmp_path)
+    launcher, env, record, login, menu, _ = _install(tmp_path)
     installed = login.read_text(), menu.read_text()
     login.write_text(_OLD_LOGIN_ENTRY.format(launcher=launcher))
     menu.unlink()
