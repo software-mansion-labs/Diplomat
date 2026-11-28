@@ -456,7 +456,7 @@ packages/
         PipelineLog.swift          ~/.diplomat/pipeline: the log, the last sync, its state, cached ratings and live switches
         Telemetry.swift            folds the telemetry ledger + every figure on the Telemetry screen: window
                                    calibration, the distribution + its confidence interval, the quota readings,
-                                   the pending series
+                                   the pending and finished series, the timings, the token split
       DiplomatCoreSmoke/       ← Linux-buildable core self-test (filters + prompts + golden files + live dump)
       DiplomatCoreCLI/         ← thin `build-prompt` CLI over the core (ships as the `diplomat-core` binary),
                                  so the Linux front-end shells out for Review/Issues/Conflicts/Audit prompts

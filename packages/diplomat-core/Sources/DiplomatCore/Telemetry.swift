@@ -3,7 +3,7 @@ import Foundation
 /// The Telemetry screen's arithmetic: fold the append-only ledger into per-task
 /// records, then reduce those into the figures both front-ends render.
 ///
-/// **Why a ledger and not counters.** Four of the seven figures are about *time* —
+/// **Why a ledger and not counters.** Most of the screen's figures are about *time* —
 /// how long work waited, how long it ran, how much was owed on each of the last
 /// fourteen days — and a counter can't be asked what it read last Tuesday. So the
 /// monitors append events (`~/.diplomat/pr-monitor/telemetry.jsonl`, one JSON

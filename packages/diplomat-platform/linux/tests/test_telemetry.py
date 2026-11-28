@@ -18,6 +18,7 @@ import os
 import re
 import shlex
 import time
+from pathlib import Path
 
 import pytest
 
@@ -1232,6 +1233,20 @@ def test_a_share_too_large_to_square_is_a_spread_of_inf_not_a_raise():
         (math.inf, math.inf, -math.inf, math.inf)
     assert [b.count for b in d.bins] == [3, 0, 0, 1]
     assert d.curve == (0.0,) * (4 * telemetry.CURVE_RESOLUTION + 1)
+
+
+# MARK: - The Swift twin
+
+
+def test_both_ledger_modules_say_the_same_of_the_screens_figures():
+    def claim(path: Path) -> str:
+        text = path.read_text(encoding="utf-8")
+        return text.partition("**Why a ledger and not counters.** ")[2].partition(
+            " are about")[0]
+
+    swift = (Path(__file__).resolve().parents[3] / "diplomat-core" / "Sources"
+             / "DiplomatCore" / "Telemetry.swift")
+    assert claim(swift) == claim(Path(telemetry.__file__)) != ""
 
 
 # MARK: - The quota probe
