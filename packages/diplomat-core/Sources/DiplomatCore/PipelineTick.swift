@@ -178,6 +178,8 @@ final class PipelineSync {
     var uncarried: [String: String] = [:]
     /// Each issue a merge this sync asked for may have closed, by its id as `byURL` keys it.
     var closedHere: Set<String> = []
+    /// The cleared PRs `merge` read again, which this sync told the end of.
+    var mergeRead: Set<String> = []
 
     init(settings: PipelineSettings, now: Date, dir: URL, io: PipelineIO) {
         self.settings = settings
@@ -520,7 +522,8 @@ final class PipelineSync {
             guard let response = r.response, r.errors.isEmpty,
                   let e = PipelineRead.item(response, root: root, label: n == 0 ? "#\(number)" : "\(root.slug)#\(number)",
                                             model: model) else {
-                notice("\(id), which an ask or attempt record names, could not be read: \(r.why)")
+                notice("\(id), which an ask, an attempt record or a merge whose end no read saw names, "
+                       + "could not be read: \(r.why)")
                 continue
             }
             entries.append(done(e))
@@ -2172,8 +2175,9 @@ final class PipelineSync {
         for i in entries.indices where entries[i].item.stage == .cleared
             && [nil, PipelineGate.Hold.draft.code, PipelineGate.Hold.behind.code].contains(holdCodes[entries[i].id]) {
             let e = entries[i]
-            guard let root = e.root, let n = e.number, let head = e.item.headSha,
-                  may(.merge), let read = reread(e) else { continue }
+            guard let root = e.root, let n = e.number, let head = e.item.headSha, may(.merge) else { continue }
+            mergeRead.insert(e.id)
+            guard let read = reread(e) else { continue }
             // Linear first, so GitHub's last read sees whatever changed on the PR meanwhile.
             let judged = linearJudged(read)
             // Right before the hold is judged: the ban list goes into it.
@@ -2263,11 +2267,21 @@ final class PipelineSync {
     }
 
     /// `ended` for each merge an earlier sync asked of gh that no read after it saw, as its PR
-    /// reads now: this merge's only if gh said it merged, as a person may have merged it since.
+    /// reads now, read again only if this sync read it merged: this merge's only if gh said it
+    /// merged, as a person may have merged it since. One `merge` read again has told its own.
     func confirmMerges() {
         for (id, asked) in state.merging.sorted(by: { $0.key < $1.key }) where asked.at < now {
             guard let i = pos[id] else { continue }
             var e = entries[i]
+            // Read open or closed, it was not merged.
+            guard e.item.state == "merged" else {
+                if mergeRead.contains(id) {
+                    state.merging[id] = nil
+                } else {
+                    ended(e, e, head: asked.head, flag: asked.flag, ours: false, why: nil)
+                }
+                continue
+            }
             // `reread` needs a head, and a merged PR's read names none.
             e.item.headSha = asked.head
             guard let after = reread(e, "may have been merged") else { continue }
@@ -2294,7 +2308,7 @@ final class PipelineSync {
                        + "but gh did not say it was this Diplomat's merge")
             }
         } else {
-            notice("\(e.item.label) was merged, but not by this sync at \(head.prefix(7))")
+            notice("\(e.item.label) was merged, but not by this Diplomat's merge at \(head.prefix(7))")
         }
         return true
     }

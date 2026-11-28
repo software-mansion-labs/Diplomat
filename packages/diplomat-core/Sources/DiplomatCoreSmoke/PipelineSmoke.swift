@@ -1956,7 +1956,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     // ...but a merge refused while a person pushed and merged is not this merge.
     let (_, elsewhere) = try cleared("merged-elsewhere") { $0.mergedAt = sha("c4") }
     check(!elsewhere.events.contains { $0.kind == .merged }
-          && elsewhere.result.notices == ["#13 was merged, but not by this sync at c3c3c3c"],
+          && elsewhere.result.notices == ["#13 was merged, but not by this Diplomat's merge at c3c3c3c"],
           "merged by a person at another head: \(trail(elsewhere.events, elsewhere.result)) \(elsewhere.result.notices)")
     let (_, noMethod) = try cleared("no-method") { $0.squashAllowed = false }
     check(!merged(noMethod)
@@ -2928,7 +2928,7 @@ private func pipelineJudged(base: URL, root: PipelineSettings.Root, team: Pipeli
     let gone = only([])
     let gq = sync(gone, PipelineSettings(roots: [root], queued: [issueURL(999)]), dir("queued-gone"), t0)
     check(!gq.result.read.contains(issueURL(999))
-          && gq.result.notices.contains { $0.hasPrefix("\(issueURL(999)), which an ask or attempt record names, could not be read: ") },
+          && gq.result.notices.contains { $0.hasPrefix("\(issueURL(999)), which an ask, an attempt record or a merge whose end no read saw names, could not be read: ") },
           "a queued item not found: \(gq.result.notices)")
     let crowded = only([])
     crowded.tickets = (0..<302).map { .init(id: "lin-c\($0)", identifier: "ENG-\(100 + $0)", title: "Crowded \($0)",
@@ -3116,13 +3116,15 @@ private func pipelineClearsAndMerges(base: URL, root: PipelineSettings.Root, t0:
     }
     let unread = "#13 may have been merged: it could not be read again: gh: Bad Gateway (HTTP 502)"
     let unsaid = "#13 was merged at c3c3c3c, but gh did not say it was this Diplomat's merge"
-    let merges: [(String, (Trackers) -> Void, [String])] = [
-        ("asked", { _ in }, [unsaid]),
-        ("answered", { _ in }, []),
-        ("theirs", { $0.mergedAt = sha("c4") }, ["#13 was merged, but not by this sync at c3c3c3c"]),
-        ("open", { $0.mergeIgnored = true }, ["#13 was not merged: it is still open"]),
+    let still = "#13 was not merged: it is still open"
+    let merges: [(String, (Trackers) -> Void, [String], [String])] = [
+        ("asked", { _ in }, [unread], [unsaid]),
+        ("answered", { _ in }, [unread], []),
+        ("theirs", { $0.mergedAt = sha("c4") }, [unread], ["#13 was merged, but not by this Diplomat's merge at c3c3c3c"]),
+        // Read open, it is told at once.
+        ("open", { $0.mergeIgnored = true }, [still], []),
     ]
-    for (name, change, told) in merges {
+    for (name, change, first, told) in merges {
         let t = only([13, 27])
         change(t)
         let died = dir("died-" + name), disk = dir("disk-" + name)
@@ -3157,7 +3159,7 @@ private func pipelineClearsAndMerges(base: URL, root: PipelineSettings.Root, t0:
         let d2 = run(PipelineSettings(roots: [root]), disk, later(10))
         let d3 = run(PipelineSettings(roots: [root]), disk, later(15))
         let logged = d2.events.filter { $0.at == later(10) && $0.kind == .merged }.map(\.detail)
-        check(d1.notices == [unread] && d2.notices == told && d3.notices.isEmpty
+        check(d1.notices == first && d2.notices == told && d3.notices.isEmpty
               && logged == (name == "answered" ? ["merged c3c3c3c with --admin --squash"] : [])
               && !d3.events.contains { $0.at == later(15) },
               "a merge whose sync died, \(name): \(d1.notices) then \(logged) \(d2.notices) then \(d3.notices)")
@@ -3215,6 +3217,42 @@ private func pipelineClearsAndMerges(base: URL, root: PipelineSettings.Root, t0:
     old.ghFails = false
     let od = sync(old, PipelineSettings(roots: [root]), dir("old"), later(5))
     check(od.result.notices.isEmpty, "a merge asked 91 days ago: \(od.result.notices)")
+    // One an earlier sync asked, of a PR this sync reads open and cannot read again: told once,
+    // by the merge's read or by this sync's.
+    for merging in [true, false] {
+        let t = only([13, 27])
+        let d = dir("open-unread-\(merging)")
+        try seedRerate(d, 13, sha("c3"), at: later(-60))
+        try asked(d, at: "2026-11-20T11:00:00Z")
+        var fails = true
+        var io = t.io()
+        io.gh = { args in
+            guard fails, args.contains("operationName=PullRequest") else { return t.gh(args) }
+            return .init(status: 1, stderr: "gh: Bad Gateway (HTTP 502)\n")
+        }
+        let s = PipelineTick.run(settings: PipelineSettings(roots: [root], merge: merging), now: t0, dir: d, io: io)
+        fails = false
+        let next = PipelineTick.run(settings: PipelineSettings(roots: [root]), now: later(5), dir: d, io: io)
+        check(s.notices == [merging ? "#13 was not merged: it could not be read again: gh: Bad Gateway (HTTP 502)" : still]
+              && next.notices.isEmpty,
+              "an earlier merge of a PR read open, merging \(merging): \(s.notices) then \(next.notices)")
+    }
+
+    // A clear the head merging its base made could not yet be shown to carry, whose removal
+    // GitHub refused, is carried by a later sync that shows it: the label never came off.
+    let carry = only([13, 27])
+    (carry.prs[0].behind, carry.prs[0].draft) = (2, true)
+    try seedRerate(dir("carry"), 13, sha("c3"), at: later(-60))
+    let both = PipelineSettings(roots: [root], fastTrack: true, merge: true)
+    _ = sync(carry, both, dir("carry"), t0)
+    (carry.compareFails, carry.refuseLabels) = (true, ["13 diplomat:cleared"])
+    let k2 = sync(carry, both, dir("carry"), later(5))
+    (carry.compareFails, carry.refuseLabels) = (false, [])
+    let k3 = sync(carry, both, dir("carry"), later(10))
+    check(k2.writes.isEmpty && k3.writes.isEmpty && carry.prs[0].labels.contains("diplomat:cleared")
+          && k3.events.contains { $0.kind == .cleared && $0.detail.hasSuffix("is the one cleared at c3c3c3c") },
+          "carried after a refused removal: \(k2.writes) \(k3.writes) \(trail(k3.events, k3.result)) "
+            + "\(stageOf(k3.result, prURL(13)))")
 }
 
 /// A banned Linear author, a PR behind its base, a Linear recheck that failed, and failures
@@ -4661,7 +4699,7 @@ private func pipelineKept(base: URL, root: PipelineSettings.Root, team: Pipeline
             }
         }
         check(!theirs.events.contains { $0.kind == .merged }
-              && theirs.result.notices == ["#13 was merged, but not by this sync at c3c3c3c"]
+              && theirs.result.notices == ["#13 was merged, but not by this Diplomat's merge at c3c3c3c"]
               && stageOf(theirs.result, prURL(13)) == "merged/done",
               "merged by \(by) at \(head.prefix(7)) as gh ran: \(theirs.events.map(\.kind)) \(theirs.result.notices)")
     }

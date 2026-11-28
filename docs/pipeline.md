@@ -74,7 +74,7 @@ A PR:
 | `fast-track` | yours, labelled `diplomat:fast-track`, closing only `candidate` issues, at least one unless taken over, no clean marker at its head | Fast |
 | `clean` | the same, with a clean marker at its head | Fast |
 | `cleared` | labelled `diplomat:cleared`, clean at its head, and rated low/low again there by this Diplomat (its state or log says so), or, taken over, labelled so there by this Diplomat; or at a later head carrying that one's change [unchanged](#the-merge) | Fast |
-| `merged`, `closed` | one of the repo's 20 merged or closed PRs updated last, carrying a pipeline label, or read for an ask waiting on it | Done |
+| `merged`, `closed` | one of the repo's 20 merged or closed PRs updated last, carrying a pipeline label, or read for an ask waiting on it or a merge whose end no read saw | Done |
 
 An issue labelled `wontfix`, `wont fix`, `won't fix`, `duplicate`, `invalid`, `question`,
 `enhancement`, `feature`, `feature request`, `improvement`, `discussion`, `proposal` or `rfc` in any
@@ -119,7 +119,8 @@ a Linear team was not read whole, no issue in the repo it maps to is fixed, spli
 
 A head no clean marker names, as after a push, takes `diplomat:cleared` off, and the PR goes back
 to `fast-track` for a review of that head, unless it carries the cleared change
-[unchanged](#the-merge). A person who takes `diplomat:cleared` off a PR before
+[unchanged](#the-merge). If `gh` fails to take it off and the read after cannot tell whether it went,
+the label found gone later counts as a person's removal. A person who takes `diplomat:cleared` off a PR before
 Diplomat does takes it off the fast track until you [take it over](#takeover): Diplomat neither
 labels, reviews nor merges it again, and takes `diplomat:fast-track` off too, so the labels say so. One who
 takes `diplomat:fast-track` off leaves it to a person: Diplomat puts that label back only for a takeover.
