@@ -1,6 +1,5 @@
-// What the stand-in docker (fake-docker.mjs) was called with, in order: calls.jsonl, a call
-// to a line. A call may be writing its line while this reads it, so what follows the last
-// newline is no call yet.
+// The stand-in docker's calls.jsonl, a call to a line, in order. A call may be writing its
+// line while this reads it: what follows the last newline is no call yet.
 
 import fs from 'node:fs';
 import path from 'node:path';
