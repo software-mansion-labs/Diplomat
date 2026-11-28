@@ -145,3 +145,23 @@ def test_the_assets_readme_describes_the_issues_scope_issues_json_has():
     row = next(r for r in readme.splitlines() if r.startswith("| `issues.json` |"))
     assert re.findall(r"`scope\.(\w+)`", row) == list(core.issues()["scope"])
     assert "enumeration" not in row
+
+
+# MARK: - audit.json's _comment
+
+
+def test_the_audit_comment_names_every_block_a_toggle_gates():
+    audit = core.audit()
+
+    def carried(**toggles):
+        prompt = AuditConfig(**toggles).build_prompt()
+        # Placeholders are filled in the prompt, so match each block's longest literal run.
+        return {k for k, v in audit["blocks"].items()
+                if max(re.split(r"\{\w+\}", v), key=len) in prompt}
+
+    claim = re.search(r"fixIssues -> (.+?), openPRs -> (.+?) \(else (.+?)\)", audit["_comment"])
+    issues, prs, read_only = (set(re.findall(r"'(\w+)'", g)) for g in claim.groups())
+    base, with_prs = carried(), carried(open_prs=True)
+    assert carried(fix_issues=True) ^ base == issues
+    assert with_prs - base == prs
+    assert base - with_prs == read_only
