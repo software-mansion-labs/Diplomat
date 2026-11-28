@@ -25,6 +25,8 @@ rm -rf "/Applications/$APP" "$HOME/Applications/$APP" \
   || echo "Could not remove an old copy of $APP; delete it by hand, a click on it starts stale code." >&2
 
 # Write the LaunchAgent.
+. "$HERE/agent-launcher.sh"
+PROGRAM="$(agent_program "$BIN")"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$PLIST" <<PL
@@ -34,7 +36,7 @@ cat > "$PLIST" <<PL
 <dict>
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
-  <array><string>$BIN</string></array>
+  <array>$PROGRAM</array>
   <!-- An unattended start: no window, and the frontmost app keeps focus. -->
   <key>EnvironmentVariables</key>
   <dict><key>DIPLOMAT_BACKGROUND</key><string>1</string></dict>
