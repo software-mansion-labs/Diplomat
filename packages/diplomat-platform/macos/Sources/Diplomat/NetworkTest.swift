@@ -946,6 +946,10 @@ enum NetworkTest {
                 && prs.buildPrompt() != noPRs.buildPrompt()
                 && writes.buildPrompt() != reads.buildPrompt())
 
+        let unkeyed = AgentRegistry.load().filter { $0.network != nil && $0.prNumber == nil }
+        check("…each run of those, with no ledger key, booked as no pipeline run",
+              !unkeyed.isEmpty && unkeyed.allSatisfy { !$0.pipeline })
+
         var thrown: Error?
         do {
             _ = try await store.spawnTracked(kind: "review", label: "x", prURL: nil, prNumber: nil,
@@ -1291,11 +1295,26 @@ enum NetworkTest {
                     .hasSuffix("#90262 — finished on \(NetworkText.short(away))") == true
                 && ledger("done", key: ledgerKey(90262)).count == 1)
         let offersOff = requests(NetworkRoute.offer).count
+        var spawned: [String] = []
+        AgentSpawner.onHeadlessRefusal = {
+            spawned += AgentRegistry.load().filter(\.runsHere).map { "#\($0.prNumber ?? 0) \($0.pipeline)" }
+        }
         let local = await store.dispatchAgent(job(90260), source: .panel)
         check("a withdrawn run's PR is free for a local run at once, which offers nothing",
               local == .failed(AgentSpawner.SpawnError.headless.localizedDescription)
                 && AgentSpawner.refusedTerminals == refusedBefore + 1
                 && requests(NetworkRoute.offer).count == offersOff)
+        let pipelines = Store.AgentJob(kind: "review", auditAction: "review", label: "Review · #90263 · max",
+                                       prompt: "review 90263", prURL: url(90263), prNumber: 90263,
+                                       authorLogin: nil, counter: .pipeline, directory: root.path)
+        _ = await store.dispatchAgent(pipelines, source: .auto, bypassCapacity: true, forced: true)
+        let wizards = Store.AgentJob(kind: "review", auditAction: "review", label: "Review · #90264 · deep",
+                                     prompt: "review 90264", prURL: url(90264), prNumber: 90264,
+                                     authorLogin: nil, counter: nil, directory: root.path)
+        _ = await store.dispatchAgent(wizards, source: .panel)
+        AgentSpawner.onHeadlessRefusal = nil
+        check("a local spawn books the pipeline's run as the pipeline's, and no other's, ledger key or none",
+              spawned == ["#90260 false", "#90263 true", "#90264 false"])
 
         func bookByHand(_ n: Int, task: String) {
             let at = Date().timeIntervalSince1970

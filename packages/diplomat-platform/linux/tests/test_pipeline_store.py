@@ -1986,6 +1986,19 @@ def test_the_run_of_an_ask_that_took_the_pipelines_place_answers_none_of_its_eff
     assert pipe._load_attempts(PIPELINE_ATTEMPTS)[effect["key"]].attempts == 1
 
 
+@pytest.mark.parametrize("effect", [_review(), _fix()])
+def test_cancelling_an_ask_that_took_the_pipelines_place_concludes_none_of_its_records(
+        pipe, effect):
+    """Only the Pipeline's own asks' Cancel does: the Pipeline asks for its own at once."""
+    _sync(pipe, _result(effect))
+    other = _asked(effect)
+    assert pipe.request_one(other)
+    pipe.cancel_requested_work(other.key)
+    assert pipe._load_attempts(PIPELINE_ATTEMPTS)[effect["key"]].concluded_at is None
+    _sync(pipe, _result(effect))
+    assert [(t.id, t.job.counter) for t in pipe.queued_tasks] == [(other.key, PIPELINE_COUNTER)]
+
+
 def test_a_new_head_after_an_ask_that_took_the_pipelines_place_waits_the_hour_from_its_queueing(
         pipe, monkeypatch):
     _spawn_recorder(monkeypatch)
@@ -2011,15 +2024,46 @@ def test_a_preempt_sets_only_its_items_open_record_to_no_attempts(pipe):
     assert marked == {**attempts, f"pipeline-review:{PR}": autofix.ReviewAttempt("abc123", 100.0, 0)}
 
 
-@pytest.mark.parametrize("effect", [_review(), _fix()])
-def test_an_ask_the_network_carries_is_not_taken_over(pipe, effect):
-    """It has started: its run is the Pipeline's, and concludes its record."""
+@pytest.mark.parametrize("effect, switch", [(_review(), "pipeline_fast_track"),
+                                            (_fix(), "pipeline_fix")])
+def test_another_ask_takes_the_place_of_one_the_network_carries_and_outlives_a_withdrawal(
+        pipe, effect, switch):
+    """As of one whose run started here: the network's run stays the Pipeline's, its
+    record untouched."""
     _sync(pipe, _result(effect))
     [held] = pipe.requested_work
     pipe._mark_offered(held.key, "task-1")
-    assert not pipe.request_one(_asked(effect))
-    assert pipe.requested_work == [dataclasses.replace(held, offered="task-1")]
+    other = _asked(effect)
+    assert pipe.request_one(other)
     assert pipe._load_attempts(PIPELINE_ATTEMPTS)[effect["key"]].attempts == 1
+    setattr(pipe, switch, False)
+    assert pipe.requested_work == [other]
+    assert [(t.id, t.job.counter) for t in pipe.queued_tasks] == [(other.key, None)]
+
+
+def test_a_review_in_the_place_of_one_the_network_carries_waits_for_its_run(pipe, monkeypatch):
+    """Whose report concludes the Pipeline's record, so no second Pipeline review follows
+    the other's."""
+    from diplomat_runtime import agentregistry, agentstate
+
+    _spawn_recorder(monkeypatch)
+    _sync(pipe, _result(_review()))
+    [held] = pipe.requested_work
+    pipe._mark_offered(held.key, "task-1")
+    now = time.time()
+    agentregistry.create_run(agentstate.RunRecord(
+        run_id=agentregistry.new_run_id(now), dispatched_at=now, pr_number=7, pr_url=PR,
+        kind="review", network="task-1", pipeline=True), "p")
+    assert pipe.request_one(_asked(_review()))
+    [task] = pipe.queued_tasks
+    assert pipe._run_queued_task(task, forced=False) == autofix.VERDICT_IN_FLIGHT
+    ran = agentregistry.load()
+    pipe._save_attempts(PIPELINE_ATTEMPTS, pipeline.concluded(
+        pipe._load_attempts(PIPELINE_ATTEMPTS), ran, now))
+    agentregistry.forget({r.run_id for r in ran})
+    _report(pipe, monkeypatch, task)
+    pipe._apply_pipeline_effects(_result(_review()), now + autofix.RETRY_MAX_BACKOFF)
+    assert pipe.queued_tasks == []
 
 
 def _died(pipe, monkeypatch, calls) -> None:
@@ -2057,7 +2101,7 @@ def test_another_askers_run_answers_none_of_an_open_record_the_pipeline_asks_not
                                  prompt="p", pr_url=PR, pr_number=7)),
     (_fix(), autofix.AgentJob(kind="issues", audit_action="issues", label="Issues · #12 · deep",
                               prompt="p", pr_url=ISSUE))])
-def test_a_run_started_by_hand_answers_none_of_the_pipelines_records(
+def test_a_wizards_run_answers_none_of_the_pipelines_records(
         pipe, monkeypatch, effect, job):
     """A wizard's, after the Pipeline's own run died: the Pipeline still asks for its own."""
     from diplomat_runtime import agentregistry
@@ -2266,7 +2310,7 @@ def test_a_run_concludes_its_items_record_keyed_by_another_link_to_it():
 
 
 def test_a_run_the_pipeline_did_not_dispatch_concludes_no_record():
-    """A monitor's, another asker's or one started by hand."""
+    """A monitor's, another asker's or a wizard's."""
     attempts = {f"pipeline-review:{PR}": _attempt()}
     run = _run(autofix.QUEUE_REVIEW_ACTION, PR, pipeline=False)
     assert pipeline.concluded(attempts, [run], 500.0) == attempts

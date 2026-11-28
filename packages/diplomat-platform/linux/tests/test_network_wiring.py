@@ -38,7 +38,7 @@ from diplomat_runtime.prtarget import PRTarget
 from diplomat_app import audit, deviceallocator as da, issues
 from diplomat_app import diplomacynetwork as dn
 from diplomat_app import probes, procscan
-from diplomat_app.store import PIPELINE_COUNTER
+from diplomat_app.store import PIPELINE_ATTEMPTS, PIPELINE_COUNTER, Store
 from test_autofix import (  # noqa: F401 - fixtures
     ROOT,
     _fixture_root,
@@ -919,6 +919,134 @@ def test_an_offered_pipeline_job_books_the_pipelines_run(store, on, daemon, monk
     assert store.dispatch_agent(pipelines, autofix.SOURCE_AUTO, bypass_capacity=True) == "spawned"
     (run,) = agentregistry.load()
     assert (run.network, run.pipeline) == ("t1", True)
+
+
+def _pipeline_effect(kind: str) -> dict:
+    if kind == "review":
+        url = "https://github.com/o/r/pull/7"
+        return {"kind": "review", "repo": "o/r", "number": 7, "url": url, "headSha": "abc123",
+                "key": f"pipeline-review:{url}", "stamp": "abc123"}
+    url = "https://github.com/o/r/issues/12"
+    return {"kind": "fixIssue", "repo": "o/r", "number": 12, "url": url, "author": "carol",
+            "key": f"pipeline-fix:{url}", "stamp": "fix"}
+
+
+def _pipeline_sync(st, *effects, now: float | None = None) -> None:
+    result = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "items": [],
+              "graph": {"nodes": [], "edges": []}, "effects": list(effects), "events": [],
+              "notices": [], "unread": [], "fixable": [], "read": []}
+    if now is None:
+        st._apply_pipeline_sync({"result": result, "forced": {}, "started": 0,
+                                 "epoch": st._pipeline_epoch})
+    else:
+        st._apply_pipeline_effects(result, now)
+
+
+def _asked_too(effect: dict) -> autofix.RequestedWork:
+    """A Review-PRs sweep's review of the effect's PR, or the community monitor's fix of its
+    issue."""
+    root = review.repo_roots()[0]
+    if effect["kind"] == "review":
+        cfg = review.ReviewConfig(specific_pr="7", me="alice", home=root).prompt_payload()
+        return autofix.RequestedWork(number=7, url=effect["url"], author="", config=cfg,
+                                     repo="o/r")
+    cfg = issues.IssueConfig(target=issues.Target.CONTRIBUTORS, me="alice", home=root)
+    return autofix.RequestedWork(number=12, url=effect["url"], author="carol",
+                                 config=cfg.for_issue(12).prompt_payload(), repo="o/r")
+
+
+def _ended(st, d, task: str, state: str = "done", ok: bool = True) -> None:
+    d.state = snapshot(offers=[offer(task, state, executor=PEER, outcome={"ok": ok})])
+    st._network_cycle()
+    st._network_cycle()
+    st._settle_agents()
+    assert all(r.network != task for r in agentregistry.load()), "the run must retire"
+
+
+PIPELINE_EFFECTS = [pytest.param("review", id="review"), pytest.param("fix", id="fix")]
+
+
+@pytest.fixture
+def piped(store, on):  # noqa: F811
+    store.pipeline_enabled = store.pipeline_fix = store.pipeline_fast_track = True
+    return store
+
+
+def _offered_and_taken(st, d, monkeypatch, effect, restart=False):
+    """The Pipeline's ask offered as t1, another asker's in its place, and the Pipeline's
+    switch off and on: the other ask stands, and t1 stays the Pipeline's run, concluding its
+    record."""
+    _pipeline_sync(st, effect)
+    _poll(st, monkeypatch)
+    assert [w.offered for w in st.requested_work] == ["t1"]
+    other = _asked_too(effect)
+    assert st.request_one(other)
+    if restart:
+        st = Store()
+        st.me = "alice"
+        st.pipeline_enabled = st.pipeline_fix = st.pipeline_fast_track = True
+    switch = "pipeline_fast_track" if effect["kind"] == "review" else "pipeline_fix"
+    setattr(st, switch, False)
+    st.wait_for_background()
+    setattr(st, switch, True)
+    assert st.requested_work == [other] and d.sent("withdraw") == []
+    _ended(st, d, "t1")
+    assert st._load_attempts(PIPELINE_ATTEMPTS)[effect["key"]].concluded_at is not None
+    assert st.requested_work == [other]
+    return st
+
+
+@pytest.mark.parametrize("kind", PIPELINE_EFFECTS)
+def test_another_ask_in_the_place_of_an_offered_pipeline_ask_outlives_a_withdrawal(
+        piped, daemon, monkeypatch, kind):
+    _offered_and_taken(piped, daemon(numbers_tasks()), monkeypatch, _pipeline_effect(kind),
+                       restart=True)
+
+
+@pytest.mark.parametrize("kind", PIPELINE_EFFECTS)
+def test_another_ask_in_the_place_of_an_offered_pipeline_ask_runs_after_its_run(
+        piped, daemon, monkeypatch, kind):
+    """And no second Pipeline ask follows the other's run."""
+    d = daemon(numbers_tasks())
+    calls = _spawn_recorder(monkeypatch)
+    effect = _pipeline_effect(kind)
+    st = _offered_and_taken(piped, d, monkeypatch, effect)
+    _poll(st, monkeypatch)
+    [run] = agentregistry.load()
+    assert (st.requested_work[0].offered, run.network, run.pipeline) == ("t2", "t2", False)
+    _ended(st, d, "t2")
+    _pipeline_sync(st, effect, now=time.time() + autofix.RETRY_MAX_BACKOFF)
+    assert [w for w in st.requested_work if w.pipeline] == [] and calls == []
+
+
+@pytest.mark.parametrize("kind", PIPELINE_EFFECTS)
+@pytest.mark.parametrize("how", ["done", "failed"])
+def test_the_network_run_of_an_ask_that_took_the_pipelines_place_concludes_none_of_its_records(
+        piped, daemon, monkeypatch, kind, how):
+    """It is not the Pipeline's, ledger key or none: the Pipeline asks for its own, whose run
+    concludes."""
+    d = daemon(numbers_tasks())
+    _spawn_recorder(monkeypatch)
+    effect = _pipeline_effect(kind)
+    t0 = time.time()
+    _pipeline_sync(piped)
+    _pipeline_sync(piped, effect, now=t0)
+    other = _asked_too(effect)
+    assert piped.request_one(other)
+    _poll(piped, monkeypatch)
+    assert [(w.pipeline, w.offered) for w in piped.requested_work] == [(False, "t1")]
+    if how == "done":
+        _ended(piped, d, "t1")
+    else:
+        _ended(piped, d, "t1", state="failed", ok=False)
+        piped._forget_requested(other.key)
+        piped._drop_queued_task(other.key)
+    assert piped._load_attempts(PIPELINE_ATTEMPTS)[effect["key"]].concluded_at is None
+    _pipeline_sync(piped, effect, now=t0 + 1)
+    assert [w.pipeline for w in piped.requested_work] == [True]
+    _poll(piped, monkeypatch)
+    _ended(piped, d, "t2")
+    assert piped._load_attempts(PIPELINE_ATTEMPTS)[effect["key"]].concluded_at is not None
 
 
 def test_the_run_reads_where_it_is_as_the_snapshot_moves_and_is_priced_once(

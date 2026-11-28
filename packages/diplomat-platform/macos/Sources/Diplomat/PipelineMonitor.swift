@@ -619,7 +619,7 @@ extension Store {
     }
 
     /// Only a run the pipeline dispatched (`RunRecord.pipeline`) answers it: a monitor's,
-    /// another asker's or one started by hand answers its own.
+    /// another asker's or a wizard's answers its own.
     nonisolated static func pipelineConcluded(_ attempts: [String: ReviewAttempt],
                                               runs: [AgentState.RunRecord],
                                               at now: Date) -> [String: ReviewAttempt] {

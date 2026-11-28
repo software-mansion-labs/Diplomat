@@ -422,7 +422,7 @@ def concluded(attempts: dict, runs, now_ts: float) -> dict:
     """``attempts`` with the record of each of ``runs`` (``kind``, ``pr_url``,
     ``pipeline``) stamped concluded: its agent said its turn was over, so what it left
     is its answer. Only a run the pipeline dispatched answers it: a monitor's, another
-    asker's or one started by hand answers its own. Twin of ``Store.pipelineConcluded``."""
+    asker's or a wizard's answers its own. Twin of ``Store.pipelineConcluded``."""
     out = dict(attempts)
     for run in runs:
         if not run.pipeline:

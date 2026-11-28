@@ -4102,20 +4102,19 @@ final class Store: ObservableObject {
     /// the second dispatch would find the first agent still on it). That makes
     /// pressing SPAWN twice, or sweeping a scope that overlaps an earlier one,
     /// idempotent rather than a way to double up. Any other ask takes the place of a
-    /// Pipeline ask nothing has started, here or on the network, which the Pipeline's
-    /// switches would withdraw or pause; the Pipeline's next ask for that item is a first
-    /// attempt (`pipelinePreempted`).
+    /// Pipeline ask nothing has started, which the Pipeline's switches would withdraw or
+    /// pause. Unless the network carries that ask, whose run stays the Pipeline's, the
+    /// Pipeline's next ask for that item is a first attempt (`pipelinePreempted`).
     private func request(_ asks: [RequestedWork]) -> (queued: Int, already: Int) {
         let starting = Set(startingTasks.map(\.id))
         let fresh = asks.filter { ask in
             guard let held = requestedWork.first(where: { $0.key == ask.key }) else { return true }
-            return held.config.isPipeline && held.offered.isEmpty && !ask.config.isPipeline
-                && !starting.contains(ask.key)
+            return held.config.isPipeline && !ask.config.isPipeline && !starting.contains(ask.key)
         }
         guard !fresh.isEmpty else { return (0, asks.count) }
         if !pipelineJudged { pipelineStale.formUnion(fresh.filter(\.config.isPipeline).map(\.key)) }
         let taken = Set(fresh.map(\.key))
-        let replaced = requestedWork.filter { taken.contains($0.key) }
+        let replaced = requestedWork.filter { taken.contains($0.key) && $0.offered.isEmpty }
         if !replaced.isEmpty {
             savePipelineAttempts(Store.pipelinePreempted(loadPipelineAttempts(), by: replaced))
         }

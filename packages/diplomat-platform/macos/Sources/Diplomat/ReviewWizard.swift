@@ -192,6 +192,10 @@ enum AgentSpawner {
         return refusals
     }
 
+    /// Called as `refuseHeadless` turns a spawn away, while its run is still booked: where
+    /// a self-test reads what a local dispatch books.
+    static var onHeadlessRefusal: (() -> Void)?
+
     /// Throw `SpawnError.headless`, counted and said on stderr, where
     /// `mayOpenTerminals` is false.
     static func refuseHeadless() throws {
@@ -200,6 +204,7 @@ enum AgentSpawner {
         refusals += 1
         refusalLock.unlock()
         FileHandle.standardError.write(Data("spawn-tripwire: refused a terminal\n".utf8))
+        onHeadlessRefusal?()
         throw SpawnError.headless
     }
 

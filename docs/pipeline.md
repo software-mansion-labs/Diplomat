@@ -30,8 +30,7 @@ retried on the monitors' backoff when a run dies, and taken off the queue when a
 sync no longer owes it - one you started with Start fix only once a sync that read its repo in full
 finds its issue held or no candidate; any other by a sync that could not read its repo in full only
 if it read that item, never by one that only read and showed the repo. One a sweep, Slack or the
-new-community-issue monitor asks for too before it starts, here or on the network, is theirs, which
-nothing of the pipeline's holds or withdraws.
+new-community-issue monitor asks for too is theirs, which nothing of the pipeline's holds or withdraws.
 An item whose author is on the
 prompt-injection ban list, as read right before each step, and every issue Diplomat split from one, is
 not rated, labelled, split or fixed, nor a PR closing it reviewed or merged; a Linear issue's author is
@@ -508,7 +507,7 @@ trackers' labels, this is what a sync needs:
 
 The fix and review asks' attempt records are the app's own (`pipelineAttempts`): a run of the
 pipeline's that reported back (a PR, a clean marker or nothing) concludes its ask, which is not made
-again while syncs owe it, nor for 30 days after. Another asker's run, or one started by hand,
+again while syncs owe it, nor for 30 days after. Another asker's run, or one started from a wizard,
 concludes none, so the pipeline still asks for its own. On Linux a sync is
 `diplomat-core pipeline-tick`, the same core, stopped when the app quits.
 

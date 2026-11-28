@@ -3016,11 +3016,11 @@ class Store(QObject):
         the second dispatch would find the first agent still on it). That makes
         pressing SPAWN twice, or sweeping a scope that overlaps an earlier one,
         idempotent rather than a way to double up. Any other ask takes the place of a
-        Pipeline ask nothing has started, here or on the network, which the Pipeline's
-        switches would withdraw or pause; the Pipeline's next ask for that item is a
-        first attempt (:func:`pipeline.preempted`)."""
+        Pipeline ask nothing has started, which the Pipeline's switches would withdraw or
+        pause. Unless the network carries that ask, whose run stays the Pipeline's, the
+        Pipeline's next ask for that item is a first attempt (:func:`pipeline.preempted`)."""
         def fresh_of(candidates: list[autofix.RequestedWork]) -> list[autofix.RequestedWork]:
-            held = {r.key: r.pipeline and not r.offered for r in self.requested_work}
+            held = {r.key: r.pipeline for r in self.requested_work}
             starting = {e.id for e in self.starting_tasks}
             return [a for a in candidates if a.key not in held or (
                 held[a.key] and not a.pipeline and a.key not in starting)]
@@ -3042,7 +3042,7 @@ class Store(QObject):
                 if not self._pipeline_judged:
                     self._pipeline_stale |= {a.key for a in fresh if a.pipeline}
                 taken = {a.key for a in fresh}
-                replaced = [r for r in self.requested_work if r.key in taken]
+                replaced = [r for r in self.requested_work if r.key in taken and not r.offered]
                 if replaced:
                     self._save_attempts(PIPELINE_ATTEMPTS, pipeline.preempted(
                         self._load_attempts(PIPELINE_ATTEMPTS), replaced))

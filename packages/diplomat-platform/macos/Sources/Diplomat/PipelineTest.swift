@@ -308,7 +308,7 @@ enum PipelineTest {
                   .mapValues { $0.concludedAt != nil } == [review.key: true, fix.key: false])
         var unasked = reviewRun
         unasked.pipeline = false
-        check("…nor does a run on that PR the pipeline did not dispatch: a monitor's, another asker's or a hand's",
+        check("…nor does a run on that PR the pipeline did not dispatch: a monitor's, another asker's or a wizard's",
               Store.pipelineConcluded(records, runs: [unasked], at: t1) == records)
         func spawned(_ kind: String, _ url: String) -> Store.AgentJob {
             Store.AgentJob(kind: kind, auditAction: kind, label: "", prompt: "", prURL: url,
@@ -1137,6 +1137,17 @@ enum PipelineTest {
               waited && store.queuedTasks.map(\.job.counter) == [.pipeline])
         clearQueue()
         store.savePipelineAttempts([:])
+        for (effect, other) in [(review, sweptReview), (fix, community)] {
+            await store.applyPipeline(result([effect]), now: now)
+            store.requestOne(other)
+            store.cancelRequestedWork(other.key)
+            let open = store.loadPipelineAttempts()[effect.key].map { $0.concludedAt == nil } == true
+            await store.applyPipeline(result([effect]), now: now)
+            check("cancelling an ask that took the pipeline's place concludes none of its records: "
+                  + "it asks for its own (\(other.key))", open && store.queuedTasks.map(\.job.counter) == [.pipeline])
+            clearQueue()
+            store.savePipelineAttempts([:])
+        }
         let spread = [review.key: ReviewAttempt(requestedAt: "aaa111", lastDispatchedAt: now, attempts: 2),
                       "pipeline-review:https://github.com/O/R/pull/90011":
                           ReviewAttempt(requestedAt: "old", lastDispatchedAt: t0, attempts: 1, concludedAt: t0),
@@ -1148,16 +1159,21 @@ enum PipelineTest {
         zeroed[review.key]?.attempts = 0
         let marked = Store.pipelinePreempted(spread, by: store.pipelineAsk(review).map { [$0] } ?? [])
         check("a takeover sets only its item's open record to no attempts", marked == zeroed)
-        await store.applyPipeline(result([review]), now: now)
-        if !store.requestedWork.isEmpty { store.requestedWork[0].offered = "task-1" }
-        let carried = store.requestedWork
-        check("an ask the network carries has started: none takes its place",
-              !carried.isEmpty && !store.requestOne(sweptReview) && store.requestedWork == carried
-                  && store.loadPipelineAttempts()[review.key]?.attempts == 1)
-        clearQueue()
-        store.savePipelineAttempts([:])
         for (effect, other, off) in [(review, sweptReview, \Store.pipelineFastTrack), (fix, community, \Store.pipelineFix)] {
-            for gone in ["died", "switched off", "by hand"] {
+            await store.applyPipeline(result([effect]), now: now)
+            if !store.requestedWork.isEmpty { store.requestedWork[0].offered = "task-1" }
+            let taken = store.requestOne(other)
+            store[keyPath: off] = false
+            check("another ask takes the place of one the network carries, as of one whose run started here, "
+                  + "and outlives a withdrawal; the network's run stays the pipeline's (\(other.key))",
+                  taken && store.requestedWork == [other] && store.queuedTasks.map(\.job.counter) == [nil]
+                      && store.loadPipelineAttempts()[effect.key]?.attempts == 1)
+            store[keyPath: off] = true
+            clearQueue()
+            store.savePipelineAttempts([:])
+        }
+        for (effect, other, off) in [(review, sweptReview, \Store.pipelineFastTrack), (fix, community, \Store.pipelineFix)] {
+            for gone in ["died", "switched off", "died, then a wizard's"] {
                 await store.applyPipeline(result([effect]), now: now)
                 if gone == "switched off" {
                     store[keyPath: off] = false
@@ -1167,7 +1183,7 @@ enum PipelineTest {
                     store.forgetRequested(own.id)
                     store.dropQueuedTask(own.id)
                 }
-                if gone == "by hand" {
+                if gone == "died, then a wizard's" {
                     let hand = AgentState.RunRecord(runID: "r-hand", dispatchedAt: now.timeIntervalSince1970,
                                                     prURL: effect.url, kind: other.config.action, source: "panel")
                     store.savePipelineAttempts(Store.pipelineConcluded(store.loadPipelineAttempts(),
