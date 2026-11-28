@@ -3195,7 +3195,9 @@ private func pipelineClearsAndMerges(base: URL, root: PipelineSettings.Root, t0:
         return .init(status: 1, stderr: "gh: Pull request is not mergeable\n")
     }
     let rf = PipelineTick.run(settings: mergeOn, now: t0, dir: dir("merge-refused"), io: rio)
-    check(rf.notices == ["#13 was not merged: gh: Pull request is not mergeable"], "a merge gh refused: \(rf.notices)")
+    check(rf.notices == ["#13 was not merged: gh: Pull request is not mergeable"]
+          && stageOf(rf, prURL(13)) == "cleared/fast" && stageOf(rf, issueURL(27)) == "fixing/fast",
+          "a merge gh refused: \(rf.notices) \(stageOf(rf, prURL(13))) \(stageOf(rf, issueURL(27)))")
     // One of a PR still cleared is asked again, and only the new one told.
     func asked(_ d: URL, at when: String) throws {
         try Data(#"{"merging": {"\#(prURL(13))": {"head": "\#(sha("c3"))", "flag": "--squash", "at": "\#(when)"}}}"#.utf8)
@@ -3217,6 +3219,26 @@ private func pipelineClearsAndMerges(base: URL, root: PipelineSettings.Root, t0:
     old.ghFails = false
     let od = sync(old, PipelineSettings(roots: [root]), dir("old"), later(5))
     check(od.result.notices.isEmpty, "a merge asked 91 days ago: \(od.result.notices)")
+    // One whose PR is listed but whose read again fails is kept 90 days after it was asked, and
+    // no longer.
+    for (age, when, told) in [("60d", "2026-09-21T12:00:00Z", [unsaid]), ("91d", "2026-08-21T11:59:00Z", [])] {
+        let t = only([13, 27])
+        (t.prs[0].state, t.prs[0].mergedBy) = ("MERGED", opLogin)
+        let d = dir("kept-" + age)
+        try seedRerate(d, 13, sha("c3"), at: later(-60))
+        try asked(d, at: when)
+        var fails = true
+        var io = t.io()
+        io.gh = { args in
+            guard fails, args.contains("operationName=PullRequest") else { return t.gh(args) }
+            return .init(status: 1, stderr: "gh: Bad Gateway (HTTP 502)\n")
+        }
+        let s = PipelineTick.run(settings: PipelineSettings(roots: [root]), now: t0, dir: d, io: io)
+        fails = false
+        let next = PipelineTick.run(settings: PipelineSettings(roots: [root]), now: later(5), dir: d, io: io)
+        check(s.notices == [unread] && next.notices == told,
+              "a merge asked \(age) ago, its read failing: \(s.notices) then \(next.notices)")
+    }
     // One an earlier sync asked, of a PR this sync reads open and cannot read again: told once,
     // by the merge's read or by this sync's.
     for merging in [true, false] {
