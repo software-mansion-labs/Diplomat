@@ -2332,7 +2332,8 @@ class Store(QObject):
                     self._spawn_tracked(job.prompt, job.pr_url, job.pr_number,
                                         source, job.ledger_key,
                                         label=row_label, kind=job.kind,
-                                        checkout=job.checkout)
+                                        checkout=job.checkout,
+                                        pipeline=job.counter == PIPELINE_COUNTER)
                 except review.SpawnError as exc:
                     activity.log(source, "spawn-failed",
                                  f"{job.label} failed to spawn: {exc}")
@@ -2482,7 +2483,8 @@ class Store(QObject):
 
     def _spawn_tracked(self, prompt: str, url: str | None, number: int | None,
                        source: str, ledger_key: str = "", label: str = "",
-                       kind: str = "", checkout: str | None = None) -> None:
+                       kind: str = "", checkout: str | None = None,
+                       pipeline: bool = False) -> None:
         """Register a run, then spawn its agent into it. Raises
         :class:`review.SpawnError` when the run can't be booked or no terminal
         launched; the run is forgotten unless the book refuses that write too.
@@ -2532,7 +2534,7 @@ class Store(QObject):
                 agentstate.RunRecord(
                     run_id=agentregistry.new_run_id(now), dispatched_at=now,
                     pr_number=number, pr_url=url or "", kind=kind, label=label,
-                    source=source, ledger_key=ledger_key),
+                    source=source, ledger_key=ledger_key, pipeline=pipeline),
                 prompt)
         except OSError as exc:
             raise review.SpawnError(
@@ -2652,7 +2654,7 @@ class Store(QObject):
                     run_id=agentregistry.new_run_id(now), dispatched_at=now,
                     pr_number=job.pr_number, pr_url=job.pr_url or "", kind=job.kind,
                     label=row_label, source=source, ledger_key=job.ledger_key,
-                    network=task),
+                    network=task, pipeline=job.counter == PIPELINE_COUNTER),
                 job.prompt)
         except OSError:
             # An offer nothing here tracks is work nobody waits for.
@@ -3033,7 +3035,8 @@ class Store(QObject):
         pressing SPAWN twice, or sweeping a scope that overlaps an earlier one,
         idempotent rather than a way to double up. Any other ask takes the place of a
         Pipeline ask nothing has started, which the Pipeline's switches would withdraw or
-        pause."""
+        pause. Unless the network carries that ask, whose run stays the Pipeline's, the
+        Pipeline's next ask for that item is a first attempt (:func:`pipeline.preempted`)."""
         def fresh_of(candidates: list[autofix.RequestedWork]) -> list[autofix.RequestedWork]:
             held = {r.key: r.pipeline for r in self.requested_work}
             starting = {e.id for e in self.starting_tasks}
@@ -3057,6 +3060,10 @@ class Store(QObject):
                 if not self._pipeline_judged:
                     self._pipeline_stale |= {a.key for a in fresh if a.pipeline}
                 taken = {a.key for a in fresh}
+                replaced = [r for r in self.requested_work if r.key in taken and not r.offered]
+                if replaced:
+                    self._save_attempts(PIPELINE_ATTEMPTS, pipeline.preempted(
+                        self._load_attempts(PIPELINE_ATTEMPTS), replaced))
                 self.requested_work = [r for r in self.requested_work
                                        if r.key not in taken] + fresh
                 # Under the lock too: queued_tasks is read-modify-written, so a press

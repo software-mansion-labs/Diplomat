@@ -581,8 +581,8 @@ extension Store {
     /// full, of an item it did not `read`); each it still owes, so its retry ladder and
     /// conclusion stand; each for the backoff ceiling after its last dispatch, so an effect
     /// a failed read left out is not taken for a new one when back; and a concluded one for
-    /// `pipelineConcludedKeep`, so a fix whose PR was closed unmerged is not asked for again.
-    /// Twin of `pipeline.retained`.
+    /// `pipelineConcludedKeep`, so a fix of its own whose PR was closed unmerged is not asked
+    /// for again. Twin of `pipeline.retained`.
     nonisolated static func retainedPipelineAttempts(_ attempts: [String: ReviewAttempt],
                                                      after result: PipelineTickResult,
                                                      handed: Set<String>? = nil,
@@ -650,13 +650,13 @@ extension Store {
         }.map(\.key)
     }
 
-    /// A monitor's run (its `ledgerKey`) answers that monitor, not the pipeline, whose runs
-    /// carry none.
+    /// Only a run the pipeline dispatched (`RunRecord.pipeline`) answers it: a monitor's,
+    /// another asker's or a wizard's answers its own.
     nonisolated static func pipelineConcluded(_ attempts: [String: ReviewAttempt],
                                               runs: [AgentState.RunRecord],
                                               at now: Date) -> [String: ReviewAttempt] {
         var out = attempts
-        for run in runs where run.ledgerKey.isEmpty {
+        for run in runs where run.pipeline {
             for key in pipelineOpenKeys(attempts, kind: run.kind, url: run.prURL) { out[key]?.concludedAt = now }
         }
         return out
@@ -669,6 +669,18 @@ extension Store {
         var out = attempts
         for key in pipelineOpenKeys(attempts, kind: job.kind, url: job.prURL ?? "") {
             out[key]?.lastDispatchedAt = now
+        }
+        return out
+    }
+
+    /// Sets the open record of each of the pipeline's `asks` another asker's took the place
+    /// of to no attempts, its stamp and date kept: the pipeline's next ask for it is its
+    /// first. Twin of `pipeline.preempted`.
+    nonisolated static func pipelinePreempted(_ attempts: [String: ReviewAttempt],
+                                              by asks: [RequestedWork]) -> [String: ReviewAttempt] {
+        var out = attempts
+        for ask in asks {
+            for key in pipelineOpenKeys(out, kind: ask.config.action, url: ask.url) { out[key]?.attempts = 0 }
         }
         return out
     }

@@ -69,6 +69,8 @@ struct PipelineState: Codable, Equatable {
     var takenOver: [String: PipelineKind] = [:]
     /// PRs the fast-track label could not be put on at their first rating.
     var untracked: [String] = []
+    /// PRs kept off the fast track at their first rating, and the hold saying why.
+    var keptOff: [String: String] = [:]
     /// Issues that would not split, or whose split stopped part-way, and why: not tried
     /// again unless forced.
     var unsplit: [String: String] = [:]
@@ -114,7 +116,7 @@ struct PipelineState: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case merging
         case labelsMade, decided, takenOver, untracked, unsplit, splitting, parts, rerated, cleared, synced, retry, syncs,
-             lineage, seen, holds, clean, asked, rateAsks, rateSeq, declined, notices
+             lineage, seen, holds, clean, asked, rateAsks, rateSeq, declined, notices, keptOff
     }
 
     /// A field missing is empty; one there but not of its type fails the whole file.
@@ -124,6 +126,7 @@ struct PipelineState: Codable, Equatable {
         decided = try c.decodeIfPresent([String].self, forKey: .decided) ?? []
         takenOver = try c.decodeIfPresent([String: PipelineKind].self, forKey: .takenOver) ?? [:]
         untracked = try c.decodeIfPresent([String].self, forKey: .untracked) ?? []
+        keptOff = try c.decodeIfPresent([String: String].self, forKey: .keptOff) ?? [:]
         unsplit = try c.decodeIfPresent([String: String].self, forKey: .unsplit) ?? [:]
         splitting = try c.decodeIfPresent([String: [String]].self, forKey: .splitting) ?? [:]
         parts = try c.decodeIfPresent([String: PipelineParts].self, forKey: .parts) ?? [:]
@@ -171,6 +174,7 @@ struct PipelineState: Codable, Equatable {
         func live(_ id: String) -> Bool { seen[id] != nil }
         decided.removeAll { !live($0) }
         untracked.removeAll { !live($0) }
+        keptOff = keptOff.filter { live($0.key) }
         unsplit = unsplit.filter { live($0.key) }
         splitting = splitting.filter { live($0.key) }
         parts = parts.filter { live($0.key) }
@@ -231,9 +235,15 @@ struct PipelineCachedRating: Codable, Equatable {
     /// What the rating leads to, its labels where mirrored and the fast-track label, waits for
     /// a sync that reads the item again.
     var pending: Bool?
-    /// A PR's first rating: none was kept for it before, and its timeline, read again before
-    /// what the rating leads to, showed no rating or fast-track label.
+    /// A PR's first rating, made while Fast track was on, with none kept for it before. It stays
+    /// `pending` until a sync that may write to the PR reads it again, as an unread or unwritable
+    /// PR only waits. Pushed to meanwhile, while Fast track is on and it wears no rating or
+    /// fast-track label, the PR is rated again at its new head, never lower, and that rating is its
+    /// first; else it is finished there. Applied, it can fast-track only a PR whose timeline shows
+    /// no rating or fast-track label, while Fast track is on.
     var first: Bool?
+    /// The head a PR was rated at.
+    var head: String?
 
     static func url(in dir: URL) -> URL { dir.appendingPathComponent("ratings.json") }
 

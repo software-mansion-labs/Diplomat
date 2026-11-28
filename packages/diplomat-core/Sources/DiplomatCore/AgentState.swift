@@ -292,6 +292,9 @@ public enum AgentState {
         /// spawned here. Such a run has no pid, tty or window here: the daemon says what
         /// became of it (`Evidence.network`).
         public var network: String?
+        /// Dispatched for one of the pipeline's own asks: only such a run answers the
+        /// pipeline's attempt records.
+        public var pipeline: Bool
 
         public init(runID: String, dispatchedAt: TimeInterval, prNumber: Int? = nil,
                     prURL: String = "", kind: String = "", label: String = "",
@@ -300,7 +303,7 @@ public enum AgentState {
                     quietDigest: String = "", quietSince: TimeInterval? = nil,
                     reapRefusedAt: TimeInterval? = nil,
                     untracked: Bool = false, released: Bool = false,
-                    network: String? = nil) {
+                    network: String? = nil, pipeline: Bool = false) {
             self.runID = runID
             self.dispatchedAt = dispatchedAt
             self.prNumber = prNumber
@@ -317,6 +320,7 @@ public enum AgentState {
             self.untracked = untracked
             self.released = released
             self.network = network
+            self.pipeline = pipeline
         }
 
         /// This run's `PRRef.itemKey`; nil for a run about no PR.

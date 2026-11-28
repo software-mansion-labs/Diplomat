@@ -68,6 +68,12 @@ def _records() -> list[A.RunRecord]:
                     kind="review", label="Auto · Review-req · #512 (@octocat)",
                     source=A.SOURCE_AUTO, ledger_key="review:github.com/o/r#512@f00d",
                     network="github.com/o/r#review:pr-512@octocat"),
+        # A run the pipeline dispatched. A side that dropped `pipeline` would read it back
+        # as another asker's, whose report concludes none of the pipeline's asks.
+        A.RunRecord(run_id="1786000006-eeeeeeee", dispatched_at=1786000006.0,
+                    pr_number=513, pr_url="https://github.com/o/r/pull/513",
+                    kind="review", label="Review · #513 · max", source=A.SOURCE_AUTO,
+                    pipeline=True),
     ]
 
 

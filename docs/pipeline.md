@@ -102,11 +102,12 @@ a Linear team was not read whole, no issue in the repo it maps to is fixed, spli
    `Fixes ENG-12` in its PR's description.
 2. The PR is rated on its own (**Rate issues and PRs**), from its text and diff, never below its
    [diff floor](#the-diff-floor). Every open PR of yours is rated, not only the ones Diplomat opened.
-3. Within its limit at its first rating (none was kept for it before, and its timeline showed no
-   rating or fast-track label) and closing only `candidate` issues (the fast track is for the fixes
-   the pipeline asks for), it is labelled `diplomat:fast-track` (**Fast-track my PRs**); a PR rated
-   while that is off, rated past its limit, or that the label could not be put on stays a person's,
-   the last with a hold saying so. A max-depth review run is queued for its head. It reviews the
+3. Within its limit at its first rating (none was kept for it before, or only one it was pushed
+   past, and its timeline showed no rating or fast-track label) and closing only `candidate` issues
+   (the fast track is for the fixes the pipeline asks for), it is labelled `diplomat:fast-track`
+   (**Fast-track my PRs**); a PR rated while that is off, rated past its limit, that the label could
+   not be put on, or that would also close an issue no read judged stays a person's, the last two
+   with a hold saying so. A max-depth review run is queued for its head. It reviews the
    PR and fixes what it finds on the branch until a full pass at the head finds nothing, LOW
    findings included, then posts one COMMENT review whose body begins
    `Clean at <head sha>`: the **clean marker**. A marker counts only on your own review, submitted
@@ -183,12 +184,16 @@ of the four slots meanwhile.
 
 Each answer is kept on this machine as it arrives, so it is not paid for again, and labels can only
 raise it; on an item with none kept, labels for both dimensions are its rating (two of one dimension:
-the higher). A rated item is not rated again but for the fast track's second rating or when you ask,
-and a new rating is the higher of the labels already there, the model's answer, the rating kept and
-the diff floor, a dimension at a time. One a sync could not apply holds a PR off the fast track,
-and an issue from its fix, until a later sync does, tried again 1, 2, 4 ... syncs later, unless a
-PR's diff at its head allows less: then it is dropped, and the PR is rated by its labels again, or
-rated anew without them.
+the higher). A rated item is not rated again but for the fast track's second rating, a first rating
+pushed past (below) or when you ask, and a new rating is the higher of the labels already there, the
+model's answer, the rating kept and the diff floor, a dimension at a time. One a sync could not
+apply holds a PR off the fast track, and an issue from its fix, until a later sync does, tried again
+1, 2, 4 ... syncs later, unless a PR's diff at its head allows less: then it is dropped, and the PR
+is rated by its labels again, or rated anew without them. A first rating waits while Diplomat may not
+write to the PR. A PR pushed to meanwhile has it finished at the new head, unless it is a first
+rating made while **Fast-track my PRs** was on, the switch is on still and the PR wears no rating or
+fast-track label: then the PR is rated again at the new head instead, never lower, and that is still
+its first rating.
 
 Where you [mirror](#settings) ratings, a finished one's labels are written at once, and a sync labels
 up to 10 more kept ratings an item does not wear yet (`pipeline.json` `labels.mirrorPerSync`), your
@@ -524,10 +529,11 @@ trackers' labels, this is what a sync needs:
   before each sync.
 - `linear-login.json` - the [Linear login](#linear): its tokens, and who it is.
 
-The fix and review asks' attempt records are the app's own (`pipelineAttempts`): a run that reported
-back (a PR, a clean marker or nothing) concludes its ask, which is not made again while syncs owe it,
-nor for 30 days after. On Linux a sync is `diplomat-core pipeline-tick`, the same core, stopped when
-the app quits.
+The fix and review asks' attempt records are the app's own (`pipelineAttempts`): a run of the
+pipeline's that reported back (a PR, a clean marker or nothing) concludes its ask, which is not made
+again while syncs owe it, nor for 30 days after. Another asker's run, or one started from a wizard,
+concludes none, so the pipeline still asks for its own. On Linux a sync is
+`diplomat-core pipeline-tick`, the same core, stopped when the app quits.
 
 `DIPLOMAT_PIPELINE_SECS` overrides the five-minute sync (60 seconds to a day),
 `DIPLOMAT_LINEAR_API` Linear's endpoint, and `DIPLOMAT_CLAUDE` and `DIPLOMAT_GH` the binaries.
