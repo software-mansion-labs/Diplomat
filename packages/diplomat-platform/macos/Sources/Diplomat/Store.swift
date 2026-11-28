@@ -4557,7 +4557,7 @@ final class Store: ObservableObject {
         var authorLogin: String?    // whose PR we'd be reviewing — the ban dimension (nil = none)
         /// Telemetry ledger identity ("" = not tracked).
         var ledgerKey: String = ""
-        var counter: AutoCounter?   // which auto-handled tally a monitor dispatch feeds
+        var counter: AutoCounter?   // which monitor, or the Pipeline, owns this job
         /// The stamp the monitor that owns this job records against the PR when an
         /// agent launches (`ReviewAttempt.requestedAt`) — the request timestamp for a
         /// review request, a constant for the two level-triggered reconcilers.
