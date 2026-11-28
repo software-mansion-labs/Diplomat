@@ -465,9 +465,10 @@ _RESOLVE_TTL = 60.0
 
 #: What the user's shell is asked, in one pass: where ``opencode`` is, and where its
 #: state lives. The second line is marked so an rc that prints can never be mistaken
-#: for it. Mirrored byte for byte by ``OpenCodeCLI`` in ``diplomat-core``.
+#: for it, and reads ``${XDG_STATE_HOME-}``, since a bare one aborts under an rc's
+#: ``nounset`` when unset. Mirrored byte for byte by ``OpenCodeCLI`` in ``diplomat-core``.
 _SHELL_PROBE = ("command -v opencode; "
-                "printf '\\n@@XDG_STATE_HOME=%s\\n' \"$XDG_STATE_HOME\"")
+                "printf '\\n@@XDG_STATE_HOME=%s\\n' \"${XDG_STATE_HOME-}\"")
 _STATE_MARKER = "@@XDG_STATE_HOME="
 #: OSC, DCS, APC, PM and SOS strings (ended by BEL or ST), and CSI sequences: a shell
 #: integration sourced by the rc prints them on the answer's own line.

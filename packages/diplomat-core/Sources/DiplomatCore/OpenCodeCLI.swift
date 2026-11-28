@@ -93,9 +93,10 @@ public enum OpenCodeCLI {
     }
 
     /// `$XDG_STATE_HOME` goes on a marked line after a newline, so it stands alone
-    /// whatever the rc printed.
+    /// whatever the rc printed, and as `${XDG_STATE_HOME-}`, since a bare one aborts under
+    /// an rc's `nounset` when unset.
     public static func resolverArguments(shell: String) -> [String] {
-        let probe = "command -v opencode; printf '\\n\(stateMarker)%s\\n' \"$XDG_STATE_HOME\""
+        let probe = "command -v opencode; printf '\\n\(stateMarker)%s\\n' \"${XDG_STATE_HOME-}\""
         return LoginShell.arguments(shell: shell, probe: probe)
     }
 
