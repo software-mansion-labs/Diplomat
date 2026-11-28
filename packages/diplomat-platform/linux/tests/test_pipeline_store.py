@@ -1478,7 +1478,7 @@ def _alive(pid: int) -> bool:
             return fh.read().split(") ")[-1][0] not in "ZX"
     except OSError:
         # No /proc: the kill answers.
-        return not os.path.isdir("/proc")
+        return not os.path.exists("/proc/self/stat")
 
 
 @pytest.mark.skipif(not os.path.exists("/proc/self/stat"), reason="reads the real /proc")
@@ -1499,8 +1499,9 @@ def test_a_core_reaped_while_it_is_read_is_dead():
             while _alive(child):
                 assert time.time() < deadline, "its zombie reads alive"
             parent.stdin.close()
-            while os.path.exists(f"/proc/{child}") and time.time() < deadline:
+            while os.path.exists(f"/proc/{child}"):
                 assert not _alive(child)
+                assert time.time() < deadline, "nothing reaped it"
 
 
 def test_stopping_the_sync_ends_its_core_and_what_the_core_started(pipe, tmp_path,
