@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { dockerCalls } from './lib/docker-calls.mjs';
 import { scratchDir } from './lib/scratch.mjs';
 
 const scratch = scratchDir('dn-image-');
@@ -22,7 +23,7 @@ const { createContainers, imageTag } = await import('../src/executor/container.j
 
 let checks = 0;
 const check = async (name, fn) => { await fn(); checks++; console.log(`PASS ${name}`); };
-const calls = (...first) => fs.readFileSync(path.join(fakeDir, 'calls.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+const calls = (...first) => dockerCalls(fakeDir)
   .filter((c) => first.every((word, i) => c[i] === word));
 const images = () => fs.readdirSync(path.join(fakeDir, 'images')).map(decodeURIComponent).sort();
 const stage = (name, text = '') => fs.writeFileSync(path.join(fakeDir, name), text);

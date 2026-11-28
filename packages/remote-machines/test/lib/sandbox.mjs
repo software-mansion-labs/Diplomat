@@ -32,6 +32,8 @@ export function sandbox({ hosts = {}, sshConfig = '', known = [], settings = {} 
     FAKE_SSH_LOG: file('ssh.log', ''),
     FAKE_SSH_FAILS: dir,
   };
+  // A probe may be writing its line while this reads: what follows the last newline is no probe yet.
+  const logged = () => fs.readFileSync(env.FAKE_SSH_LOG, 'utf8').split('\n').slice(0, -1).map((l) => JSON.parse(l));
   const kill = () => core.killDaemonsUnder(DAEMON_JS, 'RM_BASE_DIR', env.RM_BASE_DIR);
   core.onInterrupt(kill);
   return {
@@ -41,8 +43,8 @@ export function sandbox({ hosts = {}, sshConfig = '', known = [], settings = {} 
     // The next `n` probes of `target` fail as a name that does not resolve.
     failNext: (target, n) => fs.writeFileSync(path.join(dir, target), String(n)),
     // Each probe's ssh arguments; its target is the word before the remote command.
-    probes: () => fs.readFileSync(env.FAKE_SSH_LOG, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)),
-    probed: () => fs.readFileSync(env.FAKE_SSH_LOG, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l).at(-2)),
+    probes: logged,
+    probed: () => logged().map((args) => args.at(-2)),
     daemons: () => core.daemonsUnder(DAEMON_JS, 'RM_BASE_DIR', env.RM_BASE_DIR),
     cleanup: () => { kill(); fs.rmSync(dir, { recursive: true, force: true }); },
   };

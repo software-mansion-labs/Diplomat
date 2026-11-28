@@ -1,6 +1,7 @@
-// The stand-in docker's staged failures, which every executor and daemon test leans on:
-// a fail- file is taken a line a call, and one a test removes stays removed, even when a
-// call was reading it at that moment.
+// The stand-in docker's staged failures and its record of calls, which every executor and
+// daemon test leans on: a fail- file is taken a line a call, and one a test removes stays
+// removed, even when a call was reading it at that moment; a call still writing its line
+// of the record is no call yet.
 // Run: node test/executor-fake-docker.mjs
 
 import assert from 'node:assert/strict';
@@ -8,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { dockerCalls } from './lib/docker-calls.mjs';
 import { scratchDir } from './lib/scratch.mjs';
 
 const scratch = scratchDir('dn-fake-docker-');
@@ -67,6 +69,18 @@ try {
     assert.deepEqual(await call, { code: 1, stderr: `${LINE}\n` });
     assert.equal(fs.existsSync(fault), false);
     assert.deepEqual(await docker(['version']), { code: 0, stderr: '' });
+  });
+
+  await check('a call still writing its line of calls.jsonl is no call yet: the calls before it are read whole', async () => {
+    const calls = path.join(fakeDir, 'calls.jsonl');
+    const script = 'echo up\n'.repeat(100);
+    fs.rmSync(calls, { force: true });
+    await docker(['version']);
+    await docker(['exec', 'dn-x', '/bin/sh', '-c', script]);
+    assert.deepEqual(dockerCalls(fakeDir), [['version'], ['exec', 'dn-x', '/bin/sh', '-c', script]]);
+    // What a read sees while the second call's write is under way.
+    fs.truncateSync(calls, fs.statSync(calls).size - 100);
+    assert.deepEqual(dockerCalls(fakeDir), [['version']]);
   });
 
   console.log(`\nall ${checks} checks passed`);

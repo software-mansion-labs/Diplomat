@@ -26,7 +26,7 @@
 //   no-storage-opt   a container asked for with a size for its writable layer is refused
 //   held-<container> what a probe in that container's pid namespace prints, in place of
 //                    `held 0`; empty, the probe is killed before it prints
-// calls.jsonl records every invocation's arguments.
+// calls.jsonl records every invocation's arguments; docker-calls.mjs reads it.
 
 import fs from 'node:fs';
 import path from 'node:path';

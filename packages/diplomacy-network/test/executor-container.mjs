@@ -12,6 +12,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { dockerCalls } from './lib/docker-calls.mjs';
 import { scratchDir } from './lib/scratch.mjs';
 
 const scratch = scratchDir('dn-ctr-');
@@ -80,7 +81,7 @@ let checks = 0;
 const check = async (name, fn) => { await fn(); checks++; console.log(`PASS ${name}`); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-const calls = (command) => fs.readFileSync(path.join(fakeDir, 'calls.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => !command || a[0] === command);
+const calls = (command) => dockerCalls(fakeDir).filter((a) => !command || a[0] === command);
 const agent = (runId, what) => fs.readFileSync(path.join(agentDir, `${runId}.${what}`), 'utf8');
 // Long enough for a machine with every core taken many times over.
 const until = async (what, fn, ms = 120000) => { for (const end = Date.now() + ms; Date.now() < end;) { if (await fn()) return; await sleep(25); } assert.fail(`never: ${what}`); };
@@ -105,7 +106,8 @@ const child = (env, script) => {
     const { createContainers, containerName } = await import(${JSON.stringify(new URL('../src/executor/container.js', import.meta.url).href)});
     const paths = await import(${JSON.stringify(new URL('../src/paths.js', import.meta.url).href)});
     const fs = await import('node:fs');
-    const calls = () => fs.readFileSync(process.env.FAKE_DOCKER_DIR + '/calls.jsonl', 'utf8').split('\\n').filter(Boolean).map((l) => JSON.parse(l));
+    const { dockerCalls } = await import(${JSON.stringify(new URL('./lib/docker-calls.mjs', import.meta.url).href)});
+    const calls = () => dockerCalls(process.env.FAKE_DOCKER_DIR);
     ${script}`], { env: { ...process.env, DN_BASE_DIR: path.join(dir, 'base'), FAKE_DOCKER_DIR: path.join(dir, 'docker'), ...env }, encoding: 'utf8' });
   return JSON.parse(out);
 };

@@ -1,7 +1,8 @@
 // The probe: probe.sh run for real on this machine (the Darwin branch on a Mac, the
 // Linux one in CI), what describe() makes of each OS's fields, how ssh failures are
 // told apart, that a hung probe is cut off at its timeout, what makes a machine a poor
-// pick, and the load-since-last-scan estimate against a simulated kernel.
+// pick, the load-since-last-scan estimate against a simulated kernel, and that a probe
+// still writing its line of the fake ssh's log is no probe yet.
 // Run: node test/probe.mjs
 
 import assert from 'node:assert/strict';
@@ -211,6 +212,17 @@ try {
       assert.ok(Math.abs(est - truth) < 0.5, `round ${round}: estimated ${est}, truly ${truth.toFixed(2)}`);
     }
     assert.equal(meanLoadBetween(10, 0, 60), 0, 'never negative');
+  });
+
+  await check('a probe still writing its line of the fake ssh\'s log is no probe yet: the probes before it are read whole', async () => {
+    fs.writeFileSync(sb.env.FAKE_SSH_LOG, '');
+    await probe('odd', 'load');
+    await probe('odd', 'load');
+    const both = sb.probes();
+    assert.deepEqual([both.length, sb.probed()], [2, ['odd', 'odd']]);
+    // What a read sees while the second probe's write is under way.
+    fs.truncateSync(sb.env.FAKE_SSH_LOG, fs.statSync(sb.env.FAKE_SSH_LOG).size - 20);
+    assert.deepEqual([sb.probes(), sb.probed()], [both.slice(0, 1), ['odd']]);
   });
 
   console.log(`PROBE OK — ${checks} checks passed`);
