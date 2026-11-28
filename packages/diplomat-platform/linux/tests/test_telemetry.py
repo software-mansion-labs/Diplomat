@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 
 import pytest
+from PySide6.QtGui import QTextDocument
+from PySide6.QtWidgets import QApplication
 
 from diplomat_runtime import core, quota, telemetry, usagescan
 from test_opencode_v2 import quiet_shell
@@ -1512,13 +1514,22 @@ def test_a_logged_out_machine_never_rounds(credentials):
 # MARK: - docs/telemetry.md
 
 
-def test_the_telemetry_doc_lists_the_two_gatherers_it_counts():
-    doc = (Path(__file__).resolve().parents[4] / "docs" / "telemetry.md").read_text(encoding="utf-8")
-    head = "Two gatherers fill in what GitHub doesn't know:"
-    item = r" ?(?:[-*+]|\d+[.)])[ \t]"
-    # A blank line ends the list only before an unindented line that is not an item.
-    listed = re.split(rf"\n\n+(?!{item}|\s)", doc[doc.index(head) + len(head):], maxsplit=1)[0]
-    assert re.findall(rf"^{item}(?:\*\*(.+?)\*\*)?", listed, re.M) == ["Quota", "Token attribution"]
+@pytest.fixture
+def app():
+    return QApplication.instance() or QApplication([])
+
+
+def test_the_telemetry_doc_lists_the_two_gatherers_it_counts(app):
+    doc = QTextDocument()
+    doc.setMarkdown((Path(__file__).resolve().parents[4] / "docs" / "telemetry.md").read_text(encoding="utf-8"))
+    block = doc.find("Two gatherers fill in what GitHub doesn't know:").block().next()
+    labels = []
+    # An item's later paragraphs are indented blocks outside its list.
+    while block.textList() or block.blockFormat().indent():
+        if block.textList() and block.textList().format().indent() == 1:
+            labels.append(block.begin().fragment().text())
+        block = block.next()
+    assert labels == ["Quota", "Token attribution"]
 
 
 # MARK: - The assets README
