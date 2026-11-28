@@ -77,8 +77,11 @@ export function launcherScript(command, launcher) {
   return [
     '#!/bin/sh',
     `export PATH="\${PATH:+$PATH:}"${shq(process.env.PATH || '')}`,
+    // Only the environment's $SHELL: a bash /bin/sh fills an unset one in from passwd,
+    // and so does tmux for its panes unless it is exported.
+    'SHELL=$(printenv SHELL); export SHELL="${SHELL:-/bin/bash}"',
     ...(tmux ? [`[ -z "$TMUX" ] && exec ${shq(tmux)} -L ${shq(session)} new-session -s ${shq(session)} ${shq(`/bin/sh ${shq(launcher)}`)} \\; set-option destroy-unattached on`] : []),
-    `"\${SHELL:-/bin/bash}" -i -c ${shq(command)}`,
+    `"$SHELL" -i -c ${shq(command)}`,
     "printf '\\n[repair agent exited - press Enter to close] '",
     'read _',
     '',
