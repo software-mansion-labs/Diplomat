@@ -976,7 +976,7 @@ class AgentJob:
     everything that HAPPENS - ban check, in-flight dedup, spawn, registration,
     counters. Twin of Store.AgentJob on macOS."""
 
-    kind: str  # activity tint: "review" | "issues" | "conflicts" | "audit"
+    kind: str  # "review" | "issues" | "conflicts" | "audit" | "investigate" | "rate"
     audit_action: str  # activity-feed verb
     label: str  # label core (source prefix / retry suffix added by dispatch_label)
     prompt: str
