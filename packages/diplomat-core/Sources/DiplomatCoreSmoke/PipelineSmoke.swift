@@ -100,6 +100,15 @@ private final class Trackers {
         var mergeQueue: Bool? = false
         /// The commits its base has that its head lacks; nil: GitHub could not compare them.
         var behind: Int? = 0
+        /// The files its base changed since it branched off, and those its own change renamed,
+        /// by new path. Its files' blobs are its head's, or for a head merging the base made,
+        /// those of the head it was made from (`sameAs`).
+        var baseTouched: [String] = []
+        var renamed: [String: String] = [:]
+        var sameAs: [String: String] = [:]
+        /// Per head, its files' modes past 100644, and files its diff changes past `files`.
+        var modes: [String: [String: String]] = [:]
+        var extraFiles: [String: [String]] = [:]
         var assignees: [String] = []
         var decision: String?
         /// The commit CI was read for, when the index lags behind the head.
@@ -183,6 +192,16 @@ private final class Trackers {
     var mergedAt: String?
     /// `gh pr merge` exits 0 having merged nothing.
     var mergeIgnored = false
+    /// Why GitHub refuses to merge a PR's base into it; and the compares of its files fail,
+    /// or list as many as GitHub's most.
+    var updateRefused: String?
+    var compareFails = false
+    var compareFull = false
+    var updates = 0
+    /// GitHub takes the update but has not made its merge by the next read; and cuts a PR's
+    /// trees short.
+    var updateLags = false
+    var treeCut = false
     /// A PR's diff at any head it had, by number, where it is not a one-line fix; at one head,
     /// by its sha.
     var diffs: [Int: String] = [:]
@@ -429,6 +448,42 @@ private final class Trackers {
             writes.append("merge #\(n) \(mergeFlag) \(prs[i].head)")
             return mergeUnconfirmed ? failed("Post https://api.github.com/graphql: net/http: timeout") : ok()
         }
+        if args.count == 2, args[0] == "api", args[1].hasPrefix("repos/acme/app/compare/"), args[1].hasSuffix("?per_page=1") {
+            if compareFails { return failed("Server Error (HTTP 500)") }
+            let range = args[1].dropFirst("repos/acme/app/compare/".count).dropLast("?per_page=1".count)
+                .components(separatedBy: "...")
+            guard range.count == 2 else { return failed("Not Found (HTTP 404)") }
+            func pr(_ head: String) -> PR? { prs.first { $0.head == head || $0.heads.contains(head) } }
+            var files: [[String: Any]]
+            if let p = pr(range[1]), range[0].removingPercentEncoding == p.base {
+                var at = range[1]
+                while let from = p.sameAs[at] { at = from }
+                files = p.files.map { f in
+                    var out: [String: Any] = ["filename": f.path, "status": f.type.lowercased(), "sha": "\(f.path)@\(at)"]
+                    if let old = p.renamed[f.path] { out["previous_filename"] = old }
+                    return out
+                } + (p.extraFiles[range[1]] ?? []).map { ["filename": $0, "status": "added", "sha": "\($0)@\(range[1])"] }
+            } else if let p = pr(range[0]), range[1].removingPercentEncoding == p.base {
+                files = p.baseTouched.map { ["filename": $0, "status": "modified", "sha": "\($0)@\(p.base)"] }
+            } else {
+                return failed("Not Found (HTTP 404)")
+            }
+            if compareFull { files = (0..<300).map { ["filename": "gen/\($0).swift", "status": "added", "sha": "g\($0)"] } }
+            return ok(["status": "ahead", "files": files])
+        }
+        if args.count == 2, args[0] == "api", args[1].hasPrefix("repos/acme/app/git/trees/"),
+           args[1].hasSuffix("?recursive=1") {
+            let head = String(args[1].dropFirst("repos/acme/app/git/trees/".count).dropLast("?recursive=1".count))
+            guard let p = prs.first(where: { $0.head == head || $0.heads.contains(head) }) else {
+                return failed("Not Found (HTTP 404)")
+            }
+            var at = head
+            while let from = p.sameAs[at] { at = from }
+            let tree = p.files.filter { $0.type != "REMOVED" }.map { f -> [String: Any] in
+                ["path": f.path, "mode": p.modes[head]?[f.path] ?? "100644", "type": "blob", "sha": "\(f.path)@\(at)"]
+            }
+            return ok(["sha": head, "truncated": treeCut, "tree": tree])
+        }
         guard args.count >= 4, args[0] == "api", args[1] == "-X" else { return failed("unexpected call \(args)") }
         let method = args[2], path = args[3].split(separator: "/").map(String.init)
         guard path.count >= 4, path[0] == "repos", path[1] == "acme", path[2] == "app" else {
@@ -486,6 +541,25 @@ private final class Trackers {
             guard had else { return failed("Label does not exist (HTTP 404)") }
             writes.append("-\(name) #\(n)")
             return ok()
+        case ("PUT", let rest) where rest.count == 3 && rest[0] == "pulls" && rest[2] == "update-branch":
+            guard let n = number(rest[1]), let i = prs.firstIndex(where: { $0.number == n }) else {
+                return failed("Not Found (HTTP 404)")
+            }
+            if let why = updateRefused { return failed(why) }
+            guard field("expected_head_sha") == prs[i].head else {
+                return failed("expected head sha didn't match current head ref. (HTTP 422)")
+            }
+            updates += 1
+            let made = sha("5\(updates)")
+            writes.append("update #\(n) \(prs[i].head)")
+            if updateLags { return ok(["message": "Updating pull request branch.", "url": prURL(n)]) }
+            prs[i].sameAs[made] = prs[i].head
+            prs[i].head = made
+            prs[i].behind = 0
+            if prs[i].mergeState == "BEHIND" { prs[i].mergeState = "CLEAN" }
+            prs[i].commits.append((opLogin, "web-flow"))
+            prs[i].ciState = "PENDING"
+            return ok(["message": "Updating pull request branch.", "url": prURL(n)])
         default:
             return failed("unexpected call \(args)")
         }
@@ -2489,6 +2563,187 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     try pipelineGatePass1(base: base, root: root, team: team, t0: t0)
     try pipelineClearsAndMerges(base: base, root: root, t0: t0)
     try pipelineTakeover(base: base, root: root, team: team, t0: t0)
+    try pipelineBaseSync(base: base, root: root, t0: t0)
+}
+
+/// A cleared PR behind its base has the base merged into it, stays cleared at the head that
+/// makes only while its change is the one cleared, and merges once CI passes there.
+private func pipelineBaseSync(base: URL, root: PipelineSettings.Root, t0: Date) throws {
+    section("pipeline base sync")
+    func dir(_ name: String) -> URL { base.appendingPathComponent("base-sync-" + name) }
+    func later(_ minutes: Double) -> Date { t0.addingTimeInterval(minutes * 60) }
+    let both = PipelineSettings(roots: [root], fastTrack: true, merge: true)
+    /// #13, a draft cleared at c3 and 2 behind main, through its first sync.
+    func behind(_ name: String, _ settings: PipelineSettings = both,
+                _ change: (Trackers) -> Void = { _ in }) throws -> (Trackers, Synced) {
+        let t = only([13, 27])
+        t.prs[0].behind = 2
+        t.prs[0].draft = true
+        change(t)
+        try seedRerate(dir(name), 13, sha("c3"), at: later(-60))
+        return (t, sync(t, settings, dir(name), t0))
+    }
+    func details(_ s: Synced) -> [String] { s.events.map { "\($0.kind.rawValue): \($0.detail)" } }
+    let c3 = String(sha("c3").prefix(7)), m1 = String(sha("51").prefix(7)), m2 = String(sha("52").prefix(7))
+    let asked = "cleared/fast (is behind its base branch; GitHub was asked to merge main into it)"
+
+    let (t, s1) = try behind("draft")
+    check(s1.writes == ["update #13 \(sha("c3"))"] && s1.claude.isEmpty && s1.result.effects.isEmpty
+          && stageOf(s1.result, prURL(13)) == asked
+          && details(s1).contains("asked: asked GitHub to merge main into it at \(c3)"),
+          "behind: \(s1.writes) \(stageOf(s1.result, prURL(13))) \(details(s1))")
+    let s2 = sync(t, both, dir("draft"), later(5))
+    check(s2.writes.isEmpty && s2.claude.isEmpty && s2.result.effects.isEmpty
+          && stageOf(s2.result, prURL(13)) == "cleared/fast (CI still running)"
+          && details(s2).contains("cleared: cleared at \(m1): its change against main is the one cleared at \(c3)")
+          && item(s2.result, prURL(13))?.cleanAt == sha("c3"),
+          "main merged in: \(s2.writes) \(s2.result.effects) \(stageOf(s2.result, prURL(13))) \(details(s2))")
+    t.prs[0].ciState = "SUCCESS"
+    let s3 = sync(t, both, dir("draft"), later(10))
+    let s4 = sync(t, both, dir("draft"), later(15))
+    check(s3.writes == ["ready #13"] && s4.writes == ["merge #13 --squash \(sha("51"))"] && s4.claude.isEmpty,
+          "CI passed where main was merged in: \(s3.writes) \(s4.writes)")
+    let compares = t.ghCalls.filter { $0.count == 2 && $0[1].contains("/compare/") }
+    check(compares == [["api", "repos/acme/app/compare/main...\(sha("51"))?per_page=1"],
+                       ["api", "repos/acme/app/compare/main...\(sha("c3"))?per_page=1"],
+                       ["api", "repos/acme/app/compare/\(sha("c3"))...main?per_page=1"]],
+          "one proof, at the head it carried the clear to: \(compares)")
+    let trees = t.ghCalls.filter { $0.count == 2 && $0[1].contains("/git/trees/") }
+    check(trees == [["api", "repos/acme/app/git/trees/\(sha("51"))?recursive=1"],
+                    ["api", "repos/acme/app/git/trees/\(sha("c3"))?recursive=1"]],
+          "its files' modes read at both heads: \(trees)")
+
+    // Main moving on once more: merged in again, the clear carried again from the head cleared.
+    let (again, _) = try behind("again") { $0.prs[0].draft = false }
+    _ = sync(again, both, dir("again"), later(5))
+    again.prs[0].ciState = "SUCCESS"
+    again.prs[0].behind = 1
+    let a3 = sync(again, both, dir("again"), later(10))
+    let a4 = sync(again, both, dir("again"), later(15))
+    again.prs[0].ciState = "SUCCESS"
+    let a5 = sync(again, both, dir("again"), later(20))
+    check(a3.writes == ["update #13 \(sha("51"))"]
+          && details(a4).contains("cleared: cleared at \(m2): its change against main is the one cleared at \(c3)")
+          && a5.writes == ["merge #13 --squash \(sha("52"))"],
+          "behind again: \(a3.writes) \(details(a4)) \(a5.writes)")
+
+    // GitHub taking the update but not making it by the next sync: asked again, logged once.
+    let (lagging, g1) = try behind("lagging") { $0.updateLags = true }
+    let g2 = sync(lagging, both, dir("lagging"), later(5))
+    check(g1.writes == ["update #13 \(sha("c3"))"] && g2.writes == g1.writes && stageOf(g2.result, prURL(13)) == asked
+          && !details(g2).contains { $0.hasPrefix("asked:") }, "lagging: \(g2.writes) \(details(g2))")
+
+    // Nothing merged in while something else would hold it up to date: CI still running at the
+    // head merging main made, on a base that reads BEHIND; a required check that never reported.
+    let (strict, _) = try behind("strict") { $0.prs[0].draft = false }
+    _ = sync(strict, both, dir("strict"), later(5))
+    (strict.prs[0].mergeState, strict.prs[0].behind) = ("BEHIND", 1)
+    let st3 = sync(strict, both, dir("strict"), later(10))
+    strict.prs[0].ciState = "SUCCESS"
+    let st4 = sync(strict, both, dir("strict"), later(15))
+    check(st3.writes.isEmpty && stageOf(st3.result, prURL(13)) == "cleared/fast (is behind its base branch; CI still running)"
+          && st4.writes == ["update #13 \(sha("51"))"], "CI running where main was merged in: \(st3.writes) \(st4.writes)")
+    let (_, rq) = try behind("required") { ($0.prs[0].draft, $0.requiredByRuleset) = (false, ["build"]) }
+    check(rq.writes.isEmpty && stageOf(rq.result, prURL(13))
+          == "cleared/fast (is behind its base branch; the required check build has not passed)",
+          "a required check missing: \(rq.writes) \(stageOf(rq.result, prURL(13)))")
+
+    // Taken over at the head merging main made: still cleared there.
+    let (taken, _) = try behind("taken") { $0.prs[0].draft = false }
+    _ = sync(taken, both, dir("taken"), later(5))
+    var takeover = both
+    takeover.force = .init(takeover: [prURL(13)])
+    let k3 = sync(taken, takeover, dir("taken"), later(10))
+    taken.prs[0].ciState = "SUCCESS"
+    let k4 = sync(taken, both, dir("taken"), later(15))
+    check(k3.writes.isEmpty && stageOf(k3.result, prURL(13)) == "cleared/fast (CI still running)"
+          && k4.writes == ["merge #13 --squash \(sha("51"))"], "taken over: \(k3.writes) \(details(k3)) \(k4.writes)")
+
+    // Fast track off, Merge off, or GitHub refusing: nothing is merged into it.
+    let (_, ft) = try behind("merge-only", PipelineSettings(roots: [root], merge: true))
+    check(ft.writes.isEmpty && stageOf(ft.result, prURL(13)) == "cleared/fast (is behind its base branch)",
+          "Fast track off: \(ft.writes) \(stageOf(ft.result, prURL(13)))")
+    let (pushedOff, _) = try behind("pushed-off", PipelineSettings(roots: [root], merge: true))
+    pushedOff.prs[0].head = sha("e9")
+    let calls = pushedOff.ghCalls.count
+    _ = sync(pushedOff, PipelineSettings(roots: [root], merge: true), dir("pushed-off"), later(5))
+    check(!pushedOff.ghCalls[calls...].contains { $0.count == 2 && $0[1].contains("/compare/") },
+          "Fast track off, a push compared: \(Array(pushedOff.ghCalls[calls...]))")
+    let (_, off) = try behind("merge-off", PipelineSettings(roots: [root], fastTrack: true))
+    check(off.writes.isEmpty, "Merge off: \(off.writes)")
+    let (refused, r1) = try behind("refused") { $0.updateRefused = "Validation Failed (HTTP 422)" }
+    check(r1.writes.isEmpty && refused.prs[0].head == sha("c3")
+          && r1.result.notices.contains("#13 was not brought up to date with main: gh: Validation Failed (HTTP 422)")
+          && stageOf(r1.result, prURL(13)) == "cleared/fast (is behind its base branch)",
+          "refused: \(r1.writes) \(r1.result.notices) \(stageOf(r1.result, prURL(13)))")
+
+    // Nor into one the read right before finds Diplomat may not write to or merge.
+    let lateHolds: [(String, (Trackers) -> Void, String)] = [
+        ("assigned", { t in t.onReread = { _ in t.prs[0].assignees = ["bob"] } }, "assigned to @bob"),
+        ("no-method", { t in t.onReread = { _ in (t.ruleTypes, t.allowedMethods) = (["PULL_REQUEST"], []) } },
+         "the rules on its base branch allow none of the merge methods its repository allows"),
+    ]
+    for (name, change, why) in lateHolds {
+        let (_, s) = try behind("late-" + name, both, change)
+        check(s.writes.isEmpty && stageOf(s.result, prURL(13)) == "cleared/fast (is behind its base branch; \(why))",
+              "\(name) at the read before the merge: \(s.writes) \(stageOf(s.result, prURL(13)))")
+    }
+
+    // A clean marker gone since: the head merging main made is no clean head.
+    let (unmarked, _) = try behind("unmarked")
+    unmarked.prs[0].reviews = []
+    let u2 = sync(unmarked, both, dir("unmarked"), later(5))
+    check(u2.writes == ["-diplomat:cleared #13"] && u2.result.effects == [reviewFX(13, sha("51"))]
+          && details(u2) == ["labelled: -diplomat:cleared: no clean marker names its head \(m1)",
+                             "asked: asked for a fast-track review at \(m1)"],
+          "its marker gone: \(u2.writes) \(details(u2))")
+
+    // Its change not the one cleared: back to a review of the head merging main made.
+    let refusals: [(String, (Trackers) -> Void, String)] = [
+        ("touched", { $0.prs[0].baseTouched = ["README.md", "src/a.swift"] },
+         "main changed src/a.swift, which it changes too, since \(c3)"),
+        ("renamed", { $0.prs[0].renamed = ["src/a.swift": "src/old.swift"]; $0.prs[0].baseTouched = ["src/old.swift"] },
+         "main changed src/old.swift, which it changes too, since \(c3)"),
+        ("pushed", { _ in }, "its change against main is not the one cleared at \(c3)"),
+        ("unreadable", { $0.compareFails = true }, "its diff against main could not be read whole"),
+        ("too-many", { $0.compareFull = true }, "its diff against main could not be read whole"),
+        ("mode", { $0.prs[0].modes[sha("51")] = ["src/a.swift": "100755"] },
+         "its change against main is not the one cleared at \(c3)"),
+        ("tree-cut", { $0.treeCut = true }, "its diff against main could not be read whole"),
+        ("extra-file", { $0.prs[0].extraFiles[sha("51")] = ["src/z.swift"] },
+         "its change against main is not the one cleared at \(c3)"),
+    ]
+    for (name, change, why) in refusals {
+        let (t, _) = try behind(name, both, change)
+        // A push over the head merging main made, by hand.
+        if name == "pushed" { t.prs[0].head = sha("e9") }
+        let head = t.prs[0].head
+        let s = sync(t, both, dir(name), later(5))
+        check(!merged(s) && s.writes == ["-diplomat:cleared #13"]
+              && details(s).contains("labelled: -diplomat:cleared: the head moved to \(head.prefix(7)), past its clean marker: \(why)")
+              && s.result.effects == [reviewFX(13, head)],
+              "\(name): \(s.writes) \(details(s)) \(s.result.effects)")
+    }
+
+    // Diplomat taking the clear off a head carrying none, then the head back where it was
+    // carried: reviewed there, not a person's.
+    let (back, _) = try behind("back") { $0.prs[0].draft = false }
+    _ = sync(back, both, dir("back"), later(5))
+    back.prs[0].head = sha("e9")
+    _ = sync(back, both, dir("back"), later(10))
+    back.prs[0].head = sha("51")
+    let b4 = sync(back, both, dir("back"), later(15))
+    check(b4.writes.isEmpty && b4.result.effects == [reviewFX(13, sha("51"))]
+          && stageOf(b4.result, prURL(13)) == "fast-track/fast", "pushed back: \(b4.writes) \(details(b4)) \(b4.result.effects)")
+
+    // A lost state.json forgets the carried clear: the head is reviewed again, not a person's.
+    let (lost, _) = try behind("lost") { $0.prs[0].draft = false }
+    _ = sync(lost, both, dir("lost"), later(5))
+    try FileManager.default.removeItem(at: dir("lost").appendingPathComponent("state.json"))
+    lost.prs[0].ciState = "SUCCESS"
+    let l3 = sync(lost, both, dir("lost"), later(10))
+    check(!merged(l3) && l3.writes == ["-diplomat:cleared #13"] && l3.result.effects == [reviewFX(13, sha("51"))],
+          "state.json lost: \(l3.writes) \(l3.result.effects)")
 }
 
 /// Each part a split files is one its own answer named, and a link to its parent makes a
@@ -2991,19 +3246,22 @@ private func pipelineGatePass1(base: URL, root: PipelineSettings.Root, team: Pip
     check(!creators.isEmpty && creators.allSatisfy { $0.prefix { $0 != "}" }.contains("displayName") },
           "every Linear issue read asks for its creator's display name")
 
-    // GitHub says BEHIND only of a base that requires branches to be up to date.
-    let behind: [(String, String, Int?, String)] = [
-        ("behind", "CLEAN", 2, "is behind its base branch"),
-        ("behind-blocked", "BLOCKED", 2, "is behind its base branch"),
-        ("uncompared", "CLEAN", nil, "could not be compared with its base branch"),
+    // GitHub says BEHIND only of a base that requires branches to be up to date. Behind,
+    // its base is merged into it at the head read.
+    let asked = "is behind its base branch; GitHub was asked to merge main into it"
+    let behind: [(String, String, Int?, String, [String])] = [
+        ("behind", "CLEAN", 2, asked, ["update #13 \(sha("c3"))"]),
+        ("behind-blocked", "BLOCKED", 2, asked, ["update #13 \(sha("c3"))"]),
+        ("behind-strict", "BEHIND", 2, asked, ["update #13 \(sha("c3"))"]),
+        ("uncompared", "CLEAN", nil, "could not be compared with its base branch", []),
     ]
-    for (name, state, commits, hold) in behind {
+    for (name, state, commits, hold, writes) in behind {
         let t = only([13, 27])
         t.prs[0].mergeState = state
         t.prs[0].behind = commits
         try seedRerate(dir(name), 13, sha("c3"), at: t0.addingTimeInterval(-3600))
-        let s = sync(t, PipelineSettings(roots: [root], merge: true), dir(name), t0)
-        check(!merged(s) && stageOf(s.result, prURL(13)) == "cleared/fast (\(hold))",
+        let s = sync(t, PipelineSettings(roots: [root], fastTrack: true, merge: true), dir(name), t0)
+        check(s.writes == writes && stageOf(s.result, prURL(13)) == "cleared/fast (\(hold))",
               "#13 \(state), \(commits.map(String.init) ?? "not compared") behind its base: \(s.writes) \(stageOf(s.result, prURL(13)))")
     }
 

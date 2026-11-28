@@ -111,7 +111,8 @@ enum PipelineTest {
         check("Merge cleared PRs points at every hold rather than listing some",
               SettingsView.pipelineMergeDetail.hasPrefix(
                   "A cleared PR is merged only when none of the holds in docs/pipeline.md applies "
-                      + "to it, checked again right before the merge."))
+                      + "to it, checked again right before the merge. With Fast-track my PRs on, one "
+                      + "behind its base has the base merged into it first."))
         let settingsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: MainRoot.width, height: 800),
                                       styleMask: [.titled], backing: .buffered, defer: true)
         settingsWindow.isReleasedWhenClosed = false
@@ -650,12 +651,22 @@ enum PipelineTest {
                   && feed("pipeline-recovered").count == recoveries + 1
                   && feed("pipeline-recovered").last == "auto Pipeline syncing again")
         ticks = []
+        var waitDuring: TimeInterval?
+        Store.pipelineTickOverride = { settings in
+            ticks.append(settings)
+            waitDuring = store.pipelineSyncWait
+            return result([])
+        }
         store.startPipelineMonitor()
         store.pipelineTimedSyncEnded = Date().addingTimeInterval(-Store.pipelineSyncInterval)
         NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
-        for _ in 0..<250 where store.pipelineSyncWait <= 0 { try? await Task.sleep(nanoseconds: 20_000_000) }
+        for _ in 0..<250 where ticks.isEmpty || store.pipelineSyncing {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
         check("a wake an interval after the last timed sync syncs at once, the loop's next an interval on",
               ticks.count == 1 && store.pipelineSyncWait > Store.pipelineSyncInterval - 5)
+        check("…and while it runs the loop waits rather than syncing again",
+              waitDuring.map { $0 > Store.pipelineSyncInterval - 5 } == true)
         NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
         try? await Task.sleep(nanoseconds: 500_000_000)
         check("…one sooner syncs nothing", ticks.count == 1)

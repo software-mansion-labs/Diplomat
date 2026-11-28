@@ -123,9 +123,10 @@ _GH_CALLS_PER_MIRROR = 9
 #: the fast-track labels' removal; and a PR's clear in the same sync, as `cleared`'s.
 _GH_CALLS_PER_TAKEOVER = 6
 #: A root's merges: each PR read twice before ``gh pr merge`` (once without Linear) and
-#: once after.
+#: once after, and the three compares and two trees that keep it cleared past its base merged
+#: into it.
 _MERGES_PER_ROOT = 3
-_GH_CALLS_PER_MERGE = 4
+_GH_CALLS_PER_MERGE = 9
 #: Linear's reads (300 issues, paged), its label and child writes, and the re-read of
 #: their candidates: 3 calls of 100 at ``httpTimeoutSecs``; and the login's refresh.
 _LINEAR_SECS = 300 + 4 * 30

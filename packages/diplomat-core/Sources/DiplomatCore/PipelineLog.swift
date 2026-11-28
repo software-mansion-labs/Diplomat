@@ -80,6 +80,9 @@ struct PipelineState: Codable, Equatable {
     var rerated: [String: [String: PipelineRating]] = [:]
     /// Per PR, the head Diplomat put `cleared` on at, until Diplomat takes it off.
     var cleared: [String: String] = [:]
+    /// Per PR, each head it moved to whose change is, file for file, the one cleared at another,
+    /// and that other head: it carries that clear.
+    var synced: [String: [String: String]] = [:]
     /// Per PR, the merge asked of gh, until a read after it tells how it ended, or for
     /// `forgetDays`.
     var merging: [String: PipelineMerge] = [:]
@@ -110,7 +113,7 @@ struct PipelineState: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case merging
-        case labelsMade, decided, takenOver, untracked, unsplit, splitting, parts, rerated, cleared, retry, syncs,
+        case labelsMade, decided, takenOver, untracked, unsplit, splitting, parts, rerated, cleared, synced, retry, syncs,
              lineage, seen, holds, clean, asked, rateAsks, rateSeq, declined, notices
     }
 
@@ -126,6 +129,7 @@ struct PipelineState: Codable, Equatable {
         parts = try c.decodeIfPresent([String: PipelineParts].self, forKey: .parts) ?? [:]
         rerated = try c.decodeIfPresent([String: [String: PipelineRating]].self, forKey: .rerated) ?? [:]
         cleared = try c.decodeIfPresent([String: String].self, forKey: .cleared) ?? [:]
+        synced = try c.decodeIfPresent([String: [String: String]].self, forKey: .synced) ?? [:]
         merging = try c.decodeIfPresent([String: PipelineMerge].self, forKey: .merging) ?? [:]
         retry = try c.decodeIfPresent([String: PipelineRetry].self, forKey: .retry) ?? [:]
         syncs = try c.decodeIfPresent(Int.self, forKey: .syncs) ?? 0
@@ -172,6 +176,7 @@ struct PipelineState: Codable, Equatable {
         parts = parts.filter { live($0.key) }
         rerated = rerated.filter { live($0.key) }
         cleared = cleared.filter { live($0.key) }
+        synced = synced.filter { live($0.key) }
         merging = merging.filter { $0.value.at >= cutoff }
         retry = retry.filter { live($0.key) }
         lineage = lineage.filter { live($0.key) }
