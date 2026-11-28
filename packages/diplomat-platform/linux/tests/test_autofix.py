@@ -1171,7 +1171,7 @@ def test_allowlist_speaks_only_for_the_review_monitors_finds(store, monkeypatch)
 
 
 def test_agent_job_counter_comment_names_the_pipeline_on_both_platforms():
-    """The monitors' and the Pipeline's, which no monitor sets and no tally counts."""
+    """The Pipeline's counter is no monitor's and feeds no tally."""
     from diplomat_app import store as linux_store
 
     setters = set(re.findall(r'\bcounter="(\w+)"', inspect.getsource(linux_store)))
