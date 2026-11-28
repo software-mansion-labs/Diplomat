@@ -165,3 +165,4 @@ def test_the_audit_comment_names_every_block_a_toggle_gates():
     assert carried(fix_issues=True) ^ base == issues
     assert with_prs - base == prs
     assert base - with_prs == read_only
+    assert carried(fix_issues=True, open_prs=True) == with_prs | issues
