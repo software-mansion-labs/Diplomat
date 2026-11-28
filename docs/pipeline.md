@@ -185,8 +185,8 @@ and a new rating is the higher of the labels already there, the model's answer, 
 the diff floor, a dimension at a time. One a sync could not apply holds a PR off the fast track,
 and an issue from its fix, until a later sync does, tried again 1, 2, 4 ... syncs later, unless a
 PR's diff at its head allows less: then it is dropped, and the PR is rated by its labels again, or
-rated anew without them. A PR pushed to before its rating is applied is rated again at the new head,
-never lower, and at its first rating only if the rating it replaces was.
+rated anew without them. A PR pushed to before its first rating is applied is rated again at the new
+head instead, never lower, and that is still its first rating.
 
 Where you [mirror](#settings) ratings, a finished one's labels are written at once, and a sync labels
 up to 10 more kept ratings an item does not wear yet (`pipeline.json` `labels.mirrorPerSync`), your

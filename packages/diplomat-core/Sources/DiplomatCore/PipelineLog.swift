@@ -216,9 +216,9 @@ struct PipelineCachedRating: Codable, Equatable {
     /// What the rating leads to, its labels where mirrored and the fast-track label, waits for
     /// a sync that reads the item again.
     var pending: Bool?
-    /// A PR's first rating, made while Fast track was on: none was kept for it before but a first
-    /// one still pending, and its timeline, read again before what the rating leads to, showed no
-    /// rating or fast-track label.
+    /// A PR's first rating, made while Fast track was on: none was kept for it before, or only a
+    /// first one pending at a head it has left, and its timeline, read again before what the
+    /// rating leads to, showed no rating or fast-track label.
     var first: Bool?
     /// The head a PR was rated at.
     var head: String?
