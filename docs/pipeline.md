@@ -173,7 +173,8 @@ to 20,000), are on its stdin, fenced as untrusted data.
 
 A sync asks for ratings until four wait past the ones you asked for with **Rate now**, in this
 order, newest first within each: your fast-track PRs clean at their head and awaiting the second
-rating, your unrated open PRs, unrated issues Diplomat may write to, other unrated issues. An issue
+rating, your unrated open PRs and those to be rated again, unrated issues Diplomat may write to,
+other unrated issues. An issue
 already split or being fixed is not rated, nor is a Linear issue whose team has no repo root. Until
 its answer is applied, an item is neither fixed nor merged. An ask its item has moved past (a PR
 pushed to, an item labelled or closed meanwhile) is dropped, its answer unread, and a PR asked about

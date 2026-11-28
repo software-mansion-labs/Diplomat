@@ -6820,8 +6820,8 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
         check(t.claudeCalls.count == 2 && rt.writes == tracked && rt.result.effects == [reviewFX(11, sha("a1"))],
               "rated while stacked, answered \(answered), then retargeted: \(t.claudeCalls.count) \(rt.writes)")
     }
-    // Its first rating pushed past, rated again medium/low, the answer applied once Fast track is
-    // off: labelled as rated at the new head.
+    // Its first rating pushed past and rated again medium/low, the answer in once Fast track is off:
+    // finished at the new head, the answer unread.
     let paid = fix(), pd = dir("rerated-switched-off")
     applying(paid) { $0.prs[0].head = sha("a2") }
     _ = sync(paid, rateTrack, pd, t0)
@@ -6830,9 +6830,9 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
         _ = PipelineRateJob.run(item: url, stamp: stamp, dir: pd, io: paid.io())
     }
     let po = sync(paid, rateOnly, pd, later(10))
-    check(paid.claudeCalls.count == 2 && po.writes == ["label risk:medium exists", "+risk:medium #11", "+complexity:low #11"]
+    check(paid.claudeCalls.count == 2 && po.writes == ["+risk:low #11", "+complexity:low #11"]
           && po.result.effects.isEmpty && stageOf(po.result, prURL(11)) == "human/human",
-          "rated again, applied with Fast track off: \(paid.claudeCalls.count) \(po.writes) \(stageOf(po.result, prURL(11)))")
+          "rated again, answered with Fast track off: \(paid.claudeCalls.count) \(po.writes) \(stageOf(po.result, prURL(11)))")
     // Its first rating pushed past on a PR that could not be fast-tracked for what it closes:
     // finished at the new head, with no new rating.
     let unjudged = "off the fast track until taken over: at its first rating it would close "
@@ -6853,18 +6853,74 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
               && stageOf(nc.result, prURL(11)) == stage,
               "pushed past, closing \(what): \(t.claudeCalls.count) \(nc.writes) \(stageOf(nc.result, prURL(11)))")
     }
-    // Rate now with Rate off while given to someone else: its rating applied at once, and labelled
-    // once it is yours again.
-    let lentNow = fix(), ln = dir("rate-now-off-assigned")
-    lentNow.prs[0].assignees = ["bob"]
-    var nowOff = PipelineSettings(roots: [root], fastTrack: true)
-    nowOff.force = .init(rate: [prURL(11)])
-    _ = sync(lentNow, nowOff, ln, t0)
-    lentNow.prs[0].assignees = []
-    let back = sync(lentNow, PipelineSettings(roots: [root], fastTrack: true), ln, later(5))
-    check(lentNow.claudeCalls.count == 1 && back.writes == ["+risk:low #11", "+complexity:low #11"]
-          && stageOf(back.result, prURL(11)) == "human/human",
-          "Rate now with Rate off while assigned: \(back.writes) \(stageOf(back.result, prURL(11)))")
+    // Rate now with Rate off, or switched off as it runs, given to someone else by the read or the
+    // re-read applying it: its rating applied at once, and labelled once it is yours again.
+    let rateOff = PipelineSettings(roots: [root], fastTrack: true)
+    for (at, switched) in [("read", false), ("re-read", false), ("read", true), ("re-read", true)] {
+        let t = fix(), d = dir("rate-now-off-assigned-\(at)-\(switched)")
+        var now = switched ? rateTrack : rateOff
+        now.force = .init(rate: [prURL(11)])
+        var off: PipelineControl?
+        if switched {
+            var live = now
+            (live.mirrorGitHub, live.mirrorLinear, live.mirrorScope) = (true, true, .all)
+            PipelineControl(settings: live).save(in: d)
+            off = PipelineControl(settings: live)
+            off?.rate = false
+        }
+        if at == "read" { t.prs[0].assignees = ["bob"] }
+        t.onClaude = { _ in
+            off?.save(in: d)
+            if at == "re-read" { applying(t) { $0.prs[0].assignees = ["bob"] } }
+        }
+        _ = sync(t, now, d, t0)
+        t.prs[0].assignees = []
+        let back = sync(t, rateOff, d, later(5))
+        check(t.claudeCalls.count == 1 && back.writes == ["+risk:low #11", "+complexity:low #11"]
+              && stageOf(back.result, prURL(11)) == "human/human",
+              "Rate now, Rate switched off \(switched), assigned at the \(at): \(back.writes) "
+                + stageOf(back.result, prURL(11)))
+    }
+    // Rate now while it targets another branch, answered, then retargeted; or pressed as it is
+    // retargeted with a rating still queued against the other branch: rated against the default one.
+    for pressed in ["before", "at"] {
+        let t = fix(), d = dir("rate-now-retargeted-" + pressed)
+        t.prs[0].base = "feat-a"
+        var now = rateTrack
+        now.force = .init(rate: [prURL(11)])
+        let st = sync(t, pressed == "before" ? now : rateTrack, d, t0, drain: false)
+        if pressed == "before" {
+            for case .rate(_, _, let url, let stamp, _, _) in st.result.effects {
+                _ = PipelineRateJob.run(item: url, stamp: stamp, dir: d, io: t.io())
+            }
+        }
+        t.prs[0].base = "main"
+        let rt = sync(t, pressed == "before" ? rateTrack : now, d, later(5))
+        check(t.claudeCalls.count == (pressed == "before" ? 2 : 1) && rt.writes == tracked
+              && rt.result.effects == [reviewFX(11, sha("a1"))],
+              "Rate now \(pressed) a retarget: \(t.claudeCalls.count) \(rt.writes)")
+    }
+    // A first rating left pending, or an ask answered, saved before either recorded the base its
+    // diff was against: read against the PR's current one.
+    for saved in ["rating", "ask"] {
+        let t = fix(), d = dir("unbased-" + saved)
+        if saved == "rating" { applying(t) { $0.ghFails = true } }
+        let s1 = sync(t, rateTrack, d, t0, drain: saved == "rating")
+        for case .rate(_, _, let url, let stamp, _, _) in s1.result.effects {
+            _ = PipelineRateJob.run(item: url, stamp: stamp, dir: d, io: t.io())
+        }
+        t.ghFails = false
+        let file = d.appendingPathComponent(saved == "rating" ? "ratings.json" : "state.json")
+        if var top = (try? JSONSerialization.jsonObject(with: Data(contentsOf: file))) as? [String: Any] {
+            var kept = (saved == "rating" ? top : top["rateAsks"]) as? [String: Any] ?? [:]
+            for (id, v) in kept { kept[id] = (v as? [String: Any])?.filter { $0.key != "base" } }
+            if saved == "rating" { top = kept } else { top["rateAsks"] = kept }
+            try? JSONSerialization.data(withJSONObject: top).write(to: file)
+        }
+        let s2 = sync(t, rateTrack, d, later(5))
+        check(t.claudeCalls.count == 1 && s2.writes == tracked && s2.result.effects == [reviewFX(11, sha("a1"))],
+              "\(saved) saved with no base: \(t.claudeCalls.count) \(s2.writes)")
+    }
     // An issue rated while Diplomat may not write to it, with Fast track on: no first rating to
     // wait for, so its fix is asked for once it may, though its re-read fails.
     let unlisted = only([1]), ud = dir("issue-unwritable")

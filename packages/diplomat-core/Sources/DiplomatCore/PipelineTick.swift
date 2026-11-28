@@ -657,18 +657,12 @@ final class PipelineSync {
         cache[e.id].map { atLeastLabels($0.rating, e.labels) } ?? labelRating(e.labels)
     }
 
-    /// `e`'s pending first rating was made at another head or base, is low/low within the floor of
-    /// `e`'s files, and `e` wears no rating or fast-track label.
-    func pushedPast(_ e: PipelineEntry) -> Bool {
-        guard let c = cache[e.id], c.pending == true, c.first == true, let h = c.head,
+    /// `e`'s first rating is to be rated again instead of finished (`PipelineCachedRating.first`).
+    func rateAgain(_ e: PipelineEntry) -> Bool {
+        guard settings.fastTrack, let c = cache[e.id], c.pending == true, c.first == true, let h = c.head,
               c.rating.atLeast(e.item.floor ?? c.rating).isFastTrack else { return false }
         return (h != head(e) || (c.base ?? e.baseRef) != e.baseRef) && unworn(Set(e.labels.map { $0.lowercased() }))
-    }
-
-    /// `e`'s first rating is to be rated again instead of finished, as it could put `e` on the fast
-    /// track (`PipelineCachedRating.first`).
-    func rateAgain(_ e: PipelineEntry) -> Bool {
-        settings.fastTrack && pushedPast(e) && closesHold(e) == nil
+            && closesHold(e) == nil
     }
 
     /// Each dimension wears `r`'s label and no other.
@@ -1225,10 +1219,8 @@ final class PipelineSync {
             guard reads(a, entries[i]), may(a.forced ? .forced : .rate) else { continue }
             state.rateAsks[id] = nil
             persist()
-            // A first rating asked again is wanted with Fast track off since: its answer is paid for.
             let current = a.forced ? rateRefusal(entries[i]) == nil
-                : eligible(entries[i]) && (band(entries[i]) != nil || pushedPast(entries[i]))
-                    && a.again == awaitingRerate(entries[i])
+                : eligible(entries[i]) && band(entries[i]) != nil && a.again == awaitingRerate(entries[i])
             if current { rated(i, answer.exit, a) }
         }
     }
@@ -1380,12 +1372,18 @@ final class PipelineSync {
         }
         let counts = may(step) && banHold(e) == nil
         let allowed = counts && e.item.writable
-        // Unwritable, it waits for `finish`, which Rate off never reaches.
+        // Unwritable, a rating waits for `finish`, which Rate off never reaches.
         let first = counts && fresh && e.item.kind == .pr && may(.fastTrack) && (e.item.writable || may(.rate))
         // Saved before what it leads to: a sync stopped there does not ask again.
         record(i, rating, why, detail, head: head, base: a.base, again: again, pending: allowed || first, first: first)
         guard allowed else { return }
-        guard recheck(i), entries[i].item.headSha == e.item.headSha else { return failed(e.id) }
+        guard recheck(i), entries[i].item.headSha == e.item.headSha else {
+            guard entries[i].item.writable || may(.rate) else {
+                cache[e.id]?.pending = nil
+                return persist()
+            }
+            return failed(e.id)
+        }
         // Left pending, for `finish` once the stop label is off.
         guard stops(entries[i]).isEmpty else { return }
         // A label put on meanwhile.
