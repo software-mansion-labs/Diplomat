@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { dockerCalls } from './lib/docker-calls.mjs';
 import { scratchDir } from './lib/scratch.mjs';
 
 const scratch = scratchDir('dn-records-');
@@ -33,7 +34,7 @@ const check = async (name, fn) => { await fn(); checks++; console.log(`PASS ${na
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Long enough for a machine with every core taken many times over.
 const until = async (what, fn, ms = 120000) => { for (const end = Date.now() + ms; Date.now() < end;) { if (await fn()) return; await sleep(25); } assert.fail(`never: ${what}`); };
-const calls = (command) => fs.readFileSync(path.join(fakeDir, 'calls.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((c) => !command || c[0] === command);
+const calls = (command) => dockerCalls(fakeDir).filter((c) => !command || c[0] === command);
 const there = (...p) => fs.existsSync(path.join(fakeDir, ...p));
 const volumeOf = (name) => name.replace('dn-', 'dn-work-');
 const stage = (name, text = '') => fs.writeFileSync(path.join(fakeDir, name), text);

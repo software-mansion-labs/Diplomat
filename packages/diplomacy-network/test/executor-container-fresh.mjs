@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { dockerCalls } from './lib/docker-calls.mjs';
 import { scratchDir } from './lib/scratch.mjs';
 
 const scratch = scratchDir('dn-fresh-');
@@ -26,7 +27,7 @@ const check = async (name, fn) => { await fn(); checks++; console.log(`PASS ${na
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Long enough for a machine with every core taken many times over.
 const until = async (what, fn, ms = 120000) => { for (const end = Date.now() + ms; Date.now() < end;) { if (await fn()) return; await sleep(25); } assert.fail(`never: ${what}`); };
-const calls = () => fs.readFileSync(path.join(fakeDir, 'calls.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+const calls = () => dockerCalls(fakeDir);
 // What was removed or made on the engine since call `from`, in order, each by its first words.
 const acted = (from) => calls().slice(from).filter((c) => c.includes('rm') || c[0] === 'run' || c[0] === 'create' || c[1] === 'create').map((c) => c.slice(0, 2).join(' '));
 const there = (...p) => fs.existsSync(path.join(fakeDir, ...p));

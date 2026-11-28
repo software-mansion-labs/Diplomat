@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { killDaemonsUnder, onInterrupt } from '../../../daemon-core/src/test-interrupt.js';
 import { GHES_HOST, GHES_TOKEN, GITLAB_HOST, git, startFakeForge } from './fake-forge.mjs';
+import { dockerCalls } from './docker-calls.mjs';
 import { startFakeModel } from './fake-model.mjs';
 import { scratchDir } from './scratch.mjs';
 
@@ -319,7 +320,7 @@ export async function createBench() {
       /// Every invocation of the stand-in docker, or those of one subcommand.
       docker(command) {
         let lines = [];
-        try { lines = fs.readFileSync(path.join(dockerDir, 'calls.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch {}
+        try { lines = dockerCalls(dockerDir); } catch {}
         return command ? lines.filter((a) => a[0] === command) : lines;
       },
       /// The containers the stand-in docker holds, by name.

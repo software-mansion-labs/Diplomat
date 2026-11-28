@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { dockerCalls } from './lib/docker-calls.mjs';
 import { scratchDir } from './lib/scratch.mjs';
 
 const scratch = scratchDir('dn-runner-');
@@ -62,7 +63,7 @@ let checks = 0;
 const check = async (name, fn) => { await fn(); checks++; console.log(`PASS ${name}`); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-const calls = (command) => fs.readFileSync(path.join(fakeDir, 'calls.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => a[0] === command);
+const calls = (command) => dockerCalls(fakeDir).filter((a) => a[0] === command);
 const agent = (runId, what) => fs.readFileSync(path.join(agentDir, `${runId}.${what}`), 'utf8');
 const envOf = (runId) => Object.fromEntries(agent(runId, 'env').split('\n').filter((l) => l.includes('=')).map((l) => l.split(/=(.*)/s).slice(0, 2)));
 // Long enough for a machine with every core taken many times over.
