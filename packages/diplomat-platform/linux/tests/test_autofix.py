@@ -4,8 +4,11 @@ Store orchestration (poll → diff → dispatch → reconcile, with dedup + back
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import math
+import re
 import time
+from pathlib import Path
 
 import pytest
 
@@ -1165,6 +1168,21 @@ def test_allowlist_speaks_only_for_the_review_monitors_finds(store, monkeypatch)
             _job(number=n, author="bob", counter=counter), autofix.SOURCE_AUTO
         ) == "spawned"
     assert len(calls) == 3
+
+
+def test_agent_job_counter_comment_names_the_pipeline_on_both_platforms():
+    """The Pipeline's counter is no monitor's and feeds no tally."""
+    from diplomat_app import store as linux_store
+
+    setters = set(re.findall(r'\bcounter="(\w+)"', inspect.getsource(linux_store)))
+    above, line = re.search(r"(.*)\n(\s*counter: str\b.*)",
+                            inspect.getsource(autofix.AgentJob)).groups()
+    assert set(re.findall(r'"(\w+)"', above + line)) == (
+        setters | {linux_store.PIPELINE_COUNTER})
+    swift = (Path(__file__).resolve().parents[2] / "macos" / "Sources" / "Diplomat"
+             / "Store.swift").read_text(encoding="utf-8")
+    comment = re.search(r"var counter: AutoCounter\?[ \t]*//(.*)", swift).group(1)
+    assert "Pipeline" in comment and "tally" not in comment
 
 
 def test_a_ban_outranks_the_allowlist(store, monkeypatch):

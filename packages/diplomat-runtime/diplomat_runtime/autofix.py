@@ -989,7 +989,8 @@ class AgentJob:
     # Telemetry ledger identity (see ledger_key). Set for auto jobs only: the screen
     # measures the MONITORS, and a wizard click is the operator's own doing.
     ledger_key: str = ""
-    counter: str | None = None  # "review_requests" | "my_reviews" | "conflicts"
+    # "review_requests" | "my_reviews" | "conflicts" | "pipeline"
+    counter: str | None = None
     # The stamp the monitor that owns this job records against the PR when an agent
     # launches (``ReviewAttempt.requested_at``) — the request timestamp for a review
     # request, one of the STAMP_* constants for the two level-triggered reconcilers.
