@@ -10,6 +10,7 @@ import json
 import os
 import signal
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -1471,12 +1472,35 @@ def _alive(pid: int) -> bool:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    # A zombie is gone but for its parent's wait.
+    # A zombie is gone but for its parent's wait; one reaped as it is read shows X, or no
+    # entry.
     try:
         with open(f"/proc/{pid}/stat") as fh:
-            return fh.read().split(") ")[-1][0] != "Z"
+            return fh.read().split(") ")[-1][0] not in "ZX"
     except OSError:
-        return True
+        # No /proc: the kill answers.
+        return not os.path.isdir("/proc")
+
+
+@pytest.mark.skipif(not os.path.exists("/proc/self/stat"), reason="reads the real /proc")
+def test_a_core_reaped_while_it_is_read_is_dead():
+    """A core killed under a parent that then ends, as test_background_threads.py's are,
+    is reaped by init at a moment of its own, often while :func:`_alive` reads it."""
+    for _ in range(300):
+        with subprocess.Popen(["sh", "-c", "sleep 60 & echo $!; exec cat"],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as parent:
+            child = int(parent.stdout.readline())
+            # Echoed once cat runs, which never reaps the sleep: only init will.
+            parent.stdin.write("\n")
+            parent.stdin.flush()
+            parent.stdout.readline()
+            os.kill(child, signal.SIGKILL)
+            deadline = time.time() + 5
+            while _alive(child) and time.time() < deadline:
+                pass
+            parent.stdin.close()
+            while os.path.exists(f"/proc/{child}") and time.time() < deadline:
+                assert not _alive(child)
 
 
 def test_stopping_the_sync_ends_its_core_and_what_the_core_started(pipe, tmp_path,
