@@ -43,10 +43,10 @@ def _stub_agent(tmp_path: Path, body: str = 'sleep 30') -> Path:
 
 
 def _run_agent(tmp_path: Path, bindir: Path, prompt: str = "do the thing"):
-    """Run the real spawn command (minus the terminal emulator and tmux, which only
-    add windows) and return the Popen plus the three run-dir paths.
+    """Run the real spawn command (minus the terminal emulator and tmux) and return
+    the Popen plus the three run-dir paths.
 
-    Its stdin is a pipe held open, as a terminal's input is: at EOF the closing
+    A pipe held open stands in for the terminal's input: at EOF the closing
     ``exec "$SHELL" -i`` exits, and the outer shell's pid dies with the agent's."""
     run = tmp_path / "run"
     run.mkdir(exist_ok=True)
@@ -209,19 +209,21 @@ def test_the_recorded_pid_dies_with_the_agent(tmp_path):
     """What retirement rests on: the pid stops resolving once the agent is done.
 
     The inner shell exists solely to make this true. Recording the OUTER shell's
-    ``$$`` would satisfy every other assertion here — its argv names the agent too —
-    but it ends in ``exec "$SHELL" -i`` to keep the window open, so it stays alive
-    forever and the run is read as still running for as long as the window is open."""
+    ``$$`` would not: it ends in ``exec "$SHELL" -i`` to keep the window open, so it
+    stays alive forever and the run is read as still running for as long as the
+    window is open."""
     bindir = _stub_agent(tmp_path, body="exit 0")
     proc, pid_file, done_file = _run_agent(tmp_path, bindir)
     try:
         assert _await_file(pid_file), "the agent's shell never wrote a pid"
         pid = int(pid_file.read_text().strip())
         assert _await_file(done_file), "the agent never finished"
+        # Not _cmdline, which also reads empty while a shell execs.
+        entry = Path(f"/proc/{pid}")
         deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and _cmdline(pid):
+        while time.monotonic() < deadline and entry.exists():
             time.sleep(0.05)
-        assert not _cmdline(pid), \
+        assert not entry.exists(), \
             f"pid {pid} outlived the agent — it is {_cmdline(pid)!r}"
         assert proc.poll() is None, \
             "the window's shell exited too, so a dead pid shows nothing"
