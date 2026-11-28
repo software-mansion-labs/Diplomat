@@ -13,7 +13,6 @@ straight to the file only when no daemon is reachable.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from dataclasses import dataclass
@@ -104,15 +103,10 @@ class BannedAuthor:
 
 
 def read() -> list[BannedAuthor]:
-    """The current banned authors; empty when the file is absent or malformed."""
-    try:
-        obj = json.loads(banned_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    if not isinstance(obj, dict):
-        return []
+    """The current banned authors; empty when the file is absent or malformed, which a
+    gate tells apart (:func:`unreadable`): a malformed list could be banning anyone."""
     out: list[BannedAuthor] = []
-    for b in obj.get("banned", []) or []:
+    for b in (_listed() or {}).get("banned", []):
         if not isinstance(b, dict) or not b.get("login"):
             continue
 
@@ -128,11 +122,43 @@ def read() -> list[BannedAuthor]:
 
 
 def unreadable() -> bool:
-    """Whether the file is present but no JSON object whose ``banned`` is a list or
-    absent. Twin of ``BanList.readFile``'s ``unreadable``."""
+    """Whether the file is not known absent but is no JSON object whose ``banned`` is a
+    list or absent. Twin of ``BanList.readFile``'s ``unreadable``."""
+    return _listed() is None
+
+
+def _listed() -> dict | None:
+    """The file's object (``{}`` when absent), or None when it is :func:`unreadable`."""
     path = banned_path()
     data = atomicjson.read_object(path)
-    return path.exists() if data is None else not isinstance(data.get("banned", []), list)
+    if data is None:
+        try:
+            os.stat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            return {}
+        except OSError:  # e.g. a directory it cannot search, which may hold one
+            pass
+        return None
+    return data if isinstance(data.get("banned", []), list) else None
+
+
+def _left_unread() -> str:
+    """Why a ban or un-ban left an :func:`unreadable` file alone, without asking the
+    daemon: an older one writes over it."""
+    return f"{banned_path()} is unreadable, so it was left as it is"
+
+
+#: Why a gate refused work while the list is :func:`unreadable`.
+UNREADABLE = "the prompt-injection ban list could not be read"
+#: The dispatch verdict for that refusal: the job waits as a deferral does, a find
+#: queued again and an ask kept (macOS ``DispatchOutcome.banListUnreadable``).
+VERDICT_UNREADABLE = "ban-list-unreadable"
+
+
+def unreadable_note() -> str:
+    """The feed's line for a spell of :func:`unreadable` (macOS ``unreadNote``)."""
+    return (f"{banned_path()} could not be read: it could be banning anyone, so work "
+            "naming an author waits until it reads")
 
 
 def is_banned(login: str, banned: list[BannedAuthor]) -> bool:
@@ -231,6 +257,8 @@ def report_comms_ban(ban: dict, *, timeout_secs: float = 10) -> Reported:
     evidence = str(ban.get("evidence") or "")
     if not _SLACK_USER_ID.match(user_id):
         return Reported(False, f"no Slack user id to ban ({user_id or 'none'})")
+    if unreadable():
+        return Reported(False, _left_unread())
     login = slack_login(user_id)
     before = {b.login.lower() for b in read()}
     reply = deviceallocator.exchange("report-injection", {
@@ -260,15 +288,13 @@ def report_comms_ban(ban: dict, *, timeout_secs: float = 10) -> Reported:
 def _write_directly(login: str, handle: str, place: str, permalink: str,
                     evidence: str) -> str | None:
     """The daemon's write, minus its evidence dir; returns why it failed, or None. A
-    file that is present but unreadable is left for the daemon to set aside: writing
-    over it would lift every ban in it."""
+    file that is :func:`unreadable` is left as it is: writing over it would lift every
+    ban in it."""
     path = banned_path()
-    data = atomicjson.read_object(path)
-    if data is None and path.exists():
-        return f"{path} is unreadable, so it was left as it is"
-    data = data or {}
-    if not isinstance(data.get("banned"), list):
-        data["banned"] = []
+    data = _listed()
+    if data is None:
+        return _left_unread()
+    data.setdefault("banned", [])
     at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     entry = {"login": login, "reason": "prompt injection", "pr": permalink or None,
              "evidence": evidence[:800], "evidenceDir": None, "reportedBy": COMMS_REPORTER,
@@ -299,6 +325,8 @@ def unban(login: str, *, timeout_secs: float = 5) -> Reported:
     something; directly, with that line, only when no daemon is reachable."""
     from . import deviceallocator
 
+    if unreadable():
+        return Reported(False, _left_unread())
     reply = deviceallocator.exchange("unban", {"login": login}, timeout_secs=timeout_secs)
     if reply == deviceallocator.UNREACHABLE:
         return Reported(False, _unban_directly(login))
@@ -311,12 +339,10 @@ def _unban_directly(login: str) -> str | None:
     """The daemon's ``handleUnban``; returns why it failed, or None. A list that does
     not hold ``login`` is left unwritten."""
     path = banned_path()
-    data = atomicjson.read_object(path)
+    data = _listed()
     if data is None:
-        return f"{path} is unreadable, so it was left as it is" if path.exists() else None
-    listed = data.get("banned")
-    if not isinstance(listed, list):
-        return None
+        return _left_unread()
+    listed = data.get("banned", [])
     low = login.lower()
     kept = [b for b in listed
             if not (isinstance(b, dict) and str(b.get("login", "")).lower() == low)]

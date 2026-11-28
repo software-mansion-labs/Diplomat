@@ -895,23 +895,24 @@ function appendAudit(source, action, detail) {
   } catch {}
 }
 
-// Read the ban list, NEVER silently resetting it: an unparseable-but-present
-// file (torn write, disk hiccup) is moved aside for forensics instead of being
-// treated as empty — otherwise one bad read plus one new ban wipes every ban.
-function readBanned() {
-  let raw = null;
-  try { raw = fs.readFileSync(BANNED_PATH, 'utf8'); } catch { return { banned: [] }; }
-  try {
-    const data = JSON.parse(raw);
-    if (!Array.isArray(data.banned)) data.banned = [];
-    return data;
-  } catch (e) {
-    const aside = `${BANNED_PATH}.corrupt-${Date.now()}`;
-    try { fs.renameSync(BANNED_PATH, aside); } catch {}
-    log('banned.json unparseable — moved aside', aside, String(e));
-    appendAudit('daemon', 'warn', `banned.json was unreadable; preserved as ${path.basename(aside)}`);
-    return { banned: [] };
+// Read the ban list for `what` (a ban or an unban) as the applets do: only a missing
+// file is empty. One there but not an object whose `banned` is a list (or absent)
+// could be banning anyone, so the request fails and the file is left for the operator
+// to repair.
+function readBanned(what) {
+  let data;
+  try { data = JSON.parse(fs.readFileSync(BANNED_PATH, 'utf8')); }
+  catch (e) { if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return { banned: [] }; }
+  const listed = data != null && typeof data === 'object' && !Array.isArray(data)
+    && (data.banned === undefined || Array.isArray(data.banned));
+  if (!listed) {
+    const why = `${what} not recorded: banned.json could not be read`;
+    log(why);
+    appendAudit('daemon', 'warn', why);
+    throw httpError(503, why);
   }
+  data.banned ??= [];
+  return data;
 }
 
 // banned.json is the whole point of a ban or an unban, so a write that fails (a
@@ -928,7 +929,7 @@ async function handleUnban(p) {
   const login = String(p.login || '').trim().replace(/^@/, '');
   if (!login) throw httpError(400, 'login is required');
   return withLock(async () => {
-    const data = readBanned();
+    const data = readBanned(`unban of @${login}`);
     const before = data.banned.length;
     data.banned = data.banned.filter((b) => (b.login || '').toLowerCase() !== login.toLowerCase());
     if (data.banned.length !== before) {
@@ -988,7 +989,7 @@ async function handleReportInjection(p) {
   try { fs.writeFileSync(path.join(dir, 'report.json'), JSON.stringify(incident, null, 2)); } catch {}
 
   return withLock(async () => {
-    const data = readBanned();
+    const data = readBanned(`ban on @${login}`);
     const entry = {
       login, reason: 'prompt injection', pr: where, evidence: evidence.slice(0, 800),
       evidenceDir: dir, reportedBy: p.agentName || null, at,

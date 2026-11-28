@@ -403,8 +403,9 @@ class Store(QObject):
         # Live telemetry read from the shared ~/.diplomat files (activity feed + bans).
         self.audit_entries: list = []
         self.banned_authors: list = []
-        # banned.json is present but unreadable, as the last read found it: the Pipeline
-        # then acts on nothing, as its sync does (``PipelineTick.bannedLogins``).
+        # banned.json cannot be read, as the last read found it: work naming an author is
+        # held (``held_by_ban_list``), and the Pipeline acts on nothing, as its sync does
+        # (``PipelineTick.bannedLogins``).
         self.ban_list_unreadable = False
         # The (login, at) of every ban the last read held; None until the first read,
         # whose bans were there before this launch and are not news.
@@ -580,8 +581,10 @@ class Store(QObject):
         # Why the last sync could not run; None once one did.
         self.pipeline_error: str | None = None
         self.pipeline_syncing = False
-        # Over the flags and the force sets below, never over a CLI call.
-        self._pipeline_lock = threading.Lock()
+        # Over the flags and the force sets below, never over a CLI call. Reentrant:
+        # :meth:`stop_pipeline_sync` runs from signal handlers, which may land inside a
+        # block holding it.
+        self._pipeline_lock = threading.RLock()
         # Over a control.json write and the switches it reads: the Qt thread's switches and
         # a sync's worker both write it, so the last write has the latest.
         self._control_lock = threading.Lock()
@@ -617,9 +620,10 @@ class Store(QObject):
         self._pipeline_stale: set[str] = set()
         self._pipeline_synced.connect(self._apply_pipeline_sync)
         # The rating jobs running, by item link (:attr:`running_ratings`); replaced, never
-        # mutated, under the lock: workers and the Qt thread both change it.
+        # mutated, under the lock: workers and the Qt thread both change it. Reentrant, as
+        # `_pipeline_lock` is.
         self._ratings: dict[str, RatingJob] = {}
-        self._rating_lock = threading.Lock()
+        self._rating_lock = threading.RLock()
         self._rating_finished.connect(self._rating_done)
 
         # Pruned on every start — a Store outlives thousands of polls.
@@ -1369,7 +1373,7 @@ class Store(QObject):
 
     @property
     def pipeline_rate(self) -> bool:
-        """Rate unrated items, labelling the ones Diplomat may write."""
+        """Rate unrated items, each rating kept on this machine."""
         return self._settings.value("pipelineRate", False, bool)
 
     @pipeline_rate.setter
@@ -1380,6 +1384,37 @@ class Store(QObject):
         self._write_pipeline_control()
         if not value:
             self._withdraw_pipeline_asks(None)
+
+    @property
+    def pipeline_mirror_github(self) -> bool:
+        """Write each rating as labels on the GitHub items :attr:`pipeline_mirror_scope` takes in."""
+        return self._settings.value("pipelineMirrorGitHub", False, bool)
+
+    @pipeline_mirror_github.setter
+    def pipeline_mirror_github(self, value: bool) -> None:
+        self._settings.setValue("pipelineMirrorGitHub", bool(value))
+        self._write_pipeline_control()
+
+    @property
+    def pipeline_mirror_linear(self) -> bool:
+        """:attr:`pipeline_mirror_github` for Linear."""
+        return self._settings.value("pipelineMirrorLinear", False, bool)
+
+    @pipeline_mirror_linear.setter
+    def pipeline_mirror_linear(self, value: bool) -> None:
+        self._settings.setValue("pipelineMirrorLinear", bool(value))
+        self._write_pipeline_control()
+
+    @property
+    def pipeline_mirror_scope(self) -> str:
+        """One of :data:`pipeline.MIRROR_SCOPES`; any other value stored reads as ``prs``."""
+        value = self._settings.value("pipelineMirrorScope", "prs", str)
+        return value if value in pipeline.MIRROR_SCOPES else "prs"
+
+    @pipeline_mirror_scope.setter
+    def pipeline_mirror_scope(self, value: str) -> None:
+        self._settings.setValue("pipelineMirrorScope", str(value))
+        self._write_pipeline_control()
 
     @property
     def pipeline_fix(self) -> bool:
@@ -1439,6 +1474,9 @@ class Store(QObject):
     def pipeline_control(self) -> dict:
         """``control.json``'s switches and revokes as they stand (:func:`pipeline.write_control`)."""
         return {"enabled": self.pipeline_enabled, "rate": self.pipeline_rate,
+                "mirrorGitHub": self.pipeline_mirror_github,
+                "mirrorLinear": self.pipeline_mirror_linear,
+                "mirrorScope": self.pipeline_mirror_scope,
                 "fix": self.pipeline_fix, "fastTrack": self.pipeline_fast_track,
                 "merge": self.pipeline_merge, "fracture": self.pipeline_fracture,
                 "revoke": sorted(self.pipeline_forced("revoke"))}
@@ -1932,14 +1970,15 @@ class Store(QObject):
         dispatched, can be cancelled, and re-reads its issue when its turn comes.
 
         Each root keeps its own mark, and one with none is baselined on its first read,
-        so adding a root never queues its backlog. A removed root's mark is dropped, so
+        so adding a root never queues its backlog, even while the ban list cannot be
+        read; a marked root's mark holds then. A removed root's mark is dropped, so
         re-adding it does not either. A root whose read failed keeps its mark (logged by
         :meth:`_note_roots_read`), as does every root while one fails to resolve
         (``complete``: :func:`review.roots_complete` of the reading ``roots`` came from)."""
         if not self.community_issues_enabled:
             return
         marks = self._community_marks()
-        banned = bans.read()
+        banned, unreadable = bans.read(), bans.unreadable()
         read: list[LocalRepo] = []
         failed: list[tuple[LocalRepo, Exception]] = []
         for root in roots:
@@ -1958,6 +1997,8 @@ class Store(QObject):
                 # Unset or unreadable: re-baseline rather than fail every poll from
                 # here on.
                 since = None
+            if unreadable and since is not None:
+                continue
             fresh, mark = Filters.new_community_issues(
                 found, since, datetime.now().astimezone())
             for issue in fresh:
@@ -2005,7 +2046,7 @@ class Store(QObject):
         self._held_keys |= {r.key for r, _ in failed}
         complete = complete and not failed
         now = time.time()
-        banned = bans.read()
+        banned, unreadable = bans.read(), bans.unreadable()
         key = "reviewReqAttempts"
         prior = self._load_attempts(key)
         # An author outside the allowlist is dropped here rather than carried down as a
@@ -2021,16 +2062,20 @@ class Store(QObject):
         # Before dispatching, so the ledger has a queue instant to measure the
         # time-to-start against. A banned author's request is owed by GitHub's
         # reckoning but will never be dispatched, so it is left out — counting it
-        # would show a review pending forever that nothing is meant to pick up.
+        # would show a review pending forever that nothing is meant to pick up. While the
+        # list cannot be read, the last one read stands in for it.
+        standing = self.banned_authors if unreadable else banned
         telemetry.observe_owed(autofix.WORK_REVIEW_REQ, "review", {
             autofix.ledger_key(autofix.WORK_REVIEW_REQ, r.url, r.head_sha): r.number
-            for r in owed if not bans.is_banned(r.author, banned)
+            for r in owed if not bans.is_banned(r.author, standing)
         })
         dispatched: dict[str, autofix.ReviewAttempt] = {}
         concluded: set[str] = set()
         for r in owed:
             k = r.item
             stamp = r.stamp
+            # An unreadable list reads as empty here; the dispatch gate queues the
+            # request, held.
             action, val = autofix.decide(
                 prior.get(k),
                 stamp,
@@ -2052,6 +2097,9 @@ class Store(QObject):
             polled = {r.key for r in read}
             kept |= {k: a for k, a in records.items() if k.partition("#")[0] not in polled}
         self._save_attempts(key, kept)
+        # It excludes banned authors, so it stands while the list cannot be read.
+        if unreadable:
+            return
         self.unaddressed_reviews = sum(
             1
             for r in owed
@@ -2081,7 +2129,7 @@ class Store(QObject):
         """Run one agent job through the shared gate (``autofix.dispatch_decide`` -
         the pure, tested decision both platforms mirror) and, on proceed, spawn and
         register it. Returns the verdict: ``"spawned"``, an ``autofix.VERDICT_*``
-        refusal, or ``"failed"`` (spawn error). Twin of Store.dispatchAgent (macOS).
+        refusal, :data:`bans.VERDICT_UNREADABLE`, or ``"failed"`` (spawn error). Twin of Store.dispatchAgent (macOS).
 
         With the Diplomacy Network on, proceeding is an offer to the job's pool
         (:meth:`_offer_tracked`), booked and counted as a spawn and answered with a
@@ -2113,7 +2161,7 @@ class Store(QObject):
         it is filling, and skips paused work by construction) and "execute now"
         (where the operator is overriding both holds deliberately). It skips the
         measurement — not just its verdict — so neither pays for a second ``ps``
-        scan, and so a forced run cannot re-queue itself.
+        scan, and so a forced run cannot re-queue itself for want of a slot.
 
         ``forced`` is only the second of those, and lifts the budget and the disk
         floor. The drain runs the machine's own automatic work, and work that could
@@ -2127,9 +2175,10 @@ class Store(QObject):
                     return autofix.VERDICT_IN_FLIGHT
                 self._dispatching_prs.add(item)
         try:
-            banned = bool(job.author_login) and bans.is_banned(
-                job.author_login, bans.read()
-            )
+            # An unreadable list could be banning anyone.
+            unreadable = bans.unreadable()
+            banned = bool(job.author_login) and (
+                unreadable or bans.is_banned(job.author_login, bans.read()))
             # The allowlist speaks for the review monitor's work and nothing else, so
             # the counter - which is what makes a job that monitor's - is the whole
             # test. A sweep, a wizard press and both reconcilers over my own PRs carry
@@ -2214,6 +2263,9 @@ class Store(QObject):
                 self._log_unaffordable(budget, claude)
                 self._stage_queued(job, attempt)
                 return verdict
+            if verdict == autofix.VERDICT_BANNED and unreadable:
+                self._stage_queued(job, attempt)
+                return bans.VERDICT_UNREADABLE
             if verdict == autofix.VERDICT_BANNED:
                 activity.log(source, "ban-skip", f"{job.label} - {self.ban_refusal(job)}")
                 self.refresh_activity()
@@ -3404,7 +3456,7 @@ class Store(QObject):
     def drainable_tasks(self) -> list[autofix.QueuedTask]:
         """The queued tasks the drain may start, in the operator's order — everything
         whose monitor is still on, plus the reviews the operator asked for, which no
-        monitor speaks for either way.
+        monitor speaks for either way, less what :meth:`is_held` holds.
 
         Empty while :attr:`queue_auto_run` is off, including the asks: that switch is
         over the queue itself, not over what fills it."""
@@ -3417,11 +3469,17 @@ class Store(QObject):
                 owned: dict[str, frozenset[str]] | None = None) -> bool:
         """Paused, or a pipeline ask still stale (:attr:`_pipeline_stale`) or held by an
         unreadable ban list, unless a Slack ping took it as its ask: then it is
-        asked-for work, which switching a monitor off never stops (:meth:`is_paused`)."""
+        asked-for work, which switching a monitor off never stops (:meth:`is_paused`).
+        Work naming an author waits while that list cannot be read, whoever asked for it
+        (:meth:`held_by_ban_list`)."""
         held = task.job.counter == PIPELINE_COUNTER and (
             self.ban_list_unreadable or task.id in self._pipeline_stale)
-        return ((self.is_paused(task.job.counter) or held)
-                and task.id not in (self._comms_owned if owned is None else owned))
+        return self.held_by_ban_list(task) or (
+            (self.is_paused(task.job.counter) or held)
+            and task.id not in (self._comms_owned if owned is None else owned))
+
+    def held_by_ban_list(self, task: autofix.QueuedTask) -> bool:
+        return self.ban_list_unreadable and bool(task.job.author_login)
 
     def _begin_starting(self, entry: autofix.QueuedTask) -> None:
         """Move one task out of the queue and into the starting band, where it stays
@@ -3535,6 +3593,12 @@ class Store(QObject):
         entry = next((e for e in self.queued_tasks if e.id == task_id), None)
         if entry is None:
             return
+        # Refused before it leaves the queue, where it would be missing until the next poll.
+        self.refresh_activity()
+        if self.held_by_ban_list(entry):
+            self.error = f"{entry.job.label}: {bans.UNREADABLE}."
+            self.changed.emit()
+            return
         self._begin_starting(entry)
 
         def work() -> None:
@@ -3567,6 +3631,8 @@ class Store(QObject):
             self.error = f"{label}: an agent is already on this PR."
         elif verdict == autofix.VERDICT_BANNED:
             self.error = f"{label}: {self.ban_refusal(entry.job)}."
+        elif verdict == bans.VERDICT_UNREADABLE:
+            self.error = f"{label}: {bans.UNREADABLE}."
         elif verdict == autofix.VERDICT_NOT_ALLOWED:
             self.error = (f"{label}: the PR's author is not on the auto-review list "
                           "(add them, or review it from the wizard).")
@@ -4528,19 +4594,24 @@ class Store(QObject):
     def _comms_poll_once(self) -> dict:
         """The slow half of a tick, off the Qt thread. Changes nothing in the queue.
         Held while the first root path does not resolve: the core reads a bare ``#N``
-        as the first root's, which would be another repo's."""
+        as the first root's, which would be another repo's. Held too while the ban list
+        cannot be read: it could be banning any sender."""
         at = datetime.now().astimezone()
         if not review.primary_resolved():
             return {"at": at, "me": None, "pings": [], "items": [],
                     "error": f"waiting for the first repo root, "
                              f"{review.repo_root_paths()[0]}, to resolve to a GitHub "
                              f"or GitLab checkout"}
+        if bans.unreadable():
+            return {"at": at, "me": None, "pings": [], "items": [], "error": bans.UNREADABLE}
         settings = self.comms_settings_payload()
         result = comms.tick(settings)
         toggles = self.comms_toggles()
         fresh = list(result.get("items") or [])
+        # Re-checked: the list may have stopped reading during the tick.
+        stranded = [] if bans.unreadable() else self._comms_stranded(fresh)
         items = []
-        for it in self._comms_stranded(fresh) + fresh:
+        for it in stranded + fresh:
             message, decision = it.get("message") or {}, it.get("decision") or {}
             try:
                 effect = comms.effect(decision, message, toggles, settings)
@@ -5187,6 +5258,9 @@ class Store(QObject):
                       for r in review.repo_roots() if not r.is_gitlab],
             "linearTeams": teams,
             "rate": self.pipeline_rate,
+            "mirrorGitHub": self.pipeline_mirror_github,
+            "mirrorLinear": self.pipeline_mirror_linear,
+            "mirrorScope": self.pipeline_mirror_scope,
             "fix": self.pipeline_fix,
             "fastTrack": self.pipeline_fast_track,
             "merge": self.pipeline_merge,
@@ -6573,22 +6647,29 @@ class Store(QObject):
 
     def refresh_activity(self) -> None:
         """Re-read the shared activity feed (audit.jsonl) and ban list (cheap tail /
-        small-file reads) and signal on change. Runs on the panel's 8s poll."""
+        small-file reads) and signal on change. Runs on the panel's 8s poll. An unreadable
+        ban list leaves the last read standing, and the feed says so once per spell."""
         from diplomat_runtime import activity
         from . import bans
 
-        new_audit = activity.read()
-        new_bans = bans.read()
         unreadable = bans.unreadable()
-        self._notice_new_bans(new_bans)
+        if unreadable and not self.ban_list_unreadable:
+            activity.log("auto", "warn", bans.unreadable_note())
+        new_audit = activity.read()
+        new_bans = self.banned_authors if unreadable else bans.read()
+        if not unreadable:
+            self._notice_new_bans(new_bans)
         bans_changed = new_bans != self.banned_authors
         if new_audit != self.audit_entries or bans_changed:
             self.audit_entries = new_audit
             self.banned_authors = new_bans
             self.activity_changed.emit()
-        if bans_changed or unreadable != self.ban_list_unreadable:
+        flipped = unreadable != self.ban_list_unreadable
+        if bans_changed or flipped:
             self.ban_list_unreadable = unreadable
             self.pipeline_changed.emit()
+        if flipped:
+            self.tasks_changed.emit()  # a queued row says whether the list holds it
 
     def unban_async(self, login: str) -> None:
         """The panel's un-ban, off the GUI thread: the daemon may take seconds."""

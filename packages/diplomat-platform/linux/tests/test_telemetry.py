@@ -15,12 +15,13 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shlex
 import time
 
 import pytest
 
-from diplomat_runtime import quota, telemetry, usagescan
+from diplomat_runtime import core, quota, telemetry, usagescan
 from test_opencode_v2 import quiet_shell
 
 
@@ -1505,3 +1506,12 @@ def test_a_logged_out_machine_never_rounds(credentials):
     credentials(file_token=None, keychain_token=None, live=set())
     assert quota.week_left() is None
     assert quota.probe_stats() == (0, 0)
+
+
+# MARK: - The assets README
+
+
+def test_the_assets_readme_counts_every_metric():
+    readme = (core.assets_dir() / "README.md").read_text(encoding="utf-8")
+    row = next(r for r in readme.splitlines() if r.startswith("| `telemetry.json` |"))
+    assert re.findall(r"the (\w+) metrics", row) == [str(len(core.telemetry()["metrics"]))]

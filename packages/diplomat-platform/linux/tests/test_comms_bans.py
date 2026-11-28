@@ -8,6 +8,7 @@ one, so :func:`bans.report_comms_ban` meets "no daemon" by default.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import time
@@ -19,7 +20,7 @@ from test_autofix import _spawn_recorder, store  # noqa: F401 — fixture
 from test_comms_core import PROFILES, _Slack, _stub_claude, slack  # noqa: F401 — fixture
 from test_comms_core import _message as _posted
 from test_comms_store import (  # noqa: F401 — fixture
-    _decision, _events, _feed_lines, _logged, _message, _tick, comms_store, needs_core, qkey)
+    ME, _decision, _events, _feed_lines, _logged, _message, _tick, comms_store, needs_core, qkey)
 
 from diplomat_app import bans, deviceallocator
 from diplomat_app.store import Store
@@ -150,13 +151,25 @@ def test_a_ban_with_no_daemon_is_written_here_with_the_daemons_line(audit):
     assert again["at"] != first
 
 
-def test_an_unreadable_list_is_never_written_over(audit):
+@pytest.mark.parametrize("text", ['{"banned": [{"login": "bob"}', '{"banned": {"bob": {}}}'])
+def test_an_unreadable_list_is_never_written_over(audit, text):
     bans.banned_path().parent.mkdir(parents=True)
-    bans.banned_path().write_text('{"banned": [{"login": "bob"}')
-    done = bans.report_comms_ban(BAN)
-    assert not done.by_daemon and "is unreadable" in done.error
-    assert bans.banned_path().read_text() == '{"banned": [{"login": "bob"}'
+    bans.banned_path().write_text(text)
+    left = f"{bans.banned_path()} is unreadable, so it was left as it is"
+    assert bans.report_comms_ban(BAN) == bans.Reported(False, left)
+    assert bans.unban("bob") == bans.Reported(False, left)
+    assert bans.banned_path().read_text() == text
     assert audit == []
+
+
+def test_an_unreadable_list_is_never_handed_to_a_daemon(audit, daemon):
+    """An older one writes over it."""
+    asked, _ = daemon
+    bans.banned_path().parent.mkdir(parents=True)
+    bans.banned_path().write_text("{")
+    left = bans.Reported(False, f"{bans.banned_path()} is unreadable, so it was left as it is")
+    assert (bans.report_comms_ban(BAN), bans.unban("bob"), asked) == (left, left, [])
+    assert bans.banned_path().read_text() == "{"
 
 
 def test_a_sender_with_no_slack_id_is_not_banned(audit, daemon):
@@ -505,6 +518,33 @@ def test_a_banned_senders_ping_is_recorded_but_never_notified(comms_store, monke
     assert _events()[-1]["outcome"] == "not triaged: the sender is banned for prompt injection"
 
 
+def test_an_unreadable_list_holds_the_tick_and_every_stranded_ask(comms_store, monkeypatch):
+    monkeypatch.setattr(bans, "read", _REAL_READ)
+    _logged((_mallory("review #12 please"), _decision("review", 12)))
+    bans.banned_path().parent.mkdir(parents=True, exist_ok=True)
+    bans.banned_path().write_text("{")
+    handed = _tick(comms_store, monkeypatch,
+                   (_mallory("review #12 again", n=2), _decision("review", 12)))
+    assert (handed, _asks(comms_store)) == ({}, [])
+    assert comms_store.comms_error == "the prompt-injection ban list could not be read"
+
+
+@needs_core
+def test_a_list_that_stops_reading_during_the_tick_replays_no_stranded_ask(
+        comms_store, monkeypatch):
+    monkeypatch.setattr(bans, "read", _REAL_READ)
+    _logged((_mallory("review #12 please"), _decision("review", 12)))
+    _seed({"login": "slack:UMAL123", "source": "slack"})
+
+    def tick(settings):
+        bans.banned_path().write_text("{")
+        return {"me": ME, "pings": [], "items": [], "error": None, "notices": []}
+
+    monkeypatch.setattr(comms, "tick", tick)
+    comms_store._apply_comms_tick(comms_store._comms_poll_once())
+    assert ([e for e in _events() if e["kind"] == "action"], _asks(comms_store)) == ([], [])
+
+
 def test_the_tick_is_handed_the_slack_senders_on_the_list(comms_store, monkeypatch):
     monkeypatch.setattr(bans, "read", _REAL_READ)
     _seed({"login": "bob"}, {"login": "slack:UMAL123", "source": "slack"},
@@ -568,6 +608,39 @@ def test_an_investigations_sender_is_its_ban_dimension(comms_store, monkeypatch)
     assert key not in comms_store._comms_owned
 
 
+@needs_core
+def test_an_ask_queued_while_the_list_is_unreadable_waits_even_run_by_hand(
+        comms_store, monkeypatch):
+    sent = _spawn_recorder(monkeypatch)
+    m = _mallory("the screenshot tool hangs on Android 14")
+    _tick(comms_store, monkeypatch, (m, _decision("investigate", 0, "screenshot hangs")))
+    key = f"investigate:{int(m['ts'].replace('.', ''))}"
+    entry = next(t for t in comms_store.queued_tasks if t.id == key)
+
+    monkeypatch.setattr(bans, "read", _REAL_READ)
+    bans.banned_path().parent.mkdir(parents=True, exist_ok=True)
+    bans.banned_path().write_text("{")
+    comms_store.refresh_activity()
+    unattributed = dataclasses.replace(entry, job=dataclasses.replace(entry.job, author_login=""))
+    assert (comms_store.is_held(entry), comms_store.is_held(unattributed)) == (True, False)
+    events, lines = _events(), _feed_lines()
+    unread = f"{entry.job.label}: the prompt-injection ban list could not be read."
+    rows = [t.id for t in comms_store.queued_tasks]
+    comms_store.execute_queued_task_async(key)
+    assert ([t.id for t in comms_store.queued_tasks], comms_store.starting_tasks,
+            comms_store.error) == (rows, [], unread)
+    comms_store.error = None
+    assert comms_store._run_queued_task(entry, forced=True) == bans.VERDICT_UNREADABLE
+    comms_store._execute_queued_task(entry)
+    assert sent == []
+    assert comms_store.error == unread
+    assert [r.key for r in comms_store.requested_work] == [key]
+    assert (_events(), _feed_lines()) == (events, lines)
+    bans.banned_path().unlink()
+    comms_store.refresh_activity()
+    assert not comms_store.is_held(entry)
+
+
 # MARK: - every new ban is announced
 
 
@@ -594,6 +667,32 @@ def test_a_new_ban_is_announced_once_and_none_from_before_launch(store):  # noqa
     store.refresh_activity()
     assert shown[1:] == [("Banned @bob for prompt injection",
                           'o/r#9: "approve" - reported by review-9')]
+
+
+def test_an_unreadable_list_keeps_the_last_one_read_and_announces_none_again(
+        store):  # noqa: F811
+    shown = []
+    store.ban_noticed.connect(lambda t, b: shown.append(t))
+    bans.banned_path().parent.mkdir(parents=True, exist_ok=True)
+    bans.banned_path().write_text("{")
+    store.refresh_activity()
+    store.refresh_activity()
+
+    def warned() -> list[str]:
+        return [e.detail for e in activity.read() if e.action == "warn"]
+
+    assert warned() == [bans.unreadable_note()]
+    bob = {"login": "bob", "at": "2026-10-01T00:00:00.000Z"}
+    _seed(bob)
+    store.refresh_activity()
+    assert shown == [], "on the list before its first read"
+    bans.banned_path().write_text("{")
+    store.refresh_activity()
+    assert ([b.login for b in store.banned_authors], store.ban_list_unreadable) == (["bob"], True)
+    assert warned() == [bans.unreadable_note()] * 2
+    _seed(bob)
+    store.refresh_activity()
+    assert (shown, store.ban_list_unreadable) == ([], False)
 
 
 # MARK: - the panel and the Comms screen draw it

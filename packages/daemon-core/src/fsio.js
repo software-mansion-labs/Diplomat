@@ -35,8 +35,8 @@ export function writeAtomic(file, data, mode = 0o644) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp.${process.pid}`;
   // fsync before rename: without it a crash/power loss can leave a zero-length
-  // file after the rename commits (for the allocator's banned.json, a torn read
-  // resets the ban list).
+  // file after the rename commits (for the allocator's banned.json, an unreadable
+  // list that holds every author's work until it is repaired).
   try {
     const fd = fs.openSync(tmp, 'w', mode);
     try {

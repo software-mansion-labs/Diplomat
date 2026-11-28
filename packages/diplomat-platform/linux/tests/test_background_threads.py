@@ -15,6 +15,7 @@ at the moment the process ends and asserts a clean exit anyway.
 from __future__ import annotations
 
 import ast
+import contextlib
 import os
 import signal
 import subprocess
@@ -25,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from diplomat_app.store import Store
+from test_pipeline_store import _all_dead
 
 _LINUX_DIR = Path(__file__).resolve().parents[1]
 _APP_DIR = _LINUX_DIR / "diplomat_app"
@@ -206,6 +208,69 @@ def test_a_newer_instance_or_a_closed_terminal_stops_the_pipeline_sync(tmp_path,
                           cwd=str(_LINUX_DIR), env=env, capture_output=True, text=True,
                           timeout=60)
     assert (done.returncode, done.stdout) == (code, said), done.stderr[-2000:]
+
+
+_HELD = '''\
+import signal
+import subprocess
+import sys
+
+from PySide6.QtCore import QSettings, QTimer
+from PySide6.QtWidgets import QApplication
+
+from diplomat_app import selfupdate
+from diplomat_app.app import DiplomatApp, SingleInstance
+from diplomat_app.store import Store
+
+QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, sys.argv[3])
+app = DiplomatApp.__new__(DiplomatApp)
+app.app = QApplication([])
+app.store = Store()
+app.tray = app.panel = type("_Widget", (), {"hide": lambda self: None})()
+selfupdate.mark_operator_quit = lambda: None
+SingleInstance.release = staticmethod(lambda: None)
+core = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                        start_new_session=True, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL)
+open(sys.argv[4], "w").write(str(core.pid))
+app.store._pipeline_proc = core
+
+
+def held():
+    with getattr(app.store, sys.argv[2]):
+        signal.raise_signal(getattr(signal, sys.argv[1]))
+
+
+QTimer.singleShot(0, held)
+app.exec()
+print("ran on", flush=True)
+'''
+
+
+@pytest.mark.parametrize("name, lock, code, said", [
+    ("SIGTERM", "_pipeline_lock", -signal.SIGTERM, ""),
+    ("SIGTERM", "_rating_lock", -signal.SIGTERM, ""),
+    ("SIGINT", "_pipeline_lock", 0, "ran on\n"),
+    ("SIGINT", "_rating_lock", 0, "ran on\n"),
+])
+def test_a_signal_inside_a_block_holding_a_lock_its_handler_takes_still_stops_the_sync(
+        tmp_path, name, lock, code, said):
+    """A handler runs on the Qt thread between two of its bytecodes, which may be inside
+    a block holding a lock the handler takes too."""
+    env = {**os.environ, "PYTHONPATH": str(_LINUX_DIR), "HOME": str(tmp_path),
+           "QT_QPA_PLATFORM": "offscreen"}
+    pid_file = tmp_path / "core"
+    try:
+        done = subprocess.run([sys.executable, "-c", _HELD, name, lock, str(tmp_path),
+                               str(pid_file)],
+                              cwd=str(_LINUX_DIR), env=env, capture_output=True, text=True,
+                              timeout=60)
+        assert (done.returncode, done.stdout) == (code, said), done.stderr[-2000:]
+        assert _all_dead(int(pid_file.read_text()))
+    finally:
+        with contextlib.suppress(OSError, ValueError):
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)
 
 
 # ---- and the abort it exists to prevent ------------------------------------

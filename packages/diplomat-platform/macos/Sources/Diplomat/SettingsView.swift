@@ -1079,9 +1079,28 @@ struct SettingsView: View {
     private var pipelineOptions: some View {
         NestedSettings(tint: .green) {
             SettingRow(title: "Rate issues and PRs",
-                       summary: "Risk and complexity, by claude, as labels where Diplomat may write",
+                       summary: "Risk and complexity, by claude, kept on this machine",
                        detail: SettingsView.pipelineRateDetail) {
                 switchControl("Rate issues and PRs", $store.pipelineRate)
+            }
+            SettingRow(title: "Mirror ratings to GitHub",
+                       summary: "Writes each rating as risk: and complexity: labels on the GitHub items picked below") {
+                switchControl("Mirror ratings to GitHub", $store.pipelineMirrorGitHub)
+            }
+            SettingRow(title: "Mirror ratings to Linear",
+                       summary: "Writes each rating as risk: and complexity: labels on the Linear issues picked below") {
+                switchControl("Mirror ratings to Linear", $store.pipelineMirrorLinear)
+            }
+            if store.pipelineMirrorGitHub || store.pipelineMirrorLinear {
+                SettingRow(title: "Mirror onto", summary: "Which rated items get the labels",
+                           detail: SettingsView.pipelineMirrorScopeDetail, stacked: true) {
+                    Picker("Mirror onto", selection: $store.pipelineMirrorScope) {
+                        Text("My PRs").tag(PipelineMirrorScope.prs)
+                        Text("My PRs and issues").tag(PipelineMirrorScope.mine)
+                        Text("All rated items").tag(PipelineMirrorScope.all)
+                    }
+                    .pickerStyle(.segmented).labelsHidden().controlSize(.small)
+                }
             }
             SettingRow(title: "Open fix PRs",
                        summary: "Queues an agent that fixes each low-risk, low-complexity issue, and each you take over",
@@ -1181,21 +1200,28 @@ struct SettingsView: View {
         Reads every open issue and PR and draws them on the Pipeline screen by stage; what \
         it may do about them is the switches under this one, and with all of them off it \
         only reads, but for Rate now, Fracture and taking diplomat:fractured off an issue \
-        whose split filed nothing. Its state is the trackers' labels: risk:, complexity: \
-        and diplomat:. Diplomat writes labels, opens child issues or merges only on an issue \
-        unassigned or assigned to you, or your own PR from the repo itself into its default \
-        branch; everything else is read and shown. GitLab roots are not read. The agent work \
-        it asks for waits in the queue like any other, for the task cap, the ban list and \
-        the spending budget; while this is off it reads nothing and that work waits.
+        whose split filed nothing. Its ratings are kept on this machine, and the rest of its \
+        state is the trackers' diplomat: labels. Diplomat writes labels, opens child issues \
+        or merges only on an issue unassigned or assigned to you, or your own PR from the \
+        repo itself into its default branch; everything else is read and shown. GitLab roots \
+        are not read. The agent work it asks for waits in the queue like any other, for the \
+        task cap, the ban list and the spending budget; while this is off it reads nothing \
+        and that work waits.
         """
 
     static let pipelineRateDetail = """
         A few unrated items a sync, each rated low, medium or high for risk and complexity \
         by one claude call with read-only tools in its repo's checkout and the item's text \
-        as data. A rating is labelled where Diplomat may write; any other issue's rating is \
-        kept on this machine only, and someone else's PR is not rated. A rating already on \
-        the tracker is the rating, raised by a higher one kept here until its labels are \
-        written; a PR's diff can only raise one.
+        as data. Each rating is kept on this machine, and goes on the tracker as labels only \
+        where Mirror ratings says; someone else's PR is not rated. Labels already on an item \
+        rate it, or raise the rating kept for it, never lower it; a PR's diff can only raise one.
+        """
+
+    private static let pipelineMirrorScopeDetail = """
+        My PRs: your own PRs. My PRs and issues: also the issues you opened or are assigned. \
+        All rated items: every rated item Diplomat may write to. A sync labels a few ratings \
+        it has not labelled yet, your PRs first, then the newest. Higher labels a person put \
+        on stay, and raise the rating; a mirror switched off leaves the labels it wrote.
         """
 
     static let pipelineFastTrackSummary = "Labels diplomat:fast-track each low/low PR of yours that closes "
@@ -1212,8 +1238,9 @@ struct SettingsView: View {
 
     static let pipelineMergeDetail = """
         A cleared PR is merged only when none of the holds in docs/pipeline.md applies to \
-        it, checked again right before the merge. Admin rights skip branch protection's \
-        approval requirement, so leave this off where a second pair of eyes is required.
+        it, checked again right before the merge. With Fast-track my PRs on, one behind its \
+        base has the base merged into it first. Admin rights skip branch protection's approval \
+        requirement, so leave this off where a second pair of eyes is required.
         """
 
     private static let pipelineFractureDetail = """

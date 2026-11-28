@@ -44,7 +44,8 @@ extension Store {
                 PipelineSettings.Root(owner: $0.owner, repo: $0.repo, path: $0.path, me: knownMe(for: $0))
             },
             linearTeams: Store.pipelineTeams(pipelineLinearTeamsRaw),
-            rate: pipelineRate, fix: pipelineFix, fastTrack: pipelineFastTrack,
+            rate: pipelineRate, mirrorGitHub: pipelineMirrorGitHub, mirrorLinear: pipelineMirrorLinear,
+            mirrorScope: pipelineMirrorScope, fix: pipelineFix, fastTrack: pipelineFastTrack,
             merge: pipelineMerge, fracture: pipelineFracture,
             force: force.isEmpty ? nil : force,
             queued: Store.pipelineQueued(requestedWork, attempts: loadPipelineAttempts()))
@@ -66,7 +67,8 @@ extension Store {
         let env = ProcessInfo.processInfo.environment["DIPLOMAT_PIPELINE_DIR"] ?? ""
         guard !Headless.active || !env.isEmpty else { return }
         let revoke = pipelineForce.revoke.sorted()
-        PipelineControl(enabled: pipelineEnabled, rate: pipelineRate, fix: pipelineFix,
+        PipelineControl(enabled: pipelineEnabled, rate: pipelineRate, mirrorGitHub: pipelineMirrorGitHub,
+                        mirrorLinear: pipelineMirrorLinear, mirrorScope: pipelineMirrorScope, fix: pipelineFix,
                         fastTrack: pipelineFastTrack, merge: pipelineMerge, fracture: pipelineFracture,
                         revoke: revoke.isEmpty ? nil : revoke).save()
     }
@@ -115,14 +117,17 @@ extension Store {
     }
 
     /// Until the loop's next sync: an interval after the last timed one ended, by the clock,
-    /// which runs on while the Mac sleeps.
+    /// which runs on while the Mac sleeps; a whole interval while one runs.
     var pipelineSyncWait: TimeInterval {
         let interval = Store.pipelineSyncInterval
+        if pipelineTimedSyncing { return interval }
         return pipelineTimedSyncEnded.map { min(interval, interval + $0.timeIntervalSinceNow) } ?? 0
     }
 
     private func runTimedPipelineSync() async {
+        pipelineTimedSyncing = true
         await runPipelineSyncOnce()
+        pipelineTimedSyncing = false
         pipelineTimedSyncEnded = Date()
     }
 
@@ -269,7 +274,7 @@ extension Store {
         if pipelineEnabled {
             let file = BanList.readFile()
             let banned = BanList.read(file)
-            let unreadable = if case .unreadable = file { true } else { false }
+            let unreadable = file.isUnreadable
             for effect in result.effects {
                 guard pipelineAsking(effect) else { continue }
                 guard var ask = pipelineAsk(effect) else { continue }

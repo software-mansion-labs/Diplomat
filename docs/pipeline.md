@@ -4,7 +4,7 @@ Every open issue of the GitHub repo roots and the tracked Linear teams, and ever
 rated for risk and complexity and routed: a low-risk, low-complexity issue goes down the **fast
 track**, from issue to fix PR to merge with no person reading the change; everything else is left
 to a person, unless you [hand it to Diplomat](#takeover). It ships **off**, every switch of it too,
-and its state is the trackers' own labels.
+and its state is the ratings it keeps on this machine and the trackers' own labels.
 
 ## What it does
 
@@ -14,9 +14,10 @@ Every five minutes while it is on, a **sync**:
    tracked Linear teams' open issues, and links them: an issue to the PR that fixes it, a parent to
    its children, a PR to the PR stacked on it.
 2. **Rates** items, by the [definitions below](#ratings): each rating is a queued job, whose answer
-   the next sync writes as labels where Diplomat [may write](#who-diplomat-may-write-to).
+   the next sync keeps on this machine, as labels too where you [mirror](#settings) it and Diplomat
+   [may write](#who-diplomat-may-write-to).
 3. **Routes** a low/low issue down the [fast track](#the-fast-track): its fix PR, that PR reviewed
-   until clean, rated again at the clean head, and merged.
+   until clean, rated again at the clean head, brought up to date with its base, and merged.
 4. **Splits** one medium- or high-complexity issue into low-complexity
    [sub-issues](#fracturing).
 
@@ -42,8 +43,8 @@ What it does not do:
 
 - write to anything that is not [yours to write to](#who-diplomat-may-write-to) - that is shown, read only;
 - rate someone else's PR: it shows the labels a person put on it;
-- lower a rating: a label already on an item is its rating, and Diplomat writes only the higher of
-  that, the model's answer and a PR's [diff floor](#the-diff-floor);
+- lower a rating: a label already on an item is its rating or can only raise the one kept for it,
+  and a new rating is the higher of those, the model's answer and a PR's [diff floor](#the-diff-floor);
 - approve a PR: GitHub does not let you approve your own, so the clean review is a COMMENT and the
   merge uses your [admin rights](#the-merge);
 - fast-track a PR of yours that closes no issue or one that is not a `candidate`, that was rated while
@@ -72,7 +73,7 @@ A PR:
 | `human` | rated, and not on the fast track; every PR that is not yours, once a person labelled it | Human |
 | `fast-track` | yours, labelled `diplomat:fast-track`, closing only `candidate` issues, at least one unless taken over, no clean marker at its head | Fast |
 | `clean` | the same, with a clean marker at its head | Fast |
-| `cleared` | labelled `diplomat:cleared`, clean at its head, and rated low/low again there by this Diplomat (its state or log says so), or, taken over, labelled so there by this Diplomat | Fast |
+| `cleared` | labelled `diplomat:cleared`, clean at its head, and rated low/low again there by this Diplomat (its state or log says so), or, taken over, labelled so there by this Diplomat; or at a later head carrying that one's change [unchanged](#the-merge) | Fast |
 | `merged`, `closed` | one of the repo's 20 merged or closed PRs updated last, carrying a pipeline label, or read for an ask waiting on it | Done |
 
 An issue labelled `wontfix`, `wont fix`, `won't fix`, `duplicate`, `invalid`, `question`,
@@ -100,23 +101,25 @@ a Linear team was not read whole, no issue in the repo it maps to is fixed, spli
    `Fixes ENG-12` in its PR's description.
 2. The PR is rated on its own (**Rate issues and PRs**), from its text and diff, never below its
    [diff floor](#the-diff-floor). Every open PR of yours is rated, not only the ones Diplomat opened.
-3. Low/low at its first rating (its timeline showed no rating or fast-track label before it) and
-   closing only `candidate` issues (the fast track is for the fixes the pipeline asks for), it is
-   labelled `diplomat:fast-track` (**Fast-track my PRs**); a PR rated while that is off, rated
-   anything else, or that the label could not be put on stays a person's, the last with a hold
-   saying so. A max-depth review run is queued for its head. It reviews the
+3. Low/low at its first rating (none was kept for it before, and its timeline showed no rating or
+   fast-track label) and closing only `candidate` issues (the fast track is for the fixes the
+   pipeline asks for), it is labelled `diplomat:fast-track` (**Fast-track my PRs**); a PR rated
+   while that is off, rated anything else, or that the label could not be put on stays a person's,
+   the last with a hold saying so. A max-depth review run is queued for its head. It reviews the
    PR and fixes what it finds on the branch until a full pass at the head finds nothing, LOW
    findings included, then posts one COMMENT review whose body begins
    `Clean at <head sha>`: the **clean marker**. A marker counts only on your own review, submitted
    at the commit it names.
 4. At the clean head the PR is rated again, once per head: the answer is recorded as it arrives,
-   so a sync stopped before its labels never asks again for that head. Still low/low, it is labelled
+   so a sync stopped before acting on it never asks again for that head. Still low/low, it is labelled
    `diplomat:cleared`; anything else, its labels written or not, takes both labels off and leaves it
    to a person until you [take it over](#takeover).
-5. A cleared PR is [merged](#the-merge) (**Merge cleared PRs**) once nothing holds it.
+5. A cleared PR is [merged](#the-merge) (**Merge cleared PRs**) once nothing holds it, its base
+   merged into it first whenever it is behind.
 
 A head no clean marker names, as after a push, takes `diplomat:cleared` off, and the PR goes back
-to `fast-track` for a review of that head. A person who takes `diplomat:cleared` off a PR before
+to `fast-track` for a review of that head, unless it carries the cleared change
+[unchanged](#the-merge). A person who takes `diplomat:cleared` off a PR before
 Diplomat does takes it off the fast track until you [take it over](#takeover): Diplomat neither
 labels, reviews nor merges it again, and takes `diplomat:fast-track` off too, so the labels say so. One who
 takes `diplomat:fast-track` off leaves it to a person: Diplomat puts that label back only for a takeover.
@@ -176,14 +179,20 @@ again at its new head; one you cancel in the queue is not made again until **Rat
 call is a notice, and the item is tried again 1, 2, 4 ... syncs later (a day at most), taking none
 of the four slots meanwhile.
 
-Labels for both dimensions are the item's rating (two of one dimension: the higher), and it is not
-rated again but for the fast track's second rating or when you ask. A rating Diplomat writes is the
-higher of the labels already there, the model's answer, a rating kept for it and the diff floor, a
-dimension at a time. Each answer is kept on this machine as it arrives, until its labels are written,
-so it is not paid for again; one whose labels could not be written comes with a notice. A kept rating
-counts over lower labels, holding the item, moves nothing down the fast track, and its labels are
-written at a later sync, tried again 1, 2, 4 ... syncs later, unless a PR's diff at its head allows
-less: then it is dropped, and the PR is rated by its labels again, or rated anew without them.
+Each answer is kept on this machine as it arrives, so it is not paid for again, and labels can only
+raise it; on an item with none kept, labels for both dimensions are its rating (two of one dimension:
+the higher). A rated item is not rated again but for the fast track's second rating or when you ask,
+and a new rating is the higher of the labels already there, the model's answer, the rating kept and
+the diff floor, a dimension at a time. One a sync could not apply holds a PR off the fast track,
+and an issue from its fix, until a later sync does, tried again 1, 2, 4 ... syncs later, unless a
+PR's diff at its head allows less: then it is dropped, and the PR is rated by its labels again, or
+rated anew without them.
+
+Where you [mirror](#settings) ratings, a finished one's labels are written at once, and a sync labels
+up to 10 more kept ratings an item does not wear yet (`pipeline.json` `labels.mirrorPerSync`), your
+PRs first, then the newest; a write the tracker refuses is a notice, tried again 1, 2, 4 ... syncs
+later. Higher labels a person put on stay, and raise the rating; a mirror switched off leaves the
+labels it wrote.
 
 ### The diff floor
 
@@ -235,11 +244,12 @@ someone else's PR is rated only by the labels a person put on it. A PR of yours 
 | `diplomat:cleared` | rated low/low again at its clean head by this Diplomat, or put on there for a takeover: only the [holds](#the-merge) stand before the merge |
 | `diplomat:fractured` | an issue split into sub-issues, labelled before the first is filed |
 
-They are the pipeline's state, read case-insensitively, and a person can set or remove any of them,
-but a `diplomat:cleared` this Diplomat did not give counts for nothing, and taking either fast-track
-label off a PR takes it off the [fast track](#the-fast-track). A missing GitHub label is
-created in its repo on first use; on Linear the team's label of that name in any case is used, else
-the workspace's, made if there is neither.
+They are read case-insensitively, the `diplomat:` ones the pipeline's state, and a person can set or
+remove any of them, but a rating label can only raise a rating Diplomat keeps, a `diplomat:cleared`
+this Diplomat did not give counts for nothing, and taking either fast-track label off a PR takes it
+off the [fast track](#the-fast-track). A missing GitHub label is created in its repo on first use;
+on Linear the team's label of that name in any case is used, else the workspace's, made if there is
+neither.
 
 ## Fracturing
 
@@ -304,7 +314,8 @@ its commits, its base branch and the checks it requires read only for a PR nothi
 - it was turned back into a draft after it was ready for review;
 - a commit authored or committed by anyone but you (GitHub's own committer of a web commit aside), or
   more commits than one read lists, by the accounts GitHub maps their emails to (whoever wrote them,
-  the head merged is the one the review run found clean and, unless taken over, Diplomat rated low/low again);
+  the head merged is the one the review run found clean and, unless taken over, Diplomat rated low/low again,
+  or one carrying its change unchanged);
 - changes requested; an unresolved review thread;
 - a stop label: `do not merge`, `do-not-merge`, `don't merge`, `blocked`, `on hold`, `wip` or
   `work in progress`, matched as triage labels are (`pipeline.json` `stopLabels`);
@@ -332,6 +343,17 @@ its commits, its base branch and the checks it requires read only for a PR nothi
 - it is assigned to anyone but you;
 - its repo allows none of squash, merge or rebase, or the pull request rules on its base branch allow
   none of those it allows.
+
+With **Fast-track my PRs** on too, a cleared PR whose hold, read again, is being behind its base has
+its base merged into it once nothing else would hold it up to date, being a draft aside (CI still
+running at its head would): `gh api -X PUT repos/<repo>/pulls/<n>/update-branch` at the head read,
+GitHub making the merge commit, logged `asked`. A later sync keeps it cleared at any head it moves to
+that carries the change cleared: its diff against its base (GitHub's compare) changes the same files
+to the same contents as at the head cleared, each in the same mode, and its base changed none of
+those files since; what cannot be read whole, a compare of 300 files (GitHub's most) or a tree GitHub
+cuts short, counts as a change. CI then runs at that head, and the PR merges once nothing holds it,
+its base merged in again whenever it falls behind first. A head carrying any other change takes
+`diplomat:cleared` off, for a review of it.
 
 A hold shows on the card and is logged each time it changes. A merge `gh` refuses (no admin rights, a
 head that moved) is a notice, and the next sync tries again. The PR is read again after every merge,
@@ -361,8 +383,8 @@ team's repo, and each group with no card in any root, whole.
   a hold, a lock an item Diplomat may not write to, **agent** or **queued** the queue's work on it;
   merged and closed cards are dimmed.
 - **The selected card** - a click picks it, an arrow key the nearest card that way; its link; its
-  rating, whether it came from labels or was rated here and not
-  labelled, the rater's sentence and the diff floor; its hold; who may act on it, who opened it and
+  rating, whether its labels set or raised it or it was rated here, the rater's sentence and the
+  diff floor; its hold; who may act on it, who opened it and
   who it is assigned to, and for a PR its head and whether a clean marker names it; its
   **traversal**, newest first: each step the sync took or saw (`rated`, `labelled`, `fast-track`,
   `clean`, `rerated`, `cleared`, `merged`, `held`, `fractured`, `child`, `asked`, `takeover`); a
@@ -385,22 +407,29 @@ Every action but **Open** is disabled while the pipeline is off, and **Rate now*
 ## Settings
 
 All of them are on the **Pipeline** card, all **default off**; the rows under the master switch show
-only while it is on. A switch turned on syncs at once. One turned off also stops a sync already
-running, which reads the switches again (`control.json`) before every step it takes and every
-`claude` call.
+only while it is on. A switch turned on syncs at once. One turned off, or **Mirror onto** narrowed,
+also stops a sync already running, which reads the switches again (`control.json`) before every step
+it takes and every `claude` call.
 
 - **Run the pipeline** - the sync itself, every five minutes. With every switch below off it only
   reads: no label, no `claude` call, but for **Rate now**, **Fracture** and taking back a split's
   label when the split filed nothing. Off, it reads nothing,
   and the work it queued waits.
-- **Rate issues and PRs** - the ratings and their labels. **Each rating is one `claude -p` call**,
+- **Rate issues and PRs** - the ratings, kept on this machine. **Each rating is one `claude -p` call**,
   allowed five minutes, run from the queue like the fix and review runs, at most four waiting past
   the ones you force. Off, a sync drops the ones waiting that you did not force.
+- **Mirror ratings to GitHub**, **Mirror ratings to Linear** - each [rating](#ratings) as labels on
+  that tracker, onto the items **Mirror onto** takes in.
+- **Mirror onto** - of the items Diplomat [may write to](#who-diplomat-may-write-to), **My PRs** (the
+  default), **My PRs and issues** (also the issues you opened or are assigned; on Linear, created by
+  or assigned to the Linear login's user) or **All rated items**.
 - **Open fix PRs** - a Fix-issues run for each `candidate` issue no open PR fixes.
 - **Fast-track my PRs** - `diplomat:fast-track` on each PR of yours rated low/low at its first rating
   that closes only `candidate` issues, or taken over, a review run per head until clean, and `diplomat:cleared` taken
-  off a PR whose head no marker names. A PR rated while it is off stays a person's.
-- **Merge cleared PRs** - [the merge](#the-merge), with your admin rights.
+  off a PR whose head no marker names and carries no cleared change unchanged. A PR rated while it is
+  off stays a person's.
+- **Merge cleared PRs** - [the merge](#the-merge), with your admin rights, and, with **Fast-track my
+  PRs** on, its base merged into a cleared PR behind it.
 - **Split big issues** - [fracturing](#fracturing): one issue and one `claude -p` call a sync.
 - **Linear teams** - `ENG=owner/repo, OPS=owner/other`, commas, semicolons or new lines between
   them: each Linear team key (ASCII letters and digits, read in capitals as Linear spells it) and the
@@ -411,8 +440,9 @@ running, which reads the switches again (`control.json`) before every step it ta
 
 The whole fast track, issue to merge, takes **Rate issues and PRs**, **Open fix PRs**,
 **Fast-track my PRs** and **Merge cleared PRs**. The switches are in UserDefaults (macOS) and
-QSettings (Linux) under the same keys: `pipelineEnabled`, `pipelineRate`, `pipelineFix`,
-`pipelineFastTrack`, `pipelineMerge`, `pipelineFracture` and `pipelineLinearTeams`.
+QSettings (Linux) under the same keys: `pipelineEnabled`, `pipelineRate`, `pipelineMirrorGitHub`,
+`pipelineMirrorLinear`, `pipelineMirrorScope`, `pipelineFix`, `pipelineFastTrack`, `pipelineMerge`,
+`pipelineFracture` and `pipelineLinearTeams`.
 
 ## Linear
 
@@ -450,17 +480,17 @@ retitle keeps what Diplomat recorded of it.
 
 ## Where it keeps things
 
-`~/.diplomat/pipeline/` (`DIPLOMAT_PIPELINE_DIR` moves it), readable by you alone. The trackers'
-labels are the state; this is what a sync needs besides:
+`~/.diplomat/pipeline/` (`DIPLOMAT_PIPELINE_DIR` moves it), readable by you alone. Besides the
+trackers' labels, this is what a sync needs:
 
 - `log.jsonl` - every step a sync took or saw, which the traversals are drawn from and whose
   re-rates and clears back `state.json`'s; trimmed to its newest half past 2 MB.
 - `last.json` - the last sync's result, which the screen shows until the next one.
-- `ratings.json` - the ratings of items Diplomat may not label, kept while the item is unchanged, and
-  of those whose labels could not be written, until they are; the rater's sentence for the rest.
+- `ratings.json` - the ratings Diplomat made, each with the rater's sentence.
 - `state.json` - the labels made per repo, the items taken over, and the guards against repeating a step: each PR's
   re-rates by head, which prove a `cleared` label this Diplomat's own, and the head it was cleared
-  at, which alone does for a PR taken over; the PRs Diplomat took off the fast track, or could not put on it; the items whose rating, its
+  at, which alone does for a PR taken over; the later heads that carry
+  that clear, their change the one cleared; the PRs Diplomat took off the fast track, or could not put on it; the items whose rating, its
   labels or split failed, and when to
   try again; the issues that would not split and why, and those being split with the parts the
   model answered and those filed so far; and the issues Diplomat filed as parts, with the ban each
@@ -470,8 +500,9 @@ labels are the state; this is what a sync needs besides:
   cannot be read leaves every sync reading and showing only, with a notice.
 - `rate/` - each rating asked for: the call its job makes, and the answer it leaves for the next
   sync, until the sync no longer asks for it.
-- `control.json` - the switches as the app has them, and the revokes asked that no sync has
-  answered, rewritten whenever one changes, a takeover or revoke is asked, and before each sync.
+- `control.json` - the switches and **Mirror onto** as the app has them, and the revokes asked that
+  no sync has answered, rewritten whenever one changes, a takeover or revoke is asked, and before
+  each sync.
 - `linear-login.json` - the [Linear login](#linear): its tokens, and who it is.
 
 The fix and review asks' attempt records are the app's own (`pipelineAttempts`): a run that reported

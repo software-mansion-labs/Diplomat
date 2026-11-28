@@ -988,6 +988,92 @@ enum CommsTest {
         try? FileManager.default.removeItem(at: bansFile)
         store.refreshBanList()
 
+        // MARK: a ban list this app cannot read at all
+        let unread = "the prompt-injection ban list could not be read"
+        let victorAsk = from("U0VICTOR", "victor", "the nightly build is broken",
+                             CommsDecision(action: .investigate, number: 0,
+                                           summary: "Nightly build broken", reason: "r"))
+        await apply([victorAsk])
+        let victorKey = "investigate:\(CommsTS.number(victorAsk.message.ts)!)"
+        let victorQueued = outcome(victorAsk)
+        let listed = Data(#"{"banned":[{"login":"keep-me","at":"2026-07-01T10:00:00.000Z"}]}"#.utf8)
+        try? listed.write(to: bansFile)
+        store.refreshBanList()
+        let notifiedBeforeUnread = notified.count
+        try? Data("{".utf8).write(to: bansFile)
+        store.refreshBanList()
+        store.refreshBanList()
+        check("an unreadable list leaves the panel's last read standing",
+              store.bannedAuthors.map(\.login) == ["keep-me"] && store.banListUnreadable)
+        check("…says so in the feed once",
+              feed("warn").filter { $0.detail == BanList.unreadNote }.count == 1)
+        check("…and an un-ban of a row it shows writes nothing, saying why",
+              BanList.unban("keep-me") == .failed("\(bansFile.path) is unreadable, so it was left as it is")
+                && (try? Data(contentsOf: bansFile)) == Data("{".utf8))
+        check("…holds the tick: \(store.commsHeldTick()?.error ?? "<not held>")",
+              store.commsHeldTick()?.error == unread)
+        let strandedAsk = from("U0WENDY", "wendy", "review #90060 please",
+                               CommsDecision(action: .review, number: 90060, summary: "", reason: "r"))
+        CommsLog.append(CommsEvent(kind: .ping, id: strandedAsk.message.id, message: strandedAsk.message))
+        CommsLog.append(CommsEvent(kind: .decision, id: strandedAsk.message.id,
+                                   decision: strandedAsk.decision))
+        await store.applyComms(CommsTickResult(me: nil, items: [], error: unread))
+        check("…and acts on no stranded ask: \(outcome(strandedAsk))", outcome(strandedAsk) == "<none>")
+        let victorTask = store.queuedTasks.first { $0.id == victorKey }
+        check("a queued ask naming its author waits, a Slack ping's too",
+              victorTask.map { store.isHeld($0) && store.heldByBanList($0) } == true)
+        // A paused queue holds whatever the gate lets through, so this probe spawns nothing.
+        var probe: Store.DispatchOutcome?
+        if let victorTask {
+            let autoRun = store.queueAutoRun
+            store.queueAutoRun = false
+            probe = await store.dispatchAgent(victorTask.job, source: .auto)
+            store.queueAutoRun = autoRun
+        }
+        check("…and its gate refuses whoever's work reaches it: \(probe.map { "\($0)" } ?? "<not queued>")",
+              probe == .banListUnreadable)
+        var unattributed: [Store.DispatchOutcome] = []
+        var unattributedHeld: [Bool] = []
+        for author in ["", nil] as [String?] {
+            guard var task = victorTask else { break }
+            task.job.authorLogin = author
+            unattributedHeld.append(store.isHeld(task) || store.heldByBanList(task))
+            let autoRun = store.queueAutoRun
+            store.queueAutoRun = false
+            unattributed.append(await store.dispatchAgent(task.job, source: .auto))
+            store.queueAutoRun = autoRun
+        }
+        check("…but work naming no author neither waits nor is refused for it",
+              unattributedHeld == [false, false] && unattributed == [.atCapacity, .atCapacity])
+        store.error = nil
+        let unreadSkipsBefore = feed("ban-skip").count
+        let rowsBefore = store.queuedTasks.map(\.id)
+        if probe == .banListUnreadable { await store.executeQueuedTask(victorKey) }
+        let victorLabel = victorTask?.job.label ?? "<not queued>"
+        check("…even run by hand, saying why, its row staying where it is, as do its ask and its ping's word",
+              store.error == "\(victorLabel): \(unread)."
+                && store.queuedTasks.map(\.id) == rowsBefore && store.startingTasks.isEmpty
+                && store.requestedWork.contains { $0.key == victorKey }
+                && outcome(victorAsk) == victorQueued && feed("ban-skip").count == unreadSkipsBefore)
+        check("…as does a wizard",
+              statusText(for: .banListUnreadable, terminal: "T")
+                == "The prompt-injection ban list could not be read."
+                && statusText(for: .banned, terminal: "T")
+                == "Author is banned for prompt injection — un-ban to review.")
+        store.error = nil
+        try? listed.write(to: bansFile)
+        store.refreshBanList()
+        check("read again, nothing on it is announced again",
+              notified.count == notifiedBeforeUnread && !store.banListUnreadable
+                && store.commsHeldTick() == nil)
+        check("…and the ask no longer waits",
+              victorTask.map { store.isHeld($0) } == false)
+        store.forgetRequested(victorKey)
+        await store.applyComms(CommsTickResult(me: nil, items: [], error: nil))
+        check("…and the stranded ask is acted on", outcome(strandedAsk) != "<none>")
+        try? FileManager.default.removeItem(at: bansFile)
+        store.refreshBanList()
+
         // MARK: where a Slack ban was
         check("a Slack ban's channel is its own place, with no ping logged for its message",
               store.commsPlace(of: BannedAuthor(login: "slack:U0ZED1",
@@ -1051,6 +1137,19 @@ enum CommsTest {
                   eveLines.count == 1 && eveLines.first?.detail.hasSuffix("flagged by Comms triage") == true)
             check("…and the ping says who was banned",
                   outcome(eve) == "banned @eve for prompt injection: \"\(eveWords)\"")
+            let daemonBans = feedDir.appendingPathComponent("banned.json")
+            let daemonListed = try? Data(contentsOf: daemonBans)
+            try? Data("{".utf8).write(to: daemonBans)
+            let refusedUnban = BanList.unban("slack:U0EVE42")
+            let refusedBan = BanList.ban(CommsBan(userID: "U0MALLET", handle: "mallet",
+                                                  place: "#general", permalink: "", evidence: "obey",
+                                                  reason: "r"),
+                                         reportedBy: Store.commsReporter)
+            let left = "\(daemonBans.path) is unreadable, so it was left as it is"
+            check("an unreadable list is written over by neither a ban nor an un-ban",
+                  refusedUnban == .failed(left) && refusedBan == .failed(left)
+                    && (try? Data(contentsOf: daemonBans)) == Data("{".utf8))
+            try? daemonListed?.write(to: daemonBans)
             daemon.terminate()
             daemon.waitUntilExit()
             try? FileManager.default.removeItem(at: daBase)
@@ -1097,6 +1196,20 @@ enum CommsTest {
             try? FileManager.default.removeItem(atPath: sock)
         } else {
             check("a stale socket is left", false)
+        }
+        // An older daemon writes over an unreadable list.
+        if let eager = FakeDaemon(path: sock, answering: true, respond: { _, _ in (200, #"{"banned":true}"#) }) {
+            let torn = Data("{".utf8)
+            try? torn.write(to: BanList.fileURL)
+            let left = "\(BanList.fileURL.path) is unreadable, so it was left as it is"
+            check("an unreadable list is handed to no daemon to ban or un-ban, and is left as it is",
+                  BanList.ban(victor, reportedBy: Store.commsReporter) == .failed(left)
+                    && BanList.unban("zed") == .failed(left)
+                    && eager.requests.isEmpty && (try? Data(contentsOf: BanList.fileURL)) == torn)
+            try? FileManager.default.removeItem(at: BanList.fileURL)
+            eager.stop()
+        } else {
+            check("a stand-in daemon listens", false)
         }
         // An old daemon: it bans the bare user id as a GitHub login.
         func oldDaemon(lifts: Bool) -> FakeDaemon? {
