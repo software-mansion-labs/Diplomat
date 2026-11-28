@@ -83,6 +83,9 @@ struct PipelineState: Codable, Equatable {
     /// Per PR, each head it moved to whose change is, file for file, the one cleared at another,
     /// and that other head: it carries that clear.
     var synced: [String: [String: String]] = [:]
+    /// Per PR, the merge asked of gh, until a read after it tells how it ended, or for
+    /// `forgetDays`.
+    var merging: [String: PipelineMerge] = [:]
     /// Per item, its failed ratings or splits: not tried again unforced before `after`.
     var retry: [String: PipelineRetry] = [:]
     /// Syncs run, the clock `retry` counts in.
@@ -109,6 +112,7 @@ struct PipelineState: Codable, Equatable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
+        case merging
         case labelsMade, decided, takenOver, untracked, unsplit, splitting, parts, rerated, cleared, synced, retry, syncs,
              lineage, seen, holds, clean, asked, rateAsks, rateSeq, declined, notices
     }
@@ -126,6 +130,7 @@ struct PipelineState: Codable, Equatable {
         rerated = try c.decodeIfPresent([String: [String: PipelineRating]].self, forKey: .rerated) ?? [:]
         cleared = try c.decodeIfPresent([String: String].self, forKey: .cleared) ?? [:]
         synced = try c.decodeIfPresent([String: [String: String]].self, forKey: .synced) ?? [:]
+        merging = try c.decodeIfPresent([String: PipelineMerge].self, forKey: .merging) ?? [:]
         retry = try c.decodeIfPresent([String: PipelineRetry].self, forKey: .retry) ?? [:]
         syncs = try c.decodeIfPresent(Int.self, forKey: .syncs) ?? 0
         lineage = try c.decodeIfPresent([String: String].self, forKey: .lineage) ?? [:]
@@ -172,6 +177,7 @@ struct PipelineState: Codable, Equatable {
         rerated = rerated.filter { live($0.key) }
         cleared = cleared.filter { live($0.key) }
         synced = synced.filter { live($0.key) }
+        merging = merging.filter { $0.value.at >= cutoff }
         retry = retry.filter { live($0.key) }
         lineage = lineage.filter { live($0.key) }
         rateAsks = rateAsks.filter { live($0.key) }
@@ -206,6 +212,15 @@ struct PipelineRetry: Codable, Equatable {
     var failures: Int
     var after: Int
     var at: Date
+}
+
+/// A merge of a PR at `head` with `flag`, asked of gh at `at`; `merged` whether gh said it
+/// merged, nil until gh answered.
+struct PipelineMerge: Codable, Equatable {
+    var head: String
+    var flag: String
+    var at: Date
+    var merged: Bool?
 }
 
 /// The rating Diplomat made of an item, by its id: the item's rating, which labels can only

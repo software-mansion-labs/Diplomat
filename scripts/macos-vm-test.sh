@@ -93,11 +93,15 @@ STAGED="/Volumes/My Shared Files/stage"
 # A layout RepoPaths takes for a checkout, so the watchdog finds the bundle it launches.
 APP='$HOME/chk/packages/diplomat-platform/macos/Diplomat.app'
 BIN="$APP/Contents/MacOS/Diplomat"
+LAUNCHER='$HOME/Library/Application Support/Diplomat/Diplomat'
 AGENT='$HOME/Library/LaunchAgents/com.ignacy.diplomat.plist'
+WATCHDOG='$HOME/Library/LaunchAgents/com.ignacy.diplomat.watchdog.plist'
 
 echo "== guest: install the bundle"
 g "pkill -x Diplomat; launchctl bootout gui/\$(id -u)/com.ignacy.diplomat 2>/dev/null; \
-   rm -rf ~/chk ~/.diplomat/operator-quit $AGENT && mkdir -p ~/chk/packages/diplomat-platform/macos && touch ~/chk/.git && \
+   launchctl bootout gui/\$(id -u)/com.ignacy.diplomat.watchdog 2>/dev/null; \
+   rm -rf ~/chk ~/.diplomat/operator-quit $AGENT $WATCHDOG \"$LAUNCHER\" && \
+   mkdir -p ~/chk/packages/diplomat-platform/macos && touch ~/chk/.git && \
    cp -R '$STAGED/Diplomat.app' $APP && cp '$STAGED/winlist' ~/winlist && \
    defaults write com.ignacy.diplomat didTriggerTerminalAutomation -bool true"
 
@@ -120,9 +124,15 @@ echo "== the window self-test, on this VM's narrower screen"
 check "DIPLOMAT_WINDOW_TEST passes" g "DIPLOMAT_WINDOW_TEST=1 $BIN"
 
 echo "== an attended launch opens the window and takes focus"
-# A login agent an older installer wrote, without the unattended mark (not loaded).
+# A login agent an older installer wrote, without the unattended mark and starting the
+# binary itself (not loaded).
 g "mkdir -p ~/Library/LaunchAgents && plutil -create xml1 $AGENT && \
-   plutil -insert Label -string com.ignacy.diplomat $AGENT"
+   plutil -insert Label -string com.ignacy.diplomat $AGENT && \
+   plutil -insert ProgramArguments -array $AGENT && plutil -insert ProgramArguments.0 -string $BIN $AGENT"
+# And a watchdog agent one wrote, loaded (unscheduled, so it never runs here).
+g "plutil -create xml1 $WATCHDOG && plutil -insert Label -string com.ignacy.diplomat.watchdog $WATCHDOG && \
+   plutil -insert ProgramArguments -array $WATCHDOG && plutil -insert ProgramArguments.0 -string $BIN $WATCHDOG && \
+   launchctl bootstrap gui/\$(id -u) $WATCHDOG"
 check "Finder is frontmost to begin with" finder_front
 g "open -n $APP"
 check "a window comes up" within 20 has_window
@@ -133,6 +143,14 @@ check "it is a regular app, with a Dock icon" [ "$(app_type)" = "Foreground" ]
 shot 1-attended
 check "the main panel shows, not Settings" "$CACHE/ocr" "$OUT/1-attended.png" "AGENT TASKS"
 FIRST="$(pid)"
+check "the launch makes the launcher, a link to /usr/bin/env" \
+  g "[ \"\$(readlink \"$LAUNCHER\")\" = /usr/bin/env ]"
+check "…has that older login agent start the binary through it" \
+  g "[ \"\$(plutil -extract ProgramArguments.0 raw $AGENT)\" = \"$LAUNCHER\" ] && \
+     [ \"\$(plutil -extract ProgramArguments.1 raw $AGENT)\" = $BIN ]"
+check "…and loads that older watchdog agent again, now starting it" \
+  within 10 g "launchctl print gui/\$(id -u)/com.ignacy.diplomat.watchdog | grep -qxF \"	program = $LAUNCHER\""
+g "launchctl bootout gui/\$(id -u)/com.ignacy.diplomat.watchdog; rm -f $WATCHDOG"
 
 echo "== the menu bar: Settings, close, reopen"
 vnc key alt-,
@@ -171,7 +189,7 @@ g "mkdir -p ~/Library/LaunchAgents && cat > ~/Library/LaunchAgents/com.ignacy.di
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
 <plist version=\"1.0\"><dict>
   <key>Label</key><string>com.ignacy.diplomat</string>
-  <key>ProgramArguments</key><array><string>$BIN</string></array>
+  <key>ProgramArguments</key><array><string>$LAUNCHER</string><string>$BIN</string></array>
   <key>EnvironmentVariables</key><dict><key>DIPLOMAT_BACKGROUND</key><string>1</string></dict>
   <key>RunAtLoad</key><true/>
   <key>ProcessType</key><string>Interactive</string>

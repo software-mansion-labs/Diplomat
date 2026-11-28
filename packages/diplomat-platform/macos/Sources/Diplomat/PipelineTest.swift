@@ -2790,7 +2790,7 @@ enum PipelineTest {
               + "#20, #21, #22 read \(readCapped), queue \(ids()), notices \(store.pipelineResult?.notices ?? [])")
         check("sync 28, acme/app read past its cap: #20, read and assigned away, is withdrawn; #21, past the cap and not read by id, stays",
               store.pipelineResult?.unread == ["acme/app"] && readCapped == [true, false, false]
-                  && store.pipelineResult?.notices.contains { $0.hasPrefix("\(pastURL), which an ask or attempt record names, could not be read: ") } == true
+                  && store.pipelineResult?.notices.contains { $0.hasPrefix("\(pastURL), which an ask, an attempt record or a merge whose end no read saw names, could not be read: ") } == true
                   && !ids().contains(readKey) && ids().contains(pastKey))
         check("…and #22's lapsed record, its item unread, is kept", store.loadPipelineAttempts()[lapsedKey] != nil)
         store.pipelineRate = true
