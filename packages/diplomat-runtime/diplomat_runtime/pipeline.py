@@ -420,12 +420,12 @@ def _open_keys(attempts: dict, kind: str, url: str) -> list[str]:
 
 def concluded(attempts: dict, runs, now_ts: float) -> dict:
     """``attempts`` with the record of each of ``runs`` (``kind``, ``pr_url``,
-    ``ledger_key``) stamped concluded: its agent said its turn was over, so what it left
-    is its answer. A monitor's run (its ``ledger_key``) answers that monitor, not the
-    pipeline, whose runs carry none. Twin of ``Store.pipelineConcluded``."""
+    ``pipeline``) stamped concluded: its agent said its turn was over, so what it left
+    is its answer. Only a run the pipeline dispatched answers it: a monitor's, another
+    asker's or a wizard's answers its own. Twin of ``Store.pipelineConcluded``."""
     out = dict(attempts)
     for run in runs:
-        if run.ledger_key:
+        if not run.pipeline:
             continue
         for k in _open_keys(attempts, run.kind, run.pr_url or ""):
             out[k] = replace(out[k], concluded_at=now_ts)
@@ -460,8 +460,8 @@ def retained(attempts: dict, result: dict, now: float, teams: list[dict], *,
     each while it owes the effect, so its retry ladder and its conclusion stand; for the
     backoff ceiling after its last dispatch, so an effect a failed read left out is not
     taken for a new one when it is back; and a concluded one for
-    :data:`CONCLUDED_KEEP_SECS`, so a fix whose PR was closed unmerged is not asked for
-    again. Twin of ``Store.retainedPipelineAttempts``."""
+    :data:`CONCLUDED_KEEP_SECS`, so a fix of its own whose PR was closed unmerged is not
+    asked for again. Twin of ``Store.retainedPipelineAttempts``."""
     owed = {str(e.get("key") or "") for e in result.get("effects") or []}
     short = _short(result, handed)
     read = {identity(i) for i in result.get("read") or []}
@@ -537,6 +537,17 @@ def spawned(attempts: dict, kind: str, url: str, now_ts: float) -> dict:
     out = dict(attempts)
     for k in _open_keys(attempts, kind, url):
         out[k] = replace(out[k], last_dispatched_at=now_ts)
+    return out
+
+
+def preempted(attempts: dict, asks: list) -> dict:
+    """``attempts`` with the open record of each of the pipeline's ``asks`` another
+    asker's took the place of set to no attempts, its stamp and date kept: the
+    pipeline's next ask for it is its first. Twin of ``Store.pipelinePreempted``."""
+    out = dict(attempts)
+    for ask in asks:
+        for k in _open_keys(out, ask.action, ask.url):
+            out[k] = replace(out[k], attempts=0)
     return out
 
 
