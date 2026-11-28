@@ -4546,7 +4546,8 @@ final class Store: ObservableObject {
     /// the ban check, in-flight dedup, spawn, tracking, counters - so
     /// a button click and a monitor tick cannot behave differently by accident.
     struct AgentJob: Equatable {
-        var kind: String            // agent-row tint: "review" | "issues" | "conflicts" | "audit"
+        /// Agent-row tint: "review" | "issues" | "conflicts" | "audit" | "investigate" | "rate"
+        var kind: String
         var auditAction: String     // activity-feed verb
         var label: String           // label core (source prefix / retry suffix added by the gate)
         var prompt: String

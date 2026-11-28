@@ -4,8 +4,11 @@ Store orchestration (poll → diff → dispatch → reconcile, with dedup + back
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import math
+import re
 import time
+from pathlib import Path
 
 import pytest
 
@@ -2270,6 +2273,17 @@ def test_a_rating_is_asked_for_work_keyed_and_labelled_by_its_item():
         None, "rate:linear:ENG-12", "Rating · ENG-12")
     assert autofix.AgentJob(kind="rate", audit_action="rate", label=pr.label,
                             prompt="").requested
+
+
+def test_agent_job_kind_comment_names_every_kind_on_both_platforms():
+    """A queued ask's kind is its action; a conflict fix's and an audit's are their own."""
+    swift = (Path(__file__).resolve().parents[2] / "macos" / "Sources" / "Diplomat"
+             / "Store.swift").read_text(encoding="utf-8")
+    for source, field in ((inspect.getsource(autofix.AgentJob), "kind: str"),
+                          (swift[swift.index("struct AgentJob"):], "var kind: String")):
+        above, line = re.search(rf"(.*)\n(\s*{field}\b.*)", source).groups()
+        assert set(re.findall(r'"(\w+)"', above + line)) == (
+            autofix.QUEUE_REQUESTED_ACTIONS | {"conflicts", "audit"}), field
 
 
 def test_queue_reorder_can_reach_every_position():
