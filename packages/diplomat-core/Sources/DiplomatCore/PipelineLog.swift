@@ -237,13 +237,16 @@ struct PipelineCachedRating: Codable, Equatable {
     var pending: Bool?
     /// A PR's first rating, made while Fast track was on, with none kept for it before. It stays
     /// `pending` until a sync that may write to the PR reads it again, as an unread or unwritable
-    /// PR only waits. Pushed to meanwhile, while Fast track is on and it wears no rating or
-    /// fast-track label, the PR is rated again at its new head, never lower, and that rating is its
-    /// first; else it is finished there. Applied, it can fast-track only a PR whose timeline shows
-    /// no rating or fast-track label, while Fast track is on.
+    /// PR only waits. Pushed to or retargeted meanwhile, while Fast track is on, the rating is
+    /// low/low within the floor of the PR's files, and the PR wears no rating or fast-track label
+    /// and would close only candidates, the PR is rated again, never lower, and that rating is its
+    /// first; else it is finished there, as no first rating if only Rate being off kept it from
+    /// being rated again. Applied, it can fast-track only a PR whose timeline shows no rating or
+    /// fast-track label, while Fast track is on.
     var first: Bool?
-    /// The head a PR was rated at.
+    /// The head a PR was rated at, and the branch its diff was against.
     var head: String?
+    var base: String?
 
     static func url(in dir: URL) -> URL { dir.appendingPathComponent("ratings.json") }
 

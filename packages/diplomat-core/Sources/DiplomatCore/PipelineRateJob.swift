@@ -125,6 +125,8 @@ struct PipelineRateAsk: Codable, Equatable {
     var stamp: String
     /// A PR's head, whose diff the job rates.
     var head: String?
+    /// The branch that diff is against.
+    var base: String?
     /// The fast track's rating at a clean head.
     var again: Bool
     /// Rate now's.
