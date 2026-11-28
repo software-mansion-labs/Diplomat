@@ -1472,8 +1472,7 @@ def _alive(pid: int) -> bool:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    # A zombie is gone but for its parent's wait; one reaped as it is read shows X, or no
-    # entry.
+    # A zombie is gone but for its parent's wait; one reaped mid-read shows X, or no entry.
     try:
         with open(f"/proc/{pid}/stat") as fh:
             return fh.read().split(") ")[-1][0] not in "ZX"
