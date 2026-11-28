@@ -1118,7 +1118,8 @@ def test_the_shell_is_asked_as_a_login_shell_running_an_interactive_one(monkeypa
     monkeypatch.setenv("DIPLOMAT_SHELL", "/bin/zsh")
     monkeypatch.setattr(usagescan.subprocess, "run", run)
     usagescan.opencode_binary()
-    probe = "command -v opencode; printf '\\n@@XDG_STATE_HOME=%s\\n' \"$XDG_STATE_HOME\""
+    probe = ("command -v opencode; "
+             "printf '\\n@@XDG_STATE_HOME=%s\\n' \"$(printenv XDG_STATE_HOME)\"")
     assert seen == {"argv": ["/bin/zsh", "-l", "-c", "/bin/zsh -i -c " + shlex.quote(probe)],
                     "stdin": usagescan.subprocess.DEVNULL}
 
@@ -1146,6 +1147,32 @@ def test_an_install_only_a_login_profile_names_is_found(tmp_path, monkeypatch,
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     monkeypatch.setenv("DIPLOMAT_SHELL", shell)
     assert usagescan.opencode_binary() == str(exe)
+
+
+@pytest.mark.parametrize("shell, rc, nounset", [
+    ("/bin/zsh", ".zshrc", "setopt nounset"),
+    ("/bin/bash", ".bashrc", "set -u"),
+])
+def test_an_rc_that_sets_nounset_still_gives_the_state_home(tmp_path, monkeypatch,
+                                                           shell, rc, nounset):
+    """The shell's unset ``$XDG_STATE_HOME`` is the default root under an rc's
+    ``nounset`` too, not this process's."""
+    if not os.access(shell, os.X_OK):
+        pytest.skip(f"no {shell}")
+    exe = fake_opencode(tmp_path, monkeypatch, V2)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / rc).write_text(f"{nounset}\nunset XDG_STATE_HOME\n"
+                           f"export PATH={shlex.quote(str(exe.parent))}:$PATH\n",
+                           encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("ZDOTDIR", str(home))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "applet-state"))
+    monkeypatch.setenv("DIPLOMAT_SHELL", shell)
+    assert usagescan.opencode_binary() == str(exe)
+    assert opencodeapi.service_file() == str(
+        home / ".local" / "state" / "opencode" / "service.json")
 
 
 def test_the_service_is_found_under_the_state_home_the_shell_gives(tmp_path,

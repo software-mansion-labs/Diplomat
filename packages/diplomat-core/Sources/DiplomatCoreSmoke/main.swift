@@ -1202,7 +1202,7 @@ extension OpenCodeCLI.Resolution { var fields: [String?] { [path, stateHome] } }
 // The resolver: one login shell, an interactive one inside it, and a probe that prints
 // the path and then the shell's state root on a marked line.
 check(OpenCodeCLI.resolverArguments(shell: "/bin/zsh")
-        == ["-l", "-c", "'/bin/zsh' -i -c 'command -v opencode; printf '\\''\\n@@XDG_STATE_HOME=%s\\n'\\'' \"$XDG_STATE_HOME\"'"],
+        == ["-l", "-c", "'/bin/zsh' -i -c 'command -v opencode; printf '\\''\\n@@XDG_STATE_HOME=%s\\n'\\'' \"$(printenv XDG_STATE_HOME)\"'"],
       "the resolver's shape: \(OpenCodeCLI.resolverArguments(shell: "/bin/zsh"))")
 let executables: Set<String> = ["/opt/a/opencode", "/opt/b/opencode"]
 let found = OpenCodeCLI.parseResolution(
@@ -1253,6 +1253,17 @@ do {
                                    environment: ["HOME": fx.path, "PATH": "/usr/bin:/bin"])
     check(bash.fields == ["\(fx.path)/nvm/opencode", "\(fx.path)/state"],
           "an install only ~/.bashrc puts on PATH resolves, with that rc's state root: \(bash)")
+    // Under an rc's nounset, with no XDG_STATE_HOME.
+    for (shell, rc, nounset) in [("/bin/bash", ".bashrc", "set -u"), ("/bin/zsh", ".zshrc", "setopt nounset")]
+        where FileManager.default.isExecutableFile(atPath: shell) {
+        executable("strict/\(rc)", "\(nounset)\nexport PATH=\(fx.path)/nvm:$PATH\n")
+        let strict = OpenCodeCLI.resolve(shell: shell,
+                                         environment: ["HOME": "\(fx.path)/strict",
+                                                       "ZDOTDIR": "\(fx.path)/strict",
+                                                       "PATH": "/usr/bin:/bin"])
+        check(strict.fields == ["\(fx.path)/nvm/opencode", ""],
+              "\(shell) resolves under an rc's \(nounset), with an unset state root: \(strict)")
+    }
     // Homebrew's shape on Apple silicon: `~/.zprofile` alone, which only a login zsh reads.
     if FileManager.default.isExecutableFile(atPath: "/bin/zsh") {
         executable("brew/opencode", stub)
