@@ -797,7 +797,8 @@ def linear_item(identifier: str) -> str:
 
 def item_of_key(key: str) -> str | None:
     """The item key a queue key (:func:`queue_key`) is about, or ``None`` for one about
-    no item: an investigation's, numbered by a Slack ts, or a Linear issue's fix."""
+    no item: an investigation's, numbered by a Slack ts, or a Linear issue's fix or
+    rating."""
     _, _, rest = key.partition(":")
     return rest if split_item_key(rest) is not None else None
 
@@ -805,20 +806,23 @@ def item_of_key(key: str) -> str | None:
 # The verbs asked-for work is queued under. The first two are a sweep's — the same
 # ones the Review-PRs and Fix-issues spawns write to the activity feed, because each ask
 # is that spawn, split into one task per PR / per issue. The third is a Comms
-# investigation: numbered by the Slack message's ts, and about no PR.
+# investigation: numbered by the Slack message's ts, and about no PR. The fourth is a
+# Pipeline rating, run headless rather than by an agent.
 QUEUE_REVIEW_ACTION = "review"
 QUEUE_ISSUES_ACTION = "issues"
 QUEUE_INVESTIGATE_ACTION = "investigate"
+QUEUE_RATE_ACTION = "rate"
 QUEUE_REQUESTED_ACTIONS = frozenset(
-    {QUEUE_REVIEW_ACTION, QUEUE_ISSUES_ACTION, QUEUE_INVESTIGATE_ACTION})
+    {QUEUE_REVIEW_ACTION, QUEUE_ISSUES_ACTION, QUEUE_INVESTIGATE_ACTION, QUEUE_RATE_ACTION})
 
 # The bands whose work waits behind the rest, nearest-first — a requested review, then
-# a requested issue fix, then an investigation, then a conflict fix, which waits behind
-# everything. Matched off the queue key rather than the job, because the operator's
-# saved arrangement is a list of keys and has to be banded the same way after a
-# restart, with no job to consult (`queue_order`).
+# a rating, then a requested issue fix, then an investigation, then a conflict fix, which
+# waits behind everything. Matched off the queue key rather than the job, because the
+# operator's saved arrangement is a list of keys and has to be banded the same way after
+# a restart, with no job to consult (`queue_order`).
 QUEUE_LAST_BANDS = (
     frozenset({QUEUE_REVIEW_ACTION}),
+    frozenset({QUEUE_RATE_ACTION}),
     frozenset({QUEUE_ISSUES_ACTION}),
     frozenset({QUEUE_INVESTIGATE_ACTION}),
     frozenset({"conflicts"}),
@@ -827,9 +831,9 @@ QUEUE_LAST_BANDS = (
 
 def queue_band(key: str) -> int:
     """Which band of the queue a task waits in: 0 for the monitors' own finds, 1 for a
-    review the operator asked for, 2 for an issue fix they asked for, 3 for an
-    investigation somebody asked for in Slack, 4 for a conflict fix. Bands outrank the
-    operator's arrangement; within one, the arrangement decides.
+    review the operator asked for, 2 for a Pipeline rating, 3 for an issue fix they asked
+    for, 4 for an investigation somebody asked for in Slack, 5 for a conflict fix. Bands
+    outrank the operator's arrangement; within one, the arrangement decides.
 
     A monitor's find is first because it is answering something GitHub is already owed
     — a review requested of me, a thread on my PR waiting on a reply — and that debt is
@@ -838,7 +842,9 @@ def queue_band(key: str) -> int:
     for. A requested issue fix is my own backlog, nothing blocked on it, so it bands
     behind the review — a sweep of fifty issues never buries a review the operator also
     asked for. Neither runs ahead of a monitor's find; a Review-PRs sweep of fifty
-    drafts otherwise buries every review request behind it for a day.
+    drafts otherwise buries every review request behind it for a day. A rating is
+    backlog too, but runs in minutes and decides whether a fix is owed at all, so it goes
+    ahead of the fixes.
 
     An investigation comes after both, being a triage's reading of a Slack message, but
     ahead of a conflict fix: a person is waiting on its answer.
@@ -990,7 +996,7 @@ class AgentJob:
     # Carried on the job so a dispatch the *queue* runs later starts the same retry
     # backoff the reconciler's own dispatch would have. Read only on that path: a
     # panel spawn keeps no attempt record, and a job with no monitor behind it (the
-    # sweeps) has no stamp to carry.
+    # sweeps) has no stamp to carry. A rating's is the stamp its job runs at.
     attempt_stamp: str = ""
     # The checkout the agent works in: a repo root's, or another one listed in Settings.
     # None is whichever root is primary at spawn time, so a monitor job, which can wait
@@ -1041,26 +1047,28 @@ class RequestedWork:
     """
 
     #: The PR number, or the issue number — two numbering spaces, told apart by the
-    #: verb in :attr:`key` and nowhere else. 0 for a Linear issue's fix.
+    #: verb in :attr:`key` and nowhere else. 0 for a Linear issue's fix or rating.
     number: int
     url: str
     #: Whose PR / issue — the pipeline's ban dimension. Empty where the sweep names
     #: nobody (my own PRs, an association scope).
     author: str
-    #: The wizard config's ``prompt_payload`` for this one item. Its ``kind`` is also
-    #: the queue verb the ask waits under, so the payload carries its own discriminator.
+    #: The wizard config's ``prompt_payload`` for this one item; a rating's is its own
+    #: (``url``, ``stamp``, ``forced``) and builds no prompt. Its ``kind`` is also the
+    #: queue verb the ask waits under, so the payload carries its own discriminator.
     config: dict
     #: The item's root, as its ``LocalRepo.key``; "" in a row single-repo builds stored.
     repo: str = ""
     #: The Diplomacy Network task this ask is offered as, "" while no offer carries it.
     #: An offer is not a start: the ask stands until the work has run.
     offered: str = ""
-    #: Queued by the Pipeline screen's Start fix, not by a sync (``pipeline.withdrawn``).
+    #: Queued by the Pipeline screen's Start fix, not by a sync; for a rating, forced by
+    #: its Rate now (``pipeline.withdrawn``).
     by_hand: bool = False
 
     @property
     def linear(self) -> str:
-        """The identifier (``ENG-12``) of the Linear issue a fix works on, or ""."""
+        """The identifier (``ENG-12``) of the Linear issue a fix or rating is of, or ""."""
         issue = self.config.get("linear")
         return str(issue.get("identifier") or "") if isinstance(issue, dict) else ""
 
@@ -1106,15 +1114,17 @@ class RequestedWork:
         """The row this task wears while ``roots`` repo roots are loaded, its item named
         by :func:`item_label`. Carries the depth because that is the choice a sweep is
         worth re-reading later: the same PR queued from a `max` sweep and from a `quick`
-        one are different jobs.
+        one are different jobs. A rating has none.
 
         An investigation's label comes from its config (``InvestigateConfig.label``):
         its number is a Slack ts, which reads as nothing on a row."""
         if self.action == QUEUE_INVESTIGATE_ACTION:
             return str(self.config.get("label", ""))
-        noun = "Issues" if self.action == QUEUE_ISSUES_ACTION else "Review"
         named = (item_label(self.item, roots) if self.item
                  else self.linear or f"#{self.number}")
+        if self.action == QUEUE_RATE_ACTION:
+            return f"Rating · {named}"
+        noun = "Issues" if self.action == QUEUE_ISSUES_ACTION else "Review"
         return f"{noun} · {named} · {self.config.get('depth', '')}"
 
     def to_json(self) -> dict:

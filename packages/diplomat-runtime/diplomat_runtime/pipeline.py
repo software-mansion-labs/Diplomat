@@ -1,10 +1,10 @@
 """The Pipeline, as the Linux front-end reaches it.
 
 Everything the pipeline decides is ``DiplomatCore``'s, reached through the
-``diplomat-core`` CLI (``pipeline-tick``, ``pipeline-last``), which reads and writes
-``$DIPLOMAT_PIPELINE_DIR`` (default ``~/.diplomat/pipeline``). What lives here is calling
-it, the sync period, the Linear teams parse, and the rules the store reads a result and
-its attempt records by, each the twin of the macOS one its docstring names.
+``diplomat-core`` CLI (``pipeline-tick``, ``pipeline-last``, ``pipeline-rate``), which
+reads and writes ``$DIPLOMAT_PIPELINE_DIR`` (default ``~/.diplomat/pipeline``). What lives
+here is calling it, the sync period, the Linear teams parse, and the rules the store reads
+a result and its attempt records by, each the twin of the macOS one its docstring names.
 
 Stdlib-only, like the rest of the runtime.
 """
@@ -24,7 +24,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import core, promptcore
-from .autofix import QUEUE_ISSUES_ACTION, QUEUE_REVIEW_ACTION, RETRY_MAX_BACKOFF, linear_item
+from .autofix import (QUEUE_ISSUES_ACTION, QUEUE_RATE_ACTION, QUEUE_REVIEW_ACTION,
+                      RETRY_MAX_BACKOFF, linear_item)
 from .prref import item_key_from_url, split_item_key
 
 #: What :func:`last` raises.
@@ -41,13 +42,18 @@ def pipeline_dir() -> Path:
 
 
 #: The switches a running sync re-reads from ``control.json`` before each outward action.
-CONTROL_KEYS = ("enabled", "rate", "fix", "fastTrack", "merge", "fracture")
+CONTROL_KEYS = ("enabled", "rate", "mirrorGitHub", "mirrorLinear", "fix", "fastTrack", "merge",
+                "fracture")
+
+#: ``PipelineMirrorScope``'s cases, narrowest first.
+MIRROR_SCOPES = ("prs", "mine", "all")
 
 
 def write_control(switches: dict) -> None:
-    """The switches, and the ``revoke`` asks (when any), which a running sync applies right
-    before each merge and its asks. Never raises: a sync that cannot read ``control.json`` goes by the
-    settings it was started with. Twin of ``Store.writePipelineControl``."""
+    """The switches, the mirror scope (``prs`` unless one of :data:`MIRROR_SCOPES`), and the
+    ``revoke`` asks (when any), which a running sync applies right before each merge and its
+    asks. Never raises: a sync that cannot read ``control.json``, or finds a key missing,
+    goes by the settings it was started with. Twin of ``Store.writePipelineControl``."""
     folder = pipeline_dir()
     tmp = folder / f"control.json.tmp-{os.getpid()}-{uuid.uuid4().hex}"
     try:
@@ -55,6 +61,8 @@ def write_control(switches: dict) -> None:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             control: dict = {k: bool(switches.get(k)) for k in CONTROL_KEYS}
+            scope = switches.get("mirrorScope")
+            control["mirrorScope"] = scope if scope in MIRROR_SCOPES else "prs"
             if switches.get("revoke"):
                 control["revoke"] = sorted(switches["revoke"])
             json.dump(control, fh, sort_keys=True)
@@ -108,13 +116,17 @@ _GH_CALLS_PER_CLAUDE = 16
 #: Per split part: a re-read, the parts filed before (twice after a failed create), the
 #: create and its sub-issue link.
 _GH_CALLS_PER_PART = 5
+#: Per kept rating a mirror labels past those answered (``labels.mirrorPerSync``): a re-read,
+#: then for each of its two labels a create, an add and the other levels' removal.
+_GH_CALLS_PER_MIRROR = 9
 #: Per takeover or revoke asked: a re-read, then the fast-track label's create and add, or
 #: the fast-track labels' removal; and a PR's clear in the same sync, as `cleared`'s.
 _GH_CALLS_PER_TAKEOVER = 6
 #: A root's merges: each PR read twice before ``gh pr merge`` (once without Linear) and
-#: once after.
+#: once after, and the three compares and two trees that keep it cleared past its base merged
+#: into it.
 _MERGES_PER_ROOT = 3
-_GH_CALLS_PER_MERGE = 4
+_GH_CALLS_PER_MERGE = 9
 #: Linear's reads (300 issues, paged), its label and child writes, and the re-read of
 #: their candidates: 3 calls of 100 at ``httpTimeoutSecs``; and the login's refresh.
 _LINEAR_SECS = 300 + 4 * 30
@@ -139,19 +151,25 @@ def _read_calls(t: dict) -> int:
 
 def tick_timeout(settings: dict) -> float:
     """How long ``pipeline-tick`` runs before it is killed: every call a sync may make, at
-    its timeout. It bounds a wedged core, not a slow sync, so it is generous."""
+    its timeout. Its ``claude`` calls are the splits'; a rating runs as a queued job
+    (:func:`rate`), the sync reading the diff it rates and writing the labels it answers.
+    It bounds a wedged core, not a slow sync, so it is generous."""
     t = tunables()
     rater = t.get("rater") or {}
     force = settings.get("force") or {}
     splits = 1 + len(force.get("fracture") or [])
-    claude_calls = int(rater.get("perSync", 4)) + len(force.get("rate") or []) + splits
+    ratings = int(rater.get("asks", 4)) + len(force.get("rate") or [])
     per_claude = float(rater.get("timeoutSecs", 300)) + 5 + _GH_CALLS_PER_CLAUDE * _GH_CALL_SECS
     per_split = (int((t.get("fracture") or {}).get("maxChildren", 6)) * _GH_CALLS_PER_PART
                  * _GH_CALL_SECS)
     takeovers = len(force.get("takeover") or []) + len(force.get("revoke") or [])
+    mirrors = (int((t.get("labels") or {}).get("mirrorPerSync", 10))
+               if settings.get("mirrorGitHub") or settings.get("mirrorLinear") else 0)
     roots = max(1, len(settings.get("roots") or []))
-    return min(MAX_SYNC_SECS, claude_calls * per_claude + splits * per_split
+    return min(MAX_SYNC_SECS, ratings * _GH_CALLS_PER_CLAUDE * _GH_CALL_SECS
+               + splits * (per_claude + per_split)
                + takeovers * _GH_CALLS_PER_TAKEOVER * _GH_CALL_SECS
+               + mirrors * _GH_CALLS_PER_MIRROR * _GH_CALL_SECS
                + roots * (_read_calls(t) + _MERGES_PER_ROOT * _GH_CALLS_PER_MERGE) * _GH_CALL_SECS
                + len(settings.get("queued") or []) * _GH_CALL_SECS
                + (_LINEAR_SECS if settings.get("linearTeams") else 0)
@@ -214,6 +232,26 @@ def tick(settings: dict, started: Callable | None = None) -> dict:
     if result is None:
         return {"error": "diplomat-core pipeline-tick answered something that is not a sync"}
     return result
+
+
+def rate(item: str, stamp: str, *, cancel: bool = False,
+         started: Callable | None = None) -> dict:
+    """``pipeline-rate``'s ``{"outcome", "detail"}`` for the rating a sync asked of ``item``
+    (its effect's ``url``) at ``stamp``, else ``{"error": why}``; never raises. Run, it
+    makes the rater's call, so it is given the rater's ``timeoutSecs`` and a margin; with
+    ``cancel``, it cancels the ask instead. ``started`` is handed the core's process
+    (:func:`promptcore.cli`)."""
+    timeout = (30.0 if cancel else float((tunables().get("rater") or {}).get("timeoutSecs", 300))
+               + 5 + _MARGIN_SECS)
+    ask = {"item": item, "stamp": stamp, **({"cancel": True} if cancel else {})}
+    try:
+        out = json.loads(promptcore.cli(["pipeline-rate"], stdin=ask, timeout=timeout,
+                                        started=started))
+    except Failure as exc:
+        return {"error": str(exc)}
+    if not isinstance(out, dict) or not isinstance(out.get("outcome"), str):
+        return {"error": "diplomat-core pipeline-rate answered something that is not an outcome"}
+    return {"outcome": out["outcome"], "detail": str(out.get("detail") or "")}
 
 
 #: The date of a result no sync produced: ``pipeline-last``'s before the first sync, and a
@@ -454,13 +492,22 @@ def retained(attempts: dict, result: dict, now: float, teams: list[dict], *,
             or (a.concluded_at is not None and now - a.concluded_at < CONCLUDED_KEEP_SECS)}
 
 
-def withdrawn(asks: list, result: dict | None, *, fix: bool, fast_track: bool,
+#: The queue verb of each effect kind's ask.
+_ACTIONS = {"fixIssue": QUEUE_ISSUES_ACTION, "fixLinear": QUEUE_ISSUES_ACTION,
+            "review": QUEUE_REVIEW_ACTION, "rate": QUEUE_RATE_ACTION}
+
+
+def withdrawn(asks: list, result: dict | None, *, fix: bool, fast_track: bool, rate: bool,
               handed: list[str] | None = None) -> list[str]:
     """The keys of the pipeline's ``asks`` (``RequestedWork``) no longer owed: one a sync
     queued while its kind's switch is off; one ``result`` (a sync's own; None judges by
-    the switches alone) judged and emitted no effect for; and a Start fix in a root judged
-    in full whose issue is not ``fixable``. Twin of ``Store.pipelineWithdrawn``."""
-    owed = {(e.get("kind") == "review", identity(str(e.get("url") or "")))
+    the switches alone) judged and emitted no effect for, for a rating none at its stamp;
+    and a Start fix in a root judged in full whose issue is not ``fixable``. A rating Rate
+    now forced goes by its stamp alone. Twin of ``Store.pipelineWithdrawn``."""
+    def owing(action: str | None, url: str, stamp: object) -> tuple:
+        return action, identity(url), str(stamp or "") if action == QUEUE_RATE_ACTION else ""
+
+    owed = {owing(_ACTIONS.get(e.get("kind")), str(e.get("url") or ""), e.get("stamp"))
             for e in (result or {}).get("effects") or []}
     fixable = {identity(i) for i in (result or {}).get("fixable") or []}
     seen = set() if result is None else set(judged(asks, result, handed=handed))
@@ -469,15 +516,16 @@ def withdrawn(asks: list, result: dict | None, *, fix: bool, fast_track: bool,
     for ask in asks:
         if not ask.pipeline:
             continue
-        review = ask.action == QUEUE_REVIEW_ACTION
-        if not ask.by_hand and not (fast_track if review else fix):
+        rating = ask.action == QUEUE_RATE_ACTION
+        on = {QUEUE_REVIEW_ACTION: fast_track, QUEUE_RATE_ACTION: rate}.get(ask.action, fix)
+        if not ask.by_hand and not on:
             out.append(ask.key)
         elif result is None:
             continue
-        elif ask.by_hand:
+        elif ask.by_hand and not rating:
             if not short(ask.repo.lower()) and identity(ask.url) not in fixable:
                 out.append(ask.key)
-        elif (review, identity(ask.url)) not in owed and ask.key in seen:
+        elif owing(ask.action, ask.url, ask.config.get("stamp")) not in owed and ask.key in seen:
             out.append(ask.key)
     return out
 

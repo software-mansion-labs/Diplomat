@@ -470,6 +470,9 @@ struct ContentView: View {
         case starting(Store.QueuedAgentTask)
         /// A job whose offer the network has not answered yet.
         case offering(Store.OfferingJob)
+        /// A rating job running headless in a bay (`Store.pipelineRateRuns`). Its queued
+        /// row's key, like a starting task's.
+        case rating(Store.PipelineRateRun)
         /// An empty slot of the device's cap. Carries its position only, which is all
         /// that distinguishes one from another.
         case freeSlot(Int)
@@ -482,6 +485,7 @@ struct ContentView: View {
             case .queued(let q):  return "q-\(q.id)"
             case .starting(let q): return "q-\(q.id)"
             case .offering(let o): return "o-\(o.id)"
+            case .rating(let r): return "q-\(r.key)"
             case .freeSlot(let i): return "free-\(i)"
             }
         }
@@ -491,6 +495,7 @@ struct ContentView: View {
             case .session(let r): return r.status
             case .queued:   return .queued
             case .starting, .offering: return .starting
+            case .rating:   return .running
             case .freeSlot: return .free
             }
         }
@@ -507,6 +512,7 @@ struct ContentView: View {
     /// promise, so the position is the tiebreak rather than an assumption about the sort.
     private var agentTaskItems: [AgentTaskItem] {
         let items = store.agentRows.map(AgentTaskItem.session)
+            + store.pipelineRateRuns.map(AgentTaskItem.rating)
             + store.startingTasks.map(AgentTaskItem.starting)
             + store.networkOffering.map(AgentTaskItem.offering)
             + store.queuedTasks.map(AgentTaskItem.queued)
@@ -533,7 +539,7 @@ struct ContentView: View {
             // last queued row would drop the count for as long as its spawn takes.
             // Empty slots are not (a device with nothing to do reads "0", not "2").
             SectionHeader(title: "AGENT TASKS",
-                          count: store.agentRows.count + queued + starting,
+                          count: store.agentRows.count + store.pipelineRateRuns.count + queued + starting,
                           expanded: $tasksExpanded,
                           icon: "antenna.radiowaves.left.and.right",
                           caption: caption.isEmpty ? nil : caption)
@@ -575,6 +581,7 @@ struct ContentView: View {
                 task: task,
                 tint: agentTaskTint(task.job.kind),
                 paused: store.isHeld(task),
+                banHeld: store.heldByBanList(task),
                 refusal: store.networkJobRefusals[task.job.label],
                 onRun: { Task { await store.executeQueuedTask(task.id) } },
                 cancellable: task.job.requested,
@@ -585,6 +592,8 @@ struct ContentView: View {
             StartingTaskRow(task: task, tint: agentTaskTint(task.job.kind))
         case .offering(let held):
             OfferingTaskRow(held: held, tint: agentTaskTint(held.job.kind))
+        case .rating(let run):
+            RatingTaskRow(run: run, tint: agentTaskTint(AgentTaskQueue.rateAction))
         case .freeSlot:
             FreeSlotRow()
         }
@@ -1087,6 +1096,8 @@ private struct QueuedTaskRow: View {
     /// Its monitor is switched off, so nothing will start this by itself. Worth
     /// saying on the row: "queued" otherwise promises a start that is never coming.
     let paused: Bool
+    /// Held by an unreadable ban list (`Store.heldByBanList`), not by its monitor.
+    let banHeld: Bool
     /// The network's refusal, when its reason is the job's own.
     let refusal: String?
     let onRun: () -> Void
@@ -1110,12 +1121,17 @@ private struct QueuedTaskRow: View {
         Start this agent now, without waiting for a free slot. It then counts against \
         the cap like any automatic agent.
         """
+    private static let banHeldHelp = """
+        The prompt-injection ban list cannot be read, so this agent cannot start, not \
+        even from here, until it does.
+        """
     private static let cancelHelp = """
         Drop this task from the queue without running it. You asked for it by \
         sweeping, so nothing else will bring it back.
         """
     private var runHelp: String {
-        paused ? QueuedTaskRow.pausedHelp : QueuedTaskRow.heldHelp
+        banHeld ? QueuedTaskRow.banHeldHelp
+            : paused ? QueuedTaskRow.pausedHelp : QueuedTaskRow.heldHelp
     }
     private var cancelTip: String { Store.pipelineCancelHelp(task.job) ?? QueuedTaskRow.cancelHelp }
 
@@ -1142,8 +1158,8 @@ private struct QueuedTaskRow: View {
                 HStack(spacing: 3) {
                     AgentTaskStatusLabel(status: .queued)
                     if paused {
-                        Text("· monitor off").font(.system(size: 9))
-                            .foregroundStyle(.secondary)
+                        Text(banHeld ? "· ban list unreadable" : "· monitor off")
+                            .font(.system(size: 9)).foregroundStyle(.secondary)
                     }
                 }
                 if let refusal {
@@ -1231,6 +1247,40 @@ private struct StartingTaskRow: View {
         .padding(6)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.06)))
         .tooltip(StartingTaskRow.help)
+    }
+}
+
+/// A rating job in its bay: no window to raise and nothing to stop, so a row that says how
+/// long it has been running and nothing more.
+private struct RatingTaskRow: View {
+    let run: Store.PipelineRateRun
+    let tint: Color
+
+    private static let help = """
+        A Pipeline rating running on this machine, with no window. It holds a slot of the \
+        automatic-task cap while it works.
+        """
+
+    var body: some View {
+        HStack(spacing: 8) {
+            IconBadge(symbol: DiplomatUI.agentTaskIcon(AgentTaskQueue.rateAction), tint: tint)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(run.label).font(.caption).lineLimit(1)
+                TimelineView(.periodic(from: Date(), by: 30)) { ctx in
+                    HStack(spacing: 3) {
+                        AgentTaskStatusLabel(status: .running)
+                        let age = Fmt.duration(ctx.date.timeIntervalSince(run.startedAt))
+                        if age != "just now" {
+                            Text("· for " + age).font(.system(size: 9)).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            Spacer(minLength: 4)
+        }
+        .padding(6)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.06)))
+        .tooltip(RatingTaskRow.help)
     }
 }
 

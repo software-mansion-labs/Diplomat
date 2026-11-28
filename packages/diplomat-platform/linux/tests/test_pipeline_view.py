@@ -492,7 +492,7 @@ def test_someone_elses_item_says_who_holds_it(store):
     texts = _labels(view.detail)
     assert "Read only: Diplomat shows it and writes nothing to it." in texts
     assert "By @carol · assigned to @bob, @dave" in texts
-    assert "Rated here, not labelled." in texts
+    assert "Rated here." in texts
     assert "Nothing logged about it yet." in texts
 
 
@@ -657,6 +657,168 @@ def test_a_selection_whose_item_is_gone_is_dropped(store):
     assert P2 not in view.canvas.cards
 
 
+# MARK: the arrow keys
+
+#: Each arrow in turn from no selection, and the card it selects. PipelineTest's
+#: "pipeline: arrow keys" walks the same.
+_WALK = [(Qt.Key.Key_Right, I1), (Qt.Key.Key_Right, P2), (Qt.Key.Key_Right, P3),
+         (Qt.Key.Key_Right, P3), (Qt.Key.Key_Down, I5), (Qt.Key.Key_Down, I6),
+         (Qt.Key.Key_Left, I4), (Qt.Key.Key_Up, I1), (Qt.Key.Key_Down, I4),
+         (Qt.Key.Key_Down, I6), (Qt.Key.Key_Down, I7), (Qt.Key.Key_Down, I8),
+         (Qt.Key.Key_Right, P9), (Qt.Key.Key_Down, P9), (Qt.Key.Key_Up, I7),
+         (Qt.Key.Key_Left, I7)]
+
+
+def test_each_arrow_steps_to_the_nearest_row_that_way_then_the_nearest_column(store):
+    """Past an edge, nowhere."""
+    cards = PipelineView(store).canvas.cards
+    at, walked = None, []
+    for key, _ in _WALK:
+        at = pipelineview.step(cards, at, *pipelineview.ARROWS[key])
+        walked.append(at)
+    assert walked == [want for _, want in _WALK]
+
+
+def test_a_selection_off_the_graph_starts_at_its_first_card_and_an_empty_graph_has_none(store):
+    assert pipelineview.step(PipelineView(store).canvas.cards, _url(99), 0, -1) == I1
+    assert pipelineview.step({}, I1, 1, 0) is None
+
+
+def test_two_selections_in_one_turn_open_no_window_of_their_own(store):
+    """As a held arrow key makes them."""
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    view = PipelineView(store)
+    try:
+        view.show()
+        view.activateWindow()
+        assert QTest.qWaitForWindowActive(view)
+        view.select(I1)
+        view.select(P2)
+        QApplication.processEvents()
+        assert [w for w in QApplication.topLevelWidgets()
+                if w.isVisible() and isinstance(w, QLabel)] == []
+        assert QApplication.activeWindow() is view
+    finally:
+        view.close()
+
+
+def _press(window, key) -> None:
+    from PySide6.QtTest import QTest
+
+    QTest.keyClick(window.windowHandle(), key)
+
+
+def test_the_arrow_keys_select_wherever_the_screen_has_focus_and_nowhere_else(store):
+    from PySide6.QtTest import QTest
+    from diplomat_app.panel import Panel
+
+    panel = Panel(store)
+    view = panel.pipeline_view
+    try:
+        panel.show()
+        panel.activateWindow()
+        assert QTest.qWaitForWindowActive(panel)
+        panel.pipeline_btn.click()
+        walked = []
+        for key, _ in _WALK:
+            _press(panel, key)
+            walked.append(view.selected)
+        assert walked == [want for _, want in _WALK]
+        assert view.canvas.selected == I7 and "Item 7" in _labels(view.detail)
+        # A lane chip's own arrow keys would pick the next chip.
+        view.lane_chips["fast"].setFocus()
+        _press(panel, Qt.Key.Key_Right)
+        assert (view.selected, view.lane) == (I6, "all")
+        panel.pipeline_btn.setFocus()
+        _press(panel, Qt.Key.Key_Down)
+        assert view.selected == I6
+        QTest.mouseClick(view.canvas, Qt.MouseButton.LeftButton,
+                         pos=view.canvas.cards[I5].center().toPoint())
+        assert view.selected == I5
+        _press(panel, Qt.Key.Key_Down)
+        assert view.selected == I6 and view.canvas.hasFocus()
+        _press(panel, Qt.Key.Key_Escape)
+        assert panel._screen == "main"
+        _press(panel, Qt.Key.Key_Down)
+        assert view.selected == I6
+    finally:
+        panel.hide()
+        panel.deleteLater()
+
+
+def test_an_arrow_scrolls_the_card_it_selects_into_view_with_room_around_it(store):
+    from PySide6.QtTest import QTest
+
+    view = PipelineView(store)
+    view.resize(700, 300)
+    try:
+        view.show()
+        view.activateWindow()
+        assert QTest.qWaitForWindowActive(view)
+        view.open()
+        scroll = view.graph_scroll
+
+        def shown(item_id: str) -> bool:
+            port = scroll.viewport()
+            m = pipelineview.SCROLL_MARGIN
+            room = view.canvas.cards[item_id].adjusted(-m, -m, m, m) & QRectF(view.canvas.rect())
+            return QRectF(scroll.horizontalScrollBar().value(), scroll.verticalScrollBar().value(),
+                          port.width(), port.height()).contains(room)
+
+        assert not shown(P3) and not shown(I8)
+        for key, want in _WALK:
+            _press(view, key)
+            assert (view.selected, shown(want)) == (want, True), key
+    finally:
+        view.close()
+
+
+def test_an_arrow_past_the_edge_keeps_the_detail_where_it_was(store, app):
+    from PySide6.QtTest import QTest
+
+    result = _result()
+    result["events"] += [{"at": "2026-11-20T10:06:00Z", "item": P3, "kind": "held",
+                          "detail": f"step {n}"} for n in range(40)]
+    store.pipeline_result = result
+    view = PipelineView(store)
+    view.resize(1100, 520)
+    bar = view.detail_scroll.verticalScrollBar()
+    try:
+        view.show()
+        view.activateWindow()
+        assert QTest.qWaitForWindowActive(view)
+        view.open()
+        view.select(P3)
+        for _ in range(3):
+            app.processEvents()
+        bar.setValue(bar.maximum())
+        bottom = bar.value()
+        _press(view, Qt.Key.Key_Right)
+        assert (view.selected, bottom > 0, bar.value()) == (P3, True, bottom)
+    finally:
+        view.close()
+
+
+def test_an_arrow_on_an_empty_graph_selects_nothing(store, monkeypatch):
+    from PySide6.QtTest import QTest
+
+    seen = []
+    monkeypatch.setattr(sys, "excepthook", lambda t, v, tb: seen.append(v))
+    store.pipeline_result = {**_result(), "items": [], "graph": {"nodes": [], "edges": []}}
+    view = PipelineView(store)
+    try:
+        view.show()
+        view.activateWindow()
+        assert QTest.qWaitForWindowActive(view)
+        view.open()
+        _press(view, Qt.Key.Key_Down)
+        assert (view.selected, seen) == (None, [])
+    finally:
+        view.close()
+
+
 def test_titles_are_never_markup(store):
     hostile = "<b>bold</b> &amp; <a href='x'>link</a>"
     result = _result()
@@ -805,7 +967,7 @@ def test_rate_now_and_fracture_are_off_where_the_last_sync_would_refuse_them(sto
 
     view.select(I5)
     assert shown("rate", "fracture") == [
-        (True, "Rate it in a sync started now, ahead of every limit"), (False, split)]
+        (True, "Queue its rating from a sync started now, past the ones a sync asks for itself"), (False, split)]
     view.select(I6)
     assert shown("rate", "fracture") == [(False, part), (False, part)]
     view.select(P2)

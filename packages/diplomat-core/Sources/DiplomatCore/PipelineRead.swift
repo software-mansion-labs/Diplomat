@@ -29,6 +29,8 @@ struct PipelineEntry {
     var links: [String] = []
     /// A Linear issue's attachments run past the read's page.
     var linksPast = false
+    /// An issue's: the operator opened it or is assigned it (on Linear, the login's user).
+    var mine = false
     /// The operator's issue says it is a part Diplomat split off.
     var isPart = false
     /// Whose text that part carries, as its marker names it.
@@ -261,6 +263,7 @@ enum PipelineRead {
         e.parent = (n["parent"] as? [String: Any])?["url"] as? String
         e.children = nodes(n, "subIssues").compactMap { $0["url"] as? String }
         e.issueType = (n["issueType"] as? [String: Any])?["name"] as? String
+        e.mine = !me.isEmpty && ([login(n)] + assignees).contains { $0.lowercased() == me }
         // Diplomat files a part as the operator: no one else's text names a lineage.
         if !me.isEmpty, e.item.author?.lowercased() == me {
             e.isPart = isPart(e.body, parent: e.parent)
@@ -550,6 +553,7 @@ enum PipelineRead {
         e.links = nodes(n, "attachments").compactMap { $0["url"] as? String }
         e.linksPast = bool(((n["attachments"] as? [String: Any])?["pageInfo"] as? [String: Any])?["hasNextPage"], false)
         e.teamID = team?["id"] as? String
+        e.mine = !viewer.isEmpty && [n["creator"] as? [String: Any], assignee].contains { $0?["id"] as? String == viewer }
         if !viewer.isEmpty, (n["creator"] as? [String: Any])?["id"] as? String == viewer {
             e.isPart = isPart(e.body, parent: e.parent)
             e.lineage = lineage(e.body)

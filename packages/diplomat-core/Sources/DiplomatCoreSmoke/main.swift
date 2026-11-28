@@ -1308,6 +1308,42 @@ do {
 }
 print("opencode 2.x service assertions passed")
 
+section("~ is $HOME")
+// As the Linux front-end's `Path.home()` reads it; Foundation's home is the account's.
+do {
+    let fm = FileManager.default
+    let home = fm.temporaryDirectory.appendingPathComponent("diplomat-smoke-home-\(UUID().uuidString)",
+                                                            isDirectory: true)
+    defer { try? fm.removeItem(at: home) }
+    let names = ["HOME", "SHELL", "ENV", "XDG_STATE_HOME", "DIPLOMAT_COMMS_DIR", "DIPLOMAT_AGENTS_DIR",
+                 "DIPLOMAT_CONFIG"]
+    let saved = names.map { ($0, ProcessInfo.processInfo.environment[$0]) }
+    defer { for (name, value) in saved { if let value { setenv(name, value, 1) } else { unsetenv(name) } } }
+    for name in names { unsetenv(name) }
+    setenv("HOME", home.path, 1)
+    check(CommsLog.dir.path == "\(home.path)/.diplomat/comms", "the Comms log: \(CommsLog.dir.path)")
+    check(AgentRegistry.agentsDir().path == "\(home.path)/.diplomat/agents",
+          "the run book: \(AgentRegistry.agentsDir().path)")
+    try fm.createDirectory(at: home.appendingPathComponent(".diplomat"), withIntermediateDirectories: true)
+    // A shell with no rc, so no XDG_STATE_HOME.
+    let shell = home.appendingPathComponent("sh")
+    fm.createFile(atPath: shell.path, contents: Data("#!/bin/sh\nexec /bin/sh \"$@\"\n".utf8),
+                  attributes: [.posixPermissions: 0o755])
+    setenv("SHELL", shell.path, 1)
+    let service = OpenCodeCLI.serviceFile(now: Date().addingTimeInterval(200_000)).path
+    check(service == "\(home.path)/.local/state/opencode/service.json", "OpenCode's service file: \(service)")
+    func pin(_ model: String, in file: URL) throws {
+        try Data(#"{"agentRunner": "opencode", "agentModel": "\#(model)"}"#.utf8).write(to: file)
+    }
+    try pin("acme/home-probe", in: home.appendingPathComponent(".diplomat/config.json"))
+    let pinned = AgentModel.detectedAfresh()
+    check(pinned == "Home Probe", "the settings file: \(pinned)")
+    setenv("DIPLOMAT_CONFIG", "~/moved.json", 1)
+    try pin("acme/moved-probe", in: home.appendingPathComponent("moved.json"))
+    let moved = AgentModel.detectedAfresh()
+    check(moved == "Moved Probe", "a ~ in an override: \(moved)")
+}
+
 section("hermes sessions")
 // The same two questions, answered from Hermes' own SQLite store instead of a port —
 // and the same cases `tests/test_hermes_store.py` pins. A turn is over only when the
@@ -1969,12 +2005,13 @@ check(AgentTaskQueue.reorder(["a", "b"], moving: "z", onto: "a") == ["a", "b"]
 // PARITY: diplomat-platform/linux/tests/test_autofix.py asserts the same arrangements —
 // the band is the one rule that outranks the operator's, so the two front-ends must
 // not disagree about where a conflict fix waits.
-check(AgentTaskQueue.band("conflicts:1") == 4 && AgentTaskQueue.band("investigate:9") == 3
-      && AgentTaskQueue.band("review:2") == 1 && AgentTaskQueue.band("issues:3") == 2
+check(AgentTaskQueue.band("conflicts:1") == 5 && AgentTaskQueue.band("investigate:9") == 4
+      && AgentTaskQueue.band("review:2") == 1 && AgentTaskQueue.band("rate:7") == 2
+      && AgentTaskQueue.band("issues:3") == 3
       && AgentTaskQueue.band("review-req:4") == 0 && AgentTaskQueue.band("a") == 0,
       "a conflict fix bands last, behind an investigation, which waits behind a requested "
-      + "issue fix, which waits behind a requested review, all behind the monitors' own "
-      + "finds; everything else — including a verbless key — first")
+      + "issue fix, which waits behind a rating, which waits behind a requested review, all "
+      + "behind the monitors' own finds; everything else — including a verbless key — first")
 check(AgentTaskQueue.order(offered: ["conflicts:1", "investigate:6", "review:2", "review-req:3",
                                      "review-reply:4", "issues:5"], saved: [])
       == ["review-req:3", "review-reply:4", "review:2", "issues:5", "investigate:6", "conflicts:1"],
@@ -1988,8 +2025,8 @@ check(AgentTaskQueue.order(offered: ["investigate:6", "issues:5", "conflicts:1"]
 check(AgentTaskQueue.reorder(["issues:5", "investigate:6"], moving: "investigate:6",
                              onto: "issues:5") == ["issues:5", "investigate:6"],
       "an investigation cannot be dragged out of its band")
-check(AgentTaskQueue.requestedActions == ["review", "issues", "investigate"],
-      "an investigation is asked-for work, cancellable like the sweeps'")
+check(AgentTaskQueue.requestedActions == ["review", "issues", "investigate", "rate"],
+      "an investigation and a rating are asked-for work, cancellable like the sweeps'")
 check(AgentTaskQueue.order(offered: ["review:1", "issues:2"], saved: ["issues:2"])
       == ["review:1", "issues:2"],
       "a requested review is its own band ahead of issues, so it drains first however "

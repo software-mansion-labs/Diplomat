@@ -778,8 +778,9 @@ final class Store: ObservableObject {
     /// banned.json). They receive no automated reviews, their Slack messages are not
     /// triaged, and they appear in the "Banned" list above the sessions.
     @Published var bannedAuthors: [BannedAuthor] = []
-    /// banned.json is present but unreadable, as `refreshBanList` last read it: the Pipeline
-    /// then acts on nothing, as its sync does (`PipelineTick.bannedLogins`).
+    /// banned.json cannot be read, as `refreshBanList` last found it: work naming an author
+    /// is held (`heldByBanList`), and the Pipeline acts on nothing, as its sync does
+    /// (`PipelineTick.bannedLogins`).
     @Published var banListUnreadable = false
 
     /// Each ban `refreshBanList` has seen, as login and `at`; nil until its first read,
@@ -955,13 +956,35 @@ final class Store: ObservableObject {
             pipelineSwitched(on: pipelineEnabled && !oldValue)
         }
     }
-    /// `PipelineSettings.rate`, `.fix`, `.fastTrack`, `.merge`, `.fracture`; moot while
-    /// `pipelineEnabled` is off.
+    /// `PipelineSettings.rate`, `.mirrorGitHub`, `.mirrorLinear`, `.mirrorScope`, `.fix`,
+    /// `.fastTrack`, `.merge`, `.fracture`; moot while `pipelineEnabled` is off.
     @Published var pipelineRate: Bool {
         didSet {
             persist(pipelineRate, forKey: Keys.pipelineRate)
             writePipelineControl()
+            if !pipelineRate { withdrawPipelineAsks(nil) }
             pipelineSwitched(on: pipelineRate && !oldValue)
+        }
+    }
+    @Published var pipelineMirrorGitHub: Bool {
+        didSet {
+            persist(pipelineMirrorGitHub, forKey: Keys.pipelineMirrorGitHub)
+            writePipelineControl()
+            pipelineSwitched(on: pipelineMirrorGitHub && !oldValue)
+        }
+    }
+    @Published var pipelineMirrorLinear: Bool {
+        didSet {
+            persist(pipelineMirrorLinear, forKey: Keys.pipelineMirrorLinear)
+            writePipelineControl()
+            pipelineSwitched(on: pipelineMirrorLinear && !oldValue)
+        }
+    }
+    @Published var pipelineMirrorScope: PipelineMirrorScope {
+        didSet {
+            persist(pipelineMirrorScope.rawValue, forKey: Keys.pipelineMirrorScope)
+            writePipelineControl()
+            pipelineSwitched(on: pipelineMirrorScope > oldValue)
         }
     }
     @Published var pipelineFix: Bool {
@@ -1029,8 +1052,9 @@ final class Store: ObservableObject {
     /// Driven from `PipelineMonitor.swift`, hence not private.
     var pipelineMonitorTask: Task<Void, Never>?
     var pipelineWakeObserver: NSObjectProtocol?
-    /// When the loop's or a wake's sync last ended (`pipelineSyncWait`).
+    /// When the loop's or a wake's sync last ended, and whether one runs (`pipelineSyncWait`).
     var pipelineTimedSyncEnded: Date?
+    var pipelineTimedSyncing = false
     var pipelineSyncAgain = false
     /// A sync begun before a bump (`pipelineCut`) may have been switched off midway,
     /// emitting less than it owes, so its result withdraws and prunes nothing.
@@ -1042,6 +1066,13 @@ final class Store: ObservableObject {
     /// judged its item (`pipelineJudgedAsks`): till then it may be stale, so it does not
     /// start (`isHeld`).
     @Published var pipelineStale: Set<String> = []
+    /// The rating jobs the queue dispatched that have not returned, each holding a bay of
+    /// the task cap (`startPipelineRate`, in `PipelineMonitor.swift`). In memory only: a
+    /// job a quit cuts off leaves no answer, so the next sync asks for it again.
+    @Published var pipelineRateRuns: [PipelineRateRun] = []
+    /// The bays of the task cap held outside `capLoad`: the ratings running, and the runs
+    /// this machine executes for the network (`NetworkAdmit.running`).
+    var ratingsAndPoolRuns: Int { pipelineRateRuns.count + NetworkAdmit.running(networkState) }
 
     /// Every dispatched agent run the panel draws, in reading order: the sessions this
     /// machine spawned, and any live agent nobody dispatched at all.
@@ -1181,6 +1212,9 @@ final class Store: ObservableObject {
         static let commsSeenAt = "commsSeenAt"
         static let pipelineEnabled = "pipelineEnabled"
         static let pipelineRate = "pipelineRate"
+        static let pipelineMirrorGitHub = "pipelineMirrorGitHub"
+        static let pipelineMirrorLinear = "pipelineMirrorLinear"
+        static let pipelineMirrorScope = "pipelineMirrorScope"
         static let pipelineFix = "pipelineFix"
         static let pipelineFastTrack = "pipelineFastTrack"
         static let pipelineMerge = "pipelineMerge"
@@ -1408,6 +1442,10 @@ final class Store: ObservableObject {
         commsSeenAt = defaults.object(forKey: Keys.commsSeenAt) as? Date ?? Date()
         pipelineEnabled = defaults.bool(forKey: Keys.pipelineEnabled)
         pipelineRate = defaults.bool(forKey: Keys.pipelineRate)
+        pipelineMirrorGitHub = defaults.bool(forKey: Keys.pipelineMirrorGitHub)
+        pipelineMirrorLinear = defaults.bool(forKey: Keys.pipelineMirrorLinear)
+        pipelineMirrorScope = defaults.string(forKey: Keys.pipelineMirrorScope)
+            .flatMap(PipelineMirrorScope.init(rawValue:)) ?? .prs
         pipelineFix = defaults.bool(forKey: Keys.pipelineFix)
         pipelineFastTrack = defaults.bool(forKey: Keys.pipelineFastTrack)
         pipelineMerge = defaults.bool(forKey: Keys.pipelineMerge)
@@ -2838,11 +2876,17 @@ final class Store: ObservableObject {
     }
 
     /// With the network on the room is the pool's, which has it whenever its daemon
-    /// answers and the settings can be read.
+    /// answers and the settings can be read; a rating's is this device's either way.
     func drainHasRoom(capLoad: Int) -> Bool {
-        (networkEnabled ? networkAnswered != false && networkSettingsUnknown.isEmpty
-            : capLoad < autoTaskLimit)
-            && !drainableTasks.isEmpty
+        let here = capLoad + ratingsAndPoolRuns < autoTaskLimit
+        let pool = networkAnswered != false && networkSettingsUnknown.isEmpty
+        return drainableTasks.contains { offersToNetwork($0.job) ? pool : here }
+    }
+
+    /// Whether `job` would go to the Diplomacy Network rather than run here: with the
+    /// network on, anything but a rating.
+    func offersToNetwork(_ job: AgentJob) -> Bool {
+        networkEnabled && job.rating == nil
     }
 
     /// Set when the last monitor poll cycle failed (gh/auth/network), so persistent
@@ -3190,11 +3234,26 @@ final class Store: ObservableObject {
     /// (`Filters.newCommunityIssues`). So it is offered until it is dispatched, can be
     /// cancelled, and re-reads its issue when its turn comes.
     ///
+    /// While the ban list cannot be read nothing is queued and only a root with no mark
+    /// takes one, so each issue filed meanwhile is judged once it reads.
+    ///
     /// Not private: the queue self-test drives it with a fixture fetch.
     func queueCommunityIssues(_ found: [OpenIssue], root: PRRef.LocalRepo, me: String) {
+        let bans = BanList.readFile()
         let key = root.key
-        let scan = Filters.newCommunityIssues(found, since: communityIssuesSince[key], now: Date())
-        let banned = BanList.read()
+        let since = communityIssuesSince[key]
+        var marks = communityIssuesSince
+        if rootsResolved {
+            let current = Set(roots.map(\.key))
+            marks = marks.filter { current.contains($0.key) }
+        }
+        defer { communityIssuesSince = marks }
+        guard !bans.isUnreadable || since == nil else {
+            marks[key] = since
+            return
+        }
+        let scan = Filters.newCommunityIssues(found, since: since, now: Date())
+        let banned = BanList.read(bans)
         for issue in scan.fresh {
             let label = itemLabel(PRRef.itemKey(owner: root.owner, repo: root.repo,
                                                 number: issue.number, host: root.host))
@@ -3212,13 +3271,7 @@ final class Store: ObservableObject {
                 AuditLog.log("auto", "community-issue", "\(who) — fix queued")
             }
         }
-        var marks = communityIssuesSince
-        if rootsResolved {
-            let current = Set(roots.map(\.key))
-            marks = marks.filter { current.contains($0.key) }
-        }
         marks[key] = scan.since
-        communityIssuesSince = marks
         if !scan.fresh.isEmpty { refreshAudit() }
     }
 
@@ -3262,7 +3315,8 @@ final class Store: ObservableObject {
         }
         noteRootsRead(Store.reviewRequestsRead, read: read, failed: failed)
         heldKeys.formUnion(failed.map { $0.root.key })
-        let banned = BanList.read()
+        let bans = BanList.readFile()
+        let banned = BanList.read(bans)
         let now = Date()
         let prior = loadReviewReqAttempts()
         // An author outside the allowlist is dropped here rather than carried down as a
@@ -3277,10 +3331,12 @@ final class Store: ObservableObject {
         // Before dispatching, so the ledger has a queue instant to measure the
         // time-to-start against. A banned author's request is owed by GitHub's
         // reckoning but will never be dispatched, so it is left out — counting it
-        // would show a review pending forever that nothing is meant to pick up.
+        // would show a review pending forever that nothing is meant to pick up. While the
+        // list cannot be read, the last one read stands in for it.
+        let standing = bans.isUnreadable ? bannedAuthors : banned
         TelemetryLog.observeOwed(
             kind: AutofixWork.kindReviewReq, duty: "review",
-            owed: Dictionary(owed.filter { !BanList.isBanned($0.author, in: banned) }.map {
+            owed: Dictionary(owed.filter { !BanList.isBanned($0.author, in: standing) }.map {
                 (AutofixWork.ledgerKey(kind: AutofixWork.kindReviewReq,
                                        prURL: $0.url, headSha: $0.headSha), $0.number)
             }, uniquingKeysWith: { first, _ in first }))
@@ -3289,6 +3345,8 @@ final class Store: ObservableObject {
         for r in owed {
             let key = item(url: r.url, number: r.number)
             let stamp = AttemptStamp.reviewRequest(r)
+            // An unreadable list reads as empty here; the dispatch gate queues the
+            // request, held.
             let decision = ReviewReconcile.decide(
                 prior: prior[key], stamp: stamp, inFlight: await inFlight(key),
                 banned: BanList.isBanned(r.author, in: banned), now: now)
@@ -3320,7 +3378,9 @@ final class Store: ObservableObject {
         saveReviewReqAttempts(attempts)
         // Reviews still owed with no agent on them AFTER this poll — the ones a freshly
         // spawned agent didn't cover (cooling down between retries, or a spawn that failed).
-        // Excludes banned authors, which we never auto-review, and requests a run concluded.
+        // Excludes banned authors, which we never auto-review, and requests a run concluded,
+        // so it stands while the list cannot be read.
+        guard !bans.isUnreadable else { return }
         var unaddressed = 0
         for r in owed where !BanList.isBanned(r.author, in: banned) {
             let key = item(url: r.url, number: r.number)
@@ -3348,12 +3408,19 @@ final class Store: ObservableObject {
 
     /// Re-read the prompt-injection ban list (cheap local file). Publishes on change, and
     /// posts a notification for each ban not seen by an earlier read: a new login, or a
-    /// repeat offence (a new `at`).
+    /// repeat offence (a new `at`). An unreadable list leaves the last read standing, and
+    /// the feed says so once per spell.
     func refreshBanList() {
         let file = BanList.readFile()
+        if file.isUnreadable != banListUnreadable {
+            banListUnreadable = file.isUnreadable
+            if file.isUnreadable {
+                AuditLog.log("auto", "warn", BanList.unreadNote)
+                refreshAudit()
+            }
+        }
+        guard !file.isUnreadable else { return }
         let next = BanList.read(file)
-        let unreadable = if case .unreadable = file { true } else { false }
-        if unreadable != banListUnreadable { banListUnreadable = unreadable }
         let keys = next.map { "\($0.login.lowercased())@\($0.at ?? "")" }
         if let seen = bansSeen {
             for (ban, key) in zip(next, keys)
@@ -3450,10 +3517,11 @@ final class Store: ObservableObject {
     ///
     /// Work that is starting holds one. Its spawn has not registered anywhere yet, but the
     /// bay is spoken for — and drawn as free it would put a row that is launching next to
-    /// the empty slot it is launching into, which is one row more than the cap allows.
+    /// the empty slot it is launching into, which is one row more than the cap allows. So
+    /// does a running rating, which no tick measures.
     var freeAutoSlots: Int {
         AgentTaskQueue.freeSlots(limit: autoTaskLimit,
-                                 running: autoTasksMeasured + startingTasks.count)
+                                 running: autoTasksMeasured + startingTasks.count + pipelineRateRuns.count)
     }
 
     /// Whether the "deferring auto work" note has been logged for the current
@@ -3462,7 +3530,8 @@ final class Store: ObservableObject {
     /// single spell of having nothing left to spend, and each episode is worth one line
     /// of its own.
     private var capacityLogged = false
-    private var budgetLogged = false
+    /// Per currency (`AutoBudget.inClaude`).
+    private var budgetLogged = Set<Bool>()
     private var diskLogged = false
 
     /// The free space of whichever volume an agent here runs out of first: a repo root
@@ -3507,12 +3576,11 @@ final class Store: ObservableObject {
     }
 
     /// Note that automatic work is being held for want of budget — once per episode,
-    /// like `logAtCapacity`, and cleared the moment a dispatch finds room again.
-    /// Without that, a machine sitting under its floor would write one of these per
+    /// like `logAtCapacity`, and cleared the moment a dispatch in its currency finds room
+    /// again. Without that, a machine sitting under its floor would write one of these per
     /// owed PR per poll, for hours.
-    private func logUnaffordable(_ budget: AgentDispatchGate.Budget) {
-        guard !budgetLogged else { return }
-        budgetLogged = true
+    private func logUnaffordable(_ budget: AgentDispatchGate.Budget, claude: Bool) {
+        guard budgetLogged.insert(claude).inserted else { return }
         AuditLog.log("auto", "no-budget",
                      "Deferring auto work — " + AutoBudget.shortfall(budget))
         refreshAudit()
@@ -3652,7 +3720,9 @@ final class Store: ObservableObject {
     /// failure stops the drain: it means terminal automation is broken, not that this
     /// one task was unlucky, and each entry is taken off the list before it is tried —
     /// so walking the whole queue into the same failure would clear the panel of every
-    /// queued row at once, for a reason none of them caused.
+    /// queued row at once, for a reason none of them caused. With the network on, a
+    /// rating still runs here (`offersToNetwork`), so the cap, the budget or the disk
+    /// holding one holds only the ratings after it, and a silent daemon only the rest.
     ///
     /// A task in a repo outside `read` (the roots this cycle read, by default every
     /// root) is neither priced nor started: nothing this cycle speaks for it, and a root
@@ -3705,16 +3775,22 @@ final class Store: ObservableObject {
             }
             dropQueuedTask(entry.id)
         }
+        // Whether the tasks run here (true) or offered to the network (false) have met a
+        // refusal every later one of them would meet too, and in which currencies
+        // (`AutoBudget.inClaude`) a task run here was refused as unaffordable.
+        var stopped = Set<Bool>(), broke = Set<Bool>()
         for entry in drainableTasks {
+            let here = !offersToNetwork(entry.job), claude = AutoBudget.inClaude(entry.job)
             // The list moves under this loop: it awaits a spawn per task, and an
             // "execute now" during one of those takes its row off the queue and
             // starts it there and then. Re-reading the queue is what keeps the drain
             // from dispatching that same task a second time when it reaches it.
-            guard queuedTasks.contains(where: { $0.id == entry.id }), !outside(entry)
-            else { continue }
+            guard queuedTasks.contains(where: { $0.id == entry.id }), !outside(entry),
+                  !stopped.contains(here), !(here && broke.contains(claude)) else { continue }
             // A job offered to the network takes no bay of this device's cap.
-            if !networkEnabled {
-                guard await agentTick().tick.capLoad.count < autoTaskLimit else { return }
+            if here, await agentTick().tick.capLoad.count + ratingsAndPoolRuns >= autoTaskLimit {
+                stopped.insert(here)
+                continue
             }
             // Finding room here is what re-arms the saturation notice. The gate's own
             // reset sits behind the capacity measurement this path skips, so without
@@ -3723,12 +3799,14 @@ final class Store: ObservableObject {
             capacityLogged = false
             switch await runQueuedTask(entry, forced: false) {
             case .failed: return
-            // Every remaining entry would be priced against the same windows, or the
-            // same disk, or offered to the same silent daemon, and get the same answer,
-            // and the dispatch has already re-staged this one for the commit at the end
-            // of the cycle. Draining on would cost a round of refusals to no end. A
-            // refusal for the job's own reason moves on to the next.
-            case .unaffordable, .lowDisk, .networkDown: return
+            // Every remaining entry run in the same place would be priced against the
+            // same windows (one in the same currency), or the same disk, or offered to
+            // the same silent daemon, and get the same answer, and the dispatch has
+            // already re-staged this one for the commit at the end of the cycle. Draining
+            // on would cost a round of refusals to no end. A refusal for the job's own
+            // reason moves on to the next.
+            case .unaffordable: broke.insert(claude)
+            case .lowDisk, .networkDown: stopped.insert(here)
             default: break
             }
         }
@@ -3745,16 +3823,18 @@ final class Store: ObservableObject {
     // has room — behind the monitors' finds, ahead of the conflict fixes
     // (`AgentTaskQueue.band`).
 
-    /// The config behind one ask: a review, an issue fix, or a Comms investigation.
+    /// The config behind one ask: a review, an issue fix, a Comms investigation, or a
+    /// Pipeline rating.
     ///
     /// Everything downstream reads an ask through `action` / `noun` / `depth` /
     /// `buildPrompt`, so the queue, the panel and the drain never branch on which kind
     /// it is — the one place that does is `requestedTask`, where a PR is dedup-able
-    /// work and an issue or an investigation is not.
+    /// work and an issue or an investigation is not, and a rating runs no agent.
     enum RequestedConfig: Equatable {
         case review(ReviewConfig)
         case issues(IssueConfig)
         case investigate(InvestigateConfig)
+        case rate(RateConfig)
 
         /// The queue verb this ask waits under, which is also its `AgentJob.kind`
         /// and the verb its dispatch writes to the activity feed.
@@ -3763,6 +3843,7 @@ final class Store: ObservableObject {
             case .review: return AgentTaskQueue.reviewAction
             case .issues: return AgentTaskQueue.issuesAction
             case .investigate: return AgentTaskQueue.investigateAction
+            case .rate: return AgentTaskQueue.rateAction
             }
         }
 
@@ -3772,6 +3853,7 @@ final class Store: ObservableObject {
             case .review: return "Review"
             case .issues: return "Issues"
             case .investigate: return "Investigate"
+            case .rate: return "Rating"
             }
         }
 
@@ -3780,6 +3862,7 @@ final class Store: ObservableObject {
             case .review(let cfg): return cfg.depth
             case .issues(let cfg): return cfg.depth
             case .investigate: return "slack"
+            case .rate: return ""
             }
         }
 
@@ -3788,6 +3871,7 @@ final class Store: ObservableObject {
             case .review(let cfg): return cfg.buildPrompt()
             case .issues(let cfg): return cfg.buildPrompt()
             case .investigate(let cfg): return cfg.buildPrompt()
+            case .rate: return ""
             }
         }
 
@@ -3796,7 +3880,7 @@ final class Store: ObservableObject {
             switch self {
             case .review(let cfg): return .init(review: cfg)
             case .issues(let cfg): return .init(issues: cfg)
-            case .investigate: return .init()
+            case .investigate, .rate: return .init()
             }
         }
 
@@ -3806,12 +3890,13 @@ final class Store: ObservableObject {
             case .review(let cfg): return cfg.fastTrack == true
             case .issues(let cfg): return cfg.pipeline == true || cfg.linear != nil
             case .investigate: return false
+            case .rate: return true
             }
         }
     }
 
     /// One PR to review, issue to fix or investigation to run that a sweep or a Slack
-    /// message asked for, waiting for a free slot.
+    /// message asked for, or a Pipeline sync's ask, waiting for a free slot.
     ///
     /// This is the only work in the queue the applet has to REMEMBER. Everything else
     /// there is a monitor's find, re-derived from GitHub on every poll — but a PR
@@ -3823,7 +3908,7 @@ final class Store: ObservableObject {
     struct RequestedWork: Codable, Equatable {
         /// The PR number, the issue number, or an investigation's Slack ts (`CommsTS`):
         /// three numbering spaces, told apart by the verb in `key` and nowhere else. 0 for
-        /// a Linear issue's fix, which `item` names by its identifier instead.
+        /// a Linear issue's fix or rating, which `item` names by its identifier instead.
         let number: Int
         let url: String
         /// Whose PR / issue — the pipeline's ban dimension. Empty where the sweep
@@ -3836,7 +3921,8 @@ final class Store: ObservableObject {
         var repo: String
         /// The network task this ask is offered as; "" while no offer carries it.
         var offered = ""
-        /// Queued by the Pipeline screen's Start fix, not by a sync (`pipelineWithdrawn`).
+        /// Asked for by the operator, not by a sync: a fix by the Pipeline screen's Start
+        /// fix, a rating by Rate now (`pipelineWithdrawn`).
         var byHand = false
 
         /// This ask's identity everywhere it has one: the queued task's id, the row
@@ -3849,6 +3935,7 @@ final class Store: ObservableObject {
             if case .issues(let cfg) = config, let linear = cfg.linear {
                 return Store.linearItem(linear.identifier)
             }
+            if case .rate = config { return Store.pipelineIdentity(url) }
             return config.action == AgentTaskQueue.investigateAction ? String(number)
                 : Store.item(url: url, number: number, root: repo)
         }
@@ -3857,9 +3944,15 @@ final class Store: ObservableObject {
         /// many repo roots are loaded (`PRRef.itemLabel`). Carries the depth because that
         /// is the choice a sweep is worth re-reading later: the same PR queued from a
         /// `max` sweep and from a `quick` one are different jobs. An investigation's
-        /// number is a meaningless Slack ts, so it wears its own label.
+        /// number is a meaningless Slack ts, so it wears its own label; a rating has no
+        /// depth.
         func label(roots: Int) -> String {
             if case .investigate(let cfg) = config { return cfg.label }
+            if case .rate = config {
+                let linear = Store.linearItem("")
+                return "\(config.noun) · " + (item.hasPrefix(linear) ? String(item.dropFirst(linear.count))
+                                                : PRRef.itemLabel(item: item, roots: roots))
+            }
             if case .issues(let cfg) = config, let linear = cfg.linear {
                 return "\(config.noun) · \(linear.identifier) · \(config.depth)"
             }
@@ -3908,6 +4001,8 @@ final class Store: ObservableObject {
                 config = .issues(try c.decode(IssueConfig.self, forKey: .config))
             } else if action == AgentTaskQueue.investigateAction {
                 config = .investigate(try c.decode(InvestigateConfig.self, forKey: .config))
+            } else if action == AgentTaskQueue.rateAction {
+                config = .rate(try c.decode(RateConfig.self, forKey: .config))
             } else {
                 config = .review(try c.decode(ReviewConfig.self, forKey: .config))
             }
@@ -3926,6 +4021,7 @@ final class Store: ObservableObject {
             case .review(let cfg): try c.encode(cfg, forKey: .config)
             case .issues(let cfg): try c.encode(cfg, forKey: .config)
             case .investigate(let cfg): try c.encode(cfg, forKey: .config)
+            case .rate(let cfg): try c.encode(cfg, forKey: .config)
             }
         }
     }
@@ -4047,6 +4143,7 @@ final class Store: ObservableObject {
     private func requestedTask(_ entry: RequestedWork) -> QueuedAgentTask? {
         let action = entry.config.action
         var config = entry.config
+        var rating: RateConfig?
         let root = roots.first { $0.key == entry.repo }
         switch config {
         case .review(var cfg):
@@ -4057,12 +4154,15 @@ final class Store: ObservableObject {
             config = .issues(cfg)
         case .investigate:
             break
+        case .rate(let cfg):
+            rating = cfg
         }
         // A fix is deliberately NOT PR-scoped (an issue link, no PR number): the dispatch
         // dedup keys on a PR number, so an issue number would collide with the PR sharing
         // it. The assignee claim, visible to every machine, keeps two agents off one issue.
+        // Nor is a rating, which runs no agent.
         let isPR = action == AgentTaskQueue.reviewAction
-        let link: String? = isPR ? entry.url
+        let link: String? = isPR || rating != nil ? entry.url
             : action == AgentTaskQueue.issuesAction ? entry.issueLink(in: roots) : nil
         return QueuedAgentTask(
             id: entry.key,
@@ -4073,7 +4173,7 @@ final class Store: ObservableObject {
                           authorLogin: entry.author.isEmpty ? nil : entry.author,
                           counter: entry.config.isPipeline ? .pipeline : nil,
                           directory: root?.path ?? entry.config.checkout,
-                          allows: config.allows),
+                          allows: config.allows, rating: rating),
             attemptNumber: 1)
     }
 
@@ -4149,7 +4249,7 @@ final class Store: ObservableObject {
         // never draw it, since the allowlist answers for the review monitor's own
         // finds and an ask is not one (`AgentJob.counter`).
         case .inFlight, .atCapacity, .unaffordable, .lowDisk, .failed, .notAllowed,
-             .offering, .networkRefused, .networkDown: break
+             .offering, .networkRefused, .networkDown, .banListUnreadable: break
         }
     }
 
@@ -4181,11 +4281,14 @@ final class Store: ObservableObject {
     /// and a fix stands whatever happens to its issue, the poll reading PRs alone.
     /// Without a way back out, a mis-aimed sweep is a day of agents nobody can call off.
     /// A pipeline ask's attempt record is concluded (`pipelineCancelled`), or its next sync
-    /// would queue it again.
+    /// would queue it again; a rating's job is cancelled instead, which its next sync
+    /// reads as the operator's no (`PipelineRateJob.cancel`).
     func cancelRequestedWork(_ id: String) {
         guard let entry = queuedTasks.first(where: { $0.id == id }), entry.job.requested
         else { return }
-        if entry.job.counter == .pipeline {
+        if let rating = entry.job.rating {
+            PipelineRateJob.cancel(item: rating.url, stamp: rating.stamp)
+        } else if entry.job.counter == .pipeline {
             savePipelineAttempts(Store.pipelineCancelled(loadPipelineAttempts(), job: entry.job, at: Date()))
         }
         forgetRequested(entry.id)
@@ -4216,8 +4319,9 @@ final class Store: ObservableObject {
 
     /// The queued tasks the drain may start, in the operator's order — everything
     /// whose monitor is still on, plus the reviews the operator asked for, which no
-    /// monitor speaks for either way. Empty while `queueAutoRun` is off, including
-    /// the asks: that switch is over the queue itself, not over what fills it.
+    /// monitor speaks for either way, less what `isHeld` holds. Empty while
+    /// `queueAutoRun` is off, including the asks: that switch is over the queue
+    /// itself, not over what fills it.
     ///
     /// Not private: this is the seam the queue self-test drives. Asserting on the
     /// list the drain walks is how the "a paused monitor's work is held, not run"
@@ -4230,11 +4334,18 @@ final class Store: ObservableObject {
 
     /// Paused, or a pipeline ask still stale (`pipelineStale`) or held by an unreadable ban
     /// list (`banListUnreadable`), unless a Slack ping took it as its ask: then it is
-    /// asked-for work, which switching a monitor off never stops (`isPaused`).
+    /// asked-for work, which switching a monitor off never stops (`isPaused`). Work naming
+    /// an author waits while that list cannot be read, whoever asked for it
+    /// (`heldByBanList`).
     func isHeld(_ task: QueuedAgentTask, owned: Set<String>? = nil) -> Bool {
-        (isPaused(task.job.counter)
-            || (task.job.counter == .pipeline && (banListUnreadable || pipelineStale.contains(task.id))))
-            && !(owned ?? commsOwnedKeys).contains(task.id)
+        heldByBanList(task)
+            || ((isPaused(task.job.counter)
+                || (task.job.counter == .pipeline && (banListUnreadable || pipelineStale.contains(task.id))))
+                && !(owned ?? commsOwnedKeys).contains(task.id))
+    }
+
+    func heldByBanList(_ task: QueuedAgentTask) -> Bool {
+        banListUnreadable && !(task.job.authorLogin ?? "").isEmpty
     }
 
     /// Dispatch one queued task past the capacity check its caller already made, and
@@ -4355,6 +4466,12 @@ final class Store: ObservableObject {
     /// in both.
     func executeQueuedTask(_ id: String) async {
         guard let entry = queuedTasks.first(where: { $0.id == id }) else { return }
+        // Refused before it leaves the queue, where it would be missing until the next poll.
+        refreshBanList()
+        if heldByBanList(entry) {
+            error = "\(entry.job.label): \(BanList.unreadReason)."
+            return
+        }
         switch await runQueuedTask(entry, forced: true) {
         case .spawned:
             AuditLog.log("panel", "queue-run",
@@ -4374,6 +4491,8 @@ final class Store: ObservableObject {
         case .banned:
             let who = BanList.refusedWho(entry.job.authorLogin ?? "")
             error = "\(entry.job.label): \(who) is banned (\(Store.banRemedy(entry.job)))."
+        case .banListUnreadable:
+            error = "\(entry.job.label): \(BanList.unreadReason)."
         case .notAllowed:
             error = "\(entry.job.label): the PR's author is not on the auto-review list "
                   + "(add them, or review it from the wizard)."
@@ -4459,6 +4578,9 @@ final class Store: ObservableObject {
         /// What `prompt` was built to let the agent do. An offer to the network states it
         /// beside the prompt (`NetworkOffer.from`).
         var allows = Allows()
+        /// A Pipeline rating's, whose dispatch runs its job headless here
+        /// (`startPipelineRate`) rather than an agent.
+        var rating: RateConfig?
 
         struct Allows: Equatable {
             /// A review of the operator's own PR: fixes go on its branch.
@@ -4521,6 +4643,9 @@ final class Store: ObservableObject {
         case spawned(terminal: String)
         case inFlight
         case banned
+        /// The ban list could not be read, so the job waits as a deferral does: a find is
+        /// queued again and an ask stays.
+        case banListUnreadable
         case notAllowed
         case atCapacity
         case unaffordable
@@ -4574,13 +4699,17 @@ final class Store: ObservableObject {
     /// is filling, and skips paused work by construction) and "execute now" (where
     /// the operator is overriding both holds deliberately). It skips the measurement —
     /// not just its verdict — so neither pays for a second `ps` scan, and so a forced
-    /// run cannot re-queue itself.
+    /// run cannot re-queue itself for want of a slot.
     ///
     /// `forced` is only the second of those, and it also overrides the budget and the
     /// disk floor. The drain runs the machine's own automatic work, and work that could
     /// not be afforded when it was found, or had no room on disk, gains neither by
     /// having waited in a list; only the operator pressing "execute now" overrides
     /// them, exactly as only they override the cap.
+    ///
+    /// A rating (`AgentJob.rating`) passes the same gates, never through the network,
+    /// and in place of a spawn starts its job headless (`startPipelineRate`): no
+    /// terminal, run book record or telemetry.
     @discardableResult
     func dispatchAgent(_ job: AgentJob, source: AgentDispatchGate.Source,
                        attemptNumber: Int = 1,
@@ -4591,7 +4720,11 @@ final class Store: ObservableObject {
             resolvingPRs.insert(item)
         }
         defer { if let item = job.item { resolvingPRs.remove(item) } }
-        let banned = job.authorLogin.map { BanList.isBanned($0, in: BanList.read()) } ?? false
+        // An unreadable list could be banning anyone.
+        let bans = BanList.readFile()
+        let banned = job.authorLogin.map {
+            !$0.isEmpty && (bans.isUnreadable || BanList.isBanned($0, in: BanList.read(bans)))
+        } ?? false
         // The allowlist speaks for the review monitor's work and nothing else, so the
         // counter — which is what makes a job that monitor's — is the whole test. A
         // sweep, a wizard press and both reconcilers over my own PRs carry no counter or
@@ -4604,7 +4737,7 @@ final class Store: ObservableObject {
         // With the network on the job runs in a container on whichever machine claims
         // it, so this device's disk, cap and budget are not measured for it: they shape
         // what this machine admits from the pool instead (`runNetworkCycleOnce`).
-        let network = networkEnabled
+        let network = offersToNetwork(job)
         // First: a low disk holds the job whatever the cap or the budget would say. Off
         // the main actor, since a volume can be a network mount.
         var disk: DiskFloor.Reading?
@@ -4620,7 +4753,7 @@ final class Store: ObservableObject {
         var atCapacity = false, full = false, paused = false
         if source == .auto, !agentOnPR, !bypassCapacity, !lowDisk {
             if !network {
-                full = await agentTick().tick.capLoad.count >= autoTaskLimit
+                full = await agentTick().tick.capLoad.count + ratingsAndPoolRuns >= autoTaskLimit
                 if !full { capacityLogged = false }
             }
             // A switched-off monitor has no room for its own work, whatever the
@@ -4640,11 +4773,12 @@ final class Store: ObservableObject {
         // set and this one clear — that is the whole difference between deferring work
         // and forcing it.
         var budget = AgentDispatchGate.Budget(affordable: true)
+        let claude = AutoBudget.inClaude(job)
         if source == .auto, !agentOnPR, !forced, !lowDisk, !atCapacity, !network,
            AutoBudget.enabled {
             // Off the main actor: the probe behind it dials the usage endpoint.
-            budget = await Task.detached(priority: .utility) { AutoBudget.decide() }.value
-            if budget.affordable { budgetLogged = false }
+            budget = await Task.detached(priority: .utility) { AutoBudget.decide(claude: claude) }.value
+            if budget.affordable { budgetLogged.remove(claude) }
         }
         switch AgentDispatchGate.decide(source: source, banned: banned,
                                         agentOnPR: agentOnPR, atCapacity: full,
@@ -4663,10 +4797,14 @@ final class Store: ObservableObject {
             stageQueued(job, attemptNumber: attemptNumber)
             return .atCapacity
         case .unaffordable:
-            logUnaffordable(budget)
+            logUnaffordable(budget, claude: claude)
             stageQueued(job, attemptNumber: attemptNumber)
             return .unaffordable
         case .banned:
+            if bans.isUnreadable {
+                stageQueued(job, attemptNumber: attemptNumber)
+                return .banListUnreadable
+            }
             let who = BanList.refusedWho(job.authorLogin ?? "")
             AuditLog.log(source.rawValue, "ban-skip",
                          "\(job.label) — \(who) is banned (\(Store.banRemedy(job)))")
@@ -4699,6 +4837,10 @@ final class Store: ObservableObject {
         let rowLabel = AgentDispatchGate.label(source: source, core: job.label,
                                                attemptNumber: attemptNumber,
                                                requested: job.requested)
+        if let rating = job.rating {
+            startPipelineRate(rating, label: rowLabel)
+            return .spawned(terminal: "")
+        }
         if network {
             return await offerToNetwork(job, source: source, attemptNumber: attemptNumber,
                                         forced: forced, rowLabel: rowLabel)
@@ -5145,8 +5287,8 @@ final class Store: ObservableObject {
             self.error = "Resolve \(label): an agent is already on this PR."
         case .networkRefused(let why), .networkDown(let why):
             self.error = "Resolve \(label) was not offered: \(why)."
-        case .spawned, .offered, .offering, .banned, .atCapacity, .unaffordable, .lowDisk,
-             .notAllowed:
+        case .spawned, .offered, .offering, .banned, .banListUnreadable, .atCapacity,
+             .unaffordable, .lowDisk, .notAllowed:
             // `.atCapacity`, `.unaffordable` and `.lowDisk` are answers only a monitor
             // gets - none of the automatic-task cap, the spending budget and the disk
             // floor applies to a click - and `.notAllowed` speaks for the review
@@ -5446,7 +5588,9 @@ final class Store: ObservableObject {
                 try await Task.detached(priority: .userInitiated) { try SelfUpdate.relaunch(background: false) }.value
                 self?.updateState = .restarting(commit: commit)
             } catch {
-                self?.updateState = .failed((error as? LocalizedError)?.errorDescription ?? "\(error)")
+                let message = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+                SelfUpdate.schedLog("update failed: \(message)")
+                self?.updateState = .failed(message)
             }
         }
     }

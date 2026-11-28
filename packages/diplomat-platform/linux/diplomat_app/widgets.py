@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import glyphs
+from . import bans, glyphs
 
 
 def tint_bg(hex_color: str, alpha: float) -> str:
@@ -514,14 +514,18 @@ class QueuedTaskRow(QFrame):
         "Start this agent now. Its monitor is switched off, so nothing else will — "
         "but once running it counts against the cap like any automatic agent."
     )
+    _BAN_HELD_HELP = (
+        "The prompt-injection ban list cannot be read, so this agent cannot start, not "
+        "even from here, until it does."
+    )
     _CANCEL_HELP = (
         "Drop this review from the queue without running it. You asked for it by "
         "sweeping your PRs, so nothing else will bring it back."
     )
 
     def __init__(self, *, task_id: str, label: str, glyph: str, hex_color: str,
-                 paused: bool, cancellable: bool = False, refusal: str = "",
-                 cancel_help: str | None = None) -> None:
+                 paused: bool, ban_held: bool = False, cancellable: bool = False,
+                 refusal: str = "", cancel_help: str | None = None) -> None:
         super().__init__()
         self._task_id = task_id
         self._press: QPointF | None = None
@@ -544,9 +548,8 @@ class QueuedTaskRow(QFrame):
         col.setSpacing(1)
         title = ElidedLabel(label, 10, "#d8dbde")
         col.addWidget(title)
-        status = QLabel(
-            f"{glyphs.G_TASKS} queued" + (" · monitor off" if paused else "")
-        )
+        hold = (" · ban list unreadable" if ban_held else " · monitor off") if paused else ""
+        status = QLabel(f"{glyphs.G_TASKS} queued{hold}")
         status.setStyleSheet(muted(9))
         col.addWidget(status)
         if refusal:
@@ -573,7 +576,8 @@ class QueuedTaskRow(QFrame):
 
         run = QPushButton("execute now")
         run.setCursor(Qt.CursorShape.PointingHandCursor)
-        run.setToolTip(self._PAUSED_HELP if paused else self._HELD_HELP)
+        run.setToolTip(self._BAN_HELD_HELP if ban_held
+                       else self._PAUSED_HELP if paused else self._HELD_HELP)
         run.setStyleSheet(
             f"QPushButton {{ color: {hex_color}; background-color: {tint_bg(hex_color, 0.16)};"
             " border: none; border-radius: 8px; padding: 2px 7px;"
@@ -657,6 +661,10 @@ class RunningTaskRow(QFrame):
         "An automatic agent running on this machine. It holds a slot of the "
         "automatic-task cap while it works."
     )
+    _RATING_HELP = (
+        "A Pipeline rating running on this machine, with no window. It holds a slot of "
+        "the automatic-task cap while it works."
+    )
     _UNTRACKED_HELP = (
         "A Claude agent running on this machine that no task holds, found by scanning "
         "processes: this applet has no record of starting it (a restart loses the "
@@ -671,10 +679,12 @@ class RunningTaskRow(QFrame):
     )
 
     def __init__(self, *, label: str, detail: str, glyph: str, hex_color: str,
-                 tracked: bool, awaiting_input: bool = False) -> None:
+                 tracked: bool, awaiting_input: bool = False, rating: bool = False) -> None:
         super().__init__()
         if awaiting_input:
             self.setToolTip(self._AWAITING_HELP)
+        elif rating:
+            self.setToolTip(self._RATING_HELP)
         else:
             self.setToolTip(self._HELP if tracked else self._UNTRACKED_HELP)
         self.setStyleSheet(
@@ -1004,6 +1014,8 @@ def dispatch_status_text(verdict: str, terminal_title: str, *,
         return "An agent is already on this PR - see its session above."
     if verdict == autofix.VERDICT_BANNED:
         return "Author is banned for prompt injection - un-ban to review."
+    if verdict == bans.VERDICT_UNREADABLE:
+        return "The prompt-injection ban list could not be read."
     # A wizard SPAWN is a panel dispatch, so none of the task cap, the disk floor and
     # the rate-limit budget applies to it, and the allowlist speaks for the review
     # monitor's own finds. Spelled out anyway, and matching the Swift twin word for
@@ -1531,6 +1543,7 @@ class SettingRow(QWidget):
         # Plain, like the detail below: a summary can quote a path or a daemon's words.
         self._summary = QLabel(summary or "")
         self._summary.setTextFormat(Qt.TextFormat.PlainText)
+        self._summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._summary.setWordWrap(True)
         self._summary.setStyleSheet(muted(10))
         self._summary.setVisible(bool(summary))

@@ -19,6 +19,7 @@ import Foundation
 //   diplomat-core comms-effect      < request.json   # what a triaged ping makes a front-end do
 //   diplomat-core pipeline-tick     < settings.json  # one pipeline sync (see PipelineCommand)
 //   diplomat-core pipeline-last                      # the last pipeline sync's result
+//   diplomat-core pipeline-rate     < {"item","stamp"} # run (or cancel) one queued rating
 //   diplomat-core pipeline-teams    < {"raw": line}  # the Linear teams setting parsed
 //   diplomat-core linear-login                       # sign in to Linear's MCP server in the browser
 //   diplomat-core linear-login-key  < {"key": key}   # sign in to Linear with a personal API key
@@ -87,11 +88,11 @@ let args = CommandLine.arguments
 guard args.count >= 2,
       ["build-prompt", "tool-data", "telemetry", "agent-state", "agent-registry", "network",
        "comms-tick", "comms-auth", "comms-feed", "comms-effect", "pipeline-tick", "pipeline-last",
-       "pipeline-teams", "linear-login", "linear-login-key", "linear-logout", "linear-whoami",
-       "opencode-session-model"].contains(args[1]) else {
+       "pipeline-rate", "pipeline-teams", "linear-login", "linear-login-key", "linear-logout",
+       "linear-whoami", "opencode-session-model"].contains(args[1]) else {
     die("usage: diplomat-core (build-prompt | tool-data | telemetry | agent-state"
-        + " | agent-registry | network | comms-tick | comms-effect | pipeline-tick | pipeline-teams"
-        + " | linear-login-key)"
+        + " | agent-registry | network | comms-tick | comms-effect | pipeline-tick | pipeline-rate"
+        + " | pipeline-teams | linear-login-key)"
         + "  (JSON on stdin)"
         + "\n       diplomat-core comms-feed [--limit N]"
         + "\n       diplomat-core comms-auth"
@@ -147,6 +148,11 @@ if args[1] == "comms-effect" {
 
 if args[1] == "pipeline-tick" {
     PipelineCommand.tick(input)
+    exit(0)
+}
+
+if args[1] == "pipeline-rate" {
+    PipelineCommand.rate(obj)
     exit(0)
 }
 

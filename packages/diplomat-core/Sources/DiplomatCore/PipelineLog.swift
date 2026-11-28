@@ -80,6 +80,12 @@ struct PipelineState: Codable, Equatable {
     var rerated: [String: [String: PipelineRating]] = [:]
     /// Per PR, the head Diplomat put `cleared` on at, until Diplomat takes it off.
     var cleared: [String: String] = [:]
+    /// Per PR, each head it moved to whose change is, file for file, the one cleared at another,
+    /// and that other head: it carries that clear.
+    var synced: [String: [String: String]] = [:]
+    /// Per PR, the merge asked of gh, until a read after it tells how it ended, or for
+    /// `forgetDays`.
+    var merging: [String: PipelineMerge] = [:]
     /// Per item, its failed ratings or splits: not tried again unforced before `after`.
     var retry: [String: PipelineRetry] = [:]
     /// Syncs run, the clock `retry` counts in.
@@ -94,14 +100,21 @@ struct PipelineState: Codable, Equatable {
     var clean: [String: String] = [:]
     /// Per effect key, the stamp last logged `asked`.
     var asked: [String: String] = [:]
+    /// Per item, the rating asked of a queued job and not yet applied.
+    var rateAsks: [String: PipelineRateAsk] = [:]
+    /// The last rating ask's stamp.
+    var rateSeq = 0
+    /// Items whose queued rating the operator cancelled: not asked again unless forced.
+    var declined: [String] = []
     /// The last sync's notices, so each is logged as an `error` once.
     var notices: [String] = []
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case labelsMade, decided, takenOver, untracked, unsplit, splitting, parts, rerated, cleared, retry, syncs,
-             lineage, seen, holds, clean, asked, notices
+        case merging
+        case labelsMade, decided, takenOver, untracked, unsplit, splitting, parts, rerated, cleared, synced, retry, syncs,
+             lineage, seen, holds, clean, asked, rateAsks, rateSeq, declined, notices
     }
 
     /// A field missing is empty; one there but not of its type fails the whole file.
@@ -116,6 +129,8 @@ struct PipelineState: Codable, Equatable {
         parts = try c.decodeIfPresent([String: PipelineParts].self, forKey: .parts) ?? [:]
         rerated = try c.decodeIfPresent([String: [String: PipelineRating]].self, forKey: .rerated) ?? [:]
         cleared = try c.decodeIfPresent([String: String].self, forKey: .cleared) ?? [:]
+        synced = try c.decodeIfPresent([String: [String: String]].self, forKey: .synced) ?? [:]
+        merging = try c.decodeIfPresent([String: PipelineMerge].self, forKey: .merging) ?? [:]
         retry = try c.decodeIfPresent([String: PipelineRetry].self, forKey: .retry) ?? [:]
         syncs = try c.decodeIfPresent(Int.self, forKey: .syncs) ?? 0
         lineage = try c.decodeIfPresent([String: String].self, forKey: .lineage) ?? [:]
@@ -123,6 +138,9 @@ struct PipelineState: Codable, Equatable {
         holds = try c.decodeIfPresent([String: String].self, forKey: .holds) ?? [:]
         clean = try c.decodeIfPresent([String: String].self, forKey: .clean) ?? [:]
         asked = try c.decodeIfPresent([String: String].self, forKey: .asked) ?? [:]
+        rateAsks = try c.decodeIfPresent([String: PipelineRateAsk].self, forKey: .rateAsks) ?? [:]
+        rateSeq = try c.decodeIfPresent(Int.self, forKey: .rateSeq) ?? 0
+        declined = try c.decodeIfPresent([String].self, forKey: .declined) ?? []
         notices = try c.decodeIfPresent([String].self, forKey: .notices) ?? []
     }
 
@@ -158,8 +176,12 @@ struct PipelineState: Codable, Equatable {
         parts = parts.filter { live($0.key) }
         rerated = rerated.filter { live($0.key) }
         cleared = cleared.filter { live($0.key) }
+        synced = synced.filter { live($0.key) }
+        merging = merging.filter { $0.value.at >= cutoff }
         retry = retry.filter { live($0.key) }
         lineage = lineage.filter { live($0.key) }
+        rateAsks = rateAsks.filter { live($0.key) }
+        declined.removeAll { !live($0) }
         func keep(_ id: String) -> Bool { live(id) && (!readAll || read.contains(id)) }
         takenOver = takenOver.filter { keep($0.key) }
         holds = holds.filter { keep($0.key) }
@@ -184,31 +206,39 @@ struct PipelineParts: Codable, Equatable {
     var sent: Bool?
 }
 
-/// An item's ratings or splits failed in a row: the next is tried at sync `after`, 1, 2,
-/// 4 ... syncs on, and a day after `at` at the latest.
+/// An item's ratings, rating labels or splits failed in a row: the next is tried at sync
+/// `after`, 1, 2, 4 ... syncs on, and a day after `at` at the latest.
 struct PipelineRetry: Codable, Equatable {
     var failures: Int
     var after: Int
     var at: Date
 }
 
-/// A rating Diplomat made, by item id: the rating itself for an item it may not label,
-/// read back while the item's `updatedAt` is unchanged, or for one whose rating labels
-/// could not be written (`unwritten`), until they are; for one it labelled, only the why.
-/// Forgotten with the item's `PipelineState.seen`.
+/// A merge of a PR at `head` with `flag`, asked of gh at `at`; `merged` whether gh said it
+/// merged, nil until gh answered.
+struct PipelineMerge: Codable, Equatable {
+    var head: String
+    var flag: String
+    var at: Date
+    var merged: Bool?
+}
+
+/// The rating Diplomat made of an item, by its id: the item's rating, which labels can only
+/// raise. Forgotten with the item's `PipelineState.seen`.
 struct PipelineCachedRating: Codable, Equatable {
     var rating: PipelineRating
     var why: String
-    var updatedAt: Date?
-    var unwritten: Bool?
-    /// A PR's timeline showed no rating or fast-track label before this rating's labels were
-    /// first written: its first rating, whatever labels they left on the timeline.
+    /// What the rating leads to, its labels where mirrored and the fast-track label, waits for
+    /// a sync that reads the item again.
+    var pending: Bool?
+    /// A PR's first rating: none was kept for it before, and its timeline, read again before
+    /// what the rating leads to, showed no rating or fast-track label.
     var first: Bool?
 
     static func url(in dir: URL) -> URL { dir.appendingPathComponent("ratings.json") }
 
     /// Like `PipelineState.load`: a missing file is empty, one that does not decode a
-    /// failure, since an empty cache would let lower labels count over a kept rating.
+    /// failure, since an empty cache would forget every rating.
     static func load(in dir: URL) -> Result<[String: PipelineCachedRating], PipelineIO.Failure> {
         let url = url(in: dir)
         guard FileManager.default.fileExists(atPath: url.path) else { return .success([:]) }

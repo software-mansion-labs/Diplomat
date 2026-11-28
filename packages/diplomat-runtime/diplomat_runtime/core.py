@@ -90,7 +90,7 @@ def audit() -> dict:
 
 
 def issues() -> dict:
-    """The Fix-issues prompt model (depth ladder, scope templates, enumeration and
+    """The Fix-issues prompt model (depth ladder, the one-issue scope sentence and
     action blocks). Mirrors ``CoreAssets.Issues``; see assets/issues.json."""
     return _read_json("issues.json")
 

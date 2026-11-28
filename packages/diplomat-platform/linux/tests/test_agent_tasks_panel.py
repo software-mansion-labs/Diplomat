@@ -79,7 +79,8 @@ def _rows(panel, kind) -> list:
     ]
 
 
-def _queued(number: int, *, counter="review_requests", action="review-req", kind="review"):
+def _queued(number: int, *, counter="review_requests", action="review-req", kind="review",
+            author=None):
     return autofix.QueuedTask(
         id=autofix.queue_key(action, number),
         job=autofix.AgentJob(
@@ -89,6 +90,7 @@ def _queued(number: int, *, counter="review_requests", action="review-req", kind
             prompt="P",
             pr_url=f"https://github.com/o/r/pull/{number}",
             pr_number=number,
+            author_login=author,
             counter=counter,
         ),
         attempt=1,
@@ -195,6 +197,21 @@ def test_a_running_row_says_how_long_it_has_been_going(panel, monkeypatch):
     assert "running · for 1h 35m" in _row_text(_rows(panel, RunningTaskRow)[0])
 
 
+def test_a_running_rating_holds_a_bay_and_a_row_of_its_own(panel):
+    from diplomat_app.store import RatingJob
+
+    url = "https://github.com/o/r/pull/7"
+    panel.store._ratings = {url: RatingJob(url=url, stamp="s1", label="Rating · #7",
+                                           started_at=time.time() - 5 * 60, forced=False)}
+    panel._rebuild_agent_tasks()
+
+    [row] = _rows(panel, RunningTaskRow)
+    assert "Rating · #7 ● running · for 5m" in _row_text(row)
+    assert row.toolTip() == RunningTaskRow._RATING_HELP
+    assert _row_kinds(panel) == ["RunningTaskRow", "FreeSlotRow"]
+    assert _task_count(panel) == 1
+
+
 def test_a_manual_spawn_gets_a_row_but_takes_no_bay(panel, monkeypatch):
     """A panel click spends none of the automatic budget, so every bay of the cap is
     still free. It is drawn anyway: the list answers "what is this machine doing about
@@ -233,6 +250,27 @@ def test_a_paused_monitors_row_says_nothing_will_start_it(panel):
     panel.store.review_requests_enabled = True
     panel._rebuild_agent_tasks()
     assert "monitor off" not in _row_text(_rows(panel, QueuedTaskRow)[0])
+
+
+def test_a_row_an_unreadable_ban_list_holds_says_so(panel):
+    """Not that its monitor is off: it is on, and starts the row once the list reads."""
+    from PySide6.QtWidgets import QPushButton
+
+    from diplomat_app import bans
+
+    panel.store.queued_tasks = [_queued(512, author="octocat"), _queued(508)]
+    panel._rebuild_agent_tasks()
+    bans.banned_path().parent.mkdir(parents=True, exist_ok=True)
+    bans.banned_path().write_text("{")
+    panel.store.refresh_activity()
+    rows = _rows(panel, QueuedTaskRow)
+    run = next(b for b in rows[0].findChildren(QPushButton) if b.text() == "execute now")
+    assert ("ban list unreadable" in _row_text(rows[0]), "monitor off" in _row_text(rows[0]),
+            "ban list cannot be read" in run.toolTip(), _row_text(rows[1]).endswith("queued")) == (
+        True, False, True, True)
+    bans.banned_path().unlink()
+    panel.store.refresh_activity()
+    assert "ban list unreadable" not in _row_text(_rows(panel, QueuedTaskRow)[0])
 
 
 def test_a_row_the_network_refused_says_why(panel):
@@ -296,6 +334,7 @@ def test_a_pipeline_asks_cancel_says_what_asks_for_it_again(panel):
         _queued(31, counter="pipeline", action="review"),
         _queued(32, counter="pipeline", action="issues", kind="issues"),
         _queued(33, counter=None, action="review"),
+        _queued(34, counter="pipeline", action="rate", kind="rate"),
     ]
     panel._rebuild_agent_tasks()
     tips = [next(b for b in row.findChildren(QPushButton) if b.text() == "cancel").toolTip()
@@ -306,6 +345,8 @@ def test_a_pipeline_asks_cancel_says_what_asks_for_it_again(panel):
         "Drop this fix from the queue without running it. The pipeline does not ask for it "
         "again; Start fix on the Pipeline screen does.",
         QueuedTaskRow._CANCEL_HELP,
+        "Drop this rating from the queue without running it. The pipeline does not ask for it "
+        "again; Rate now on the Pipeline screen does.",
     ]
 
 

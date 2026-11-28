@@ -574,6 +574,20 @@ def test_the_claude_runner_still_decides_in_window_shares(monkeypatch):
     assert budget.window == autofix.WINDOW_WEEK
 
 
+def test_a_rating_is_priced_in_the_claude_window_whatever_the_runner(monkeypatch):
+    """A Pipeline rating is a Claude Code call: a funded OpenRouter key does not let it
+    past a spent window, and the runner's own verdict, cached, is not reused for it."""
+    _hermes(monkeypatch)
+    _billed_tasks(time.time() - 3600, _USD_SPREAD)
+    _probe(monkeypatch, week=0.0001)
+    _balance(monkeypatch, key_left=16.85, credit_left=17.03)
+
+    assert autobudget.decide().affordable
+    rating = autobudget.decide(claude=True)
+    assert not rating.affordable
+    assert (rating.unit, rating.window) == (autofix.UNIT_PCT, autofix.WINDOW_WEEK)
+
+
 # MARK: - What it stops
 
 
@@ -656,8 +670,8 @@ def test_the_drain_stops_at_the_budget_and_keeps_its_queue(store, monkeypatch, b
     # The one it tried is re-staged rather than dropped — a refusal writes no attempt
     # record, so it is offered again at the end of this very cycle…
     assert [e.id for e in store._staged_queue] == ["review:o/r#3"]
-    # …and the first refusal ends the drain, because every entry behind it would be
-    # priced against the same windows and get the same answer. The untried one is
+    # …and the first refusal ends the drain for the entries behind it in its currency,
+    # because each would be priced against the same windows and get the same answer. The untried one is
     # still on the list its own monitor will re-offer.
     assert [e.id for e in store.queued_tasks] == ["review:o/r#4"]
 

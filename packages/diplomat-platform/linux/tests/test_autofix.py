@@ -689,6 +689,53 @@ def test_a_review_request_runs_at_the_default_depth_unless_its_author_has_a_row(
     assert [c["prompt"] for c in calls] == ["PROMPT:8:max"]
 
 
+@pytest.mark.parametrize("spoil", ["{", '{"banned": 5}', None], ids=["torn", "scalar", "unsearchable"])
+def test_an_unreadable_ban_list_holds_each_review_request_in_the_queue(store, monkeypatch, spoil):
+    """Held where it stands, with no attempt record; until the list reads, the ledger
+    leaves out whom the last list read banned, and the owed count stands. ``None``
+    leaves the list readable in a directory that cannot be searched."""
+    from diplomat_app import bans
+    from diplomat_runtime import activity
+
+    store.pr_autofix_enabled = False
+    store.review_requests_enabled = True
+    store.auto_task_limit = 3
+    calls = _spawn_recorder(monkeypatch, finish=True)
+    reqs = [_req(number=n, requested_at="2026-01-02", author=a)
+            for n, a in ((3, "bob"), (4, "bob"), (5, "mallory"))]
+    monkeypatch.setattr("diplomat_app.autofixmonitor.fetch_review_requests", lambda *a, **k: reqs)
+    bans.banned_path().parent.mkdir(parents=True)
+    bans.banned_path().write_text('{"banned":[{"login":"mallory"}]}')
+    store.refresh_activity()
+
+    def cycle():
+        store._staged_queue = []
+        store._poll_review_requests([ROOT])
+        store.commit_queue()
+        return [e.job.pr_number for e in store.queued_tasks]
+
+    store.queue_auto_run = False
+    assert cycle() == [3, 4]
+    store.move_queued_task(autofix.queue_key("review-req", item(4)),
+                           autofix.queue_key("review-req", item(3)))
+    ledger = telemetry.load().tasks
+    if spoil is None:
+        bans.banned_path().parent.chmod(0o600)
+    else:
+        bans.banned_path().write_text(spoil)
+    store.queue_auto_run = True
+    reqs.append(_req(number=6, requested_at="2026-01-02", author="carol"))
+    assert (cycle(), calls, store._load_attempts("reviewReqAttempts")) == ([4, 3, 5, 6], [], {})
+    # Only what the last list read leaves in: carol's, first owed meanwhile.
+    fresh = [(t.pr, t.duty) for t in telemetry.load().tasks if t not in ledger]
+    assert (fresh, store.unaddressed_reviews) == ([(6, "review")], 2)
+    assert [e.detail for e in activity.read() if e.action == "ban-skip"] == []
+    bans.banned_path().parent.chmod(0o700)
+    bans.banned_path().unlink()
+    assert cycle() == []
+    assert sorted(c["prompt"][-2:] for c in calls) == [":3", ":4", ":5", ":6"]
+
+
 def test_unaddressed_count_and_ban_skip(store, monkeypatch):
     store.pr_autofix_enabled = False
     store.review_requests_enabled = True
@@ -1062,6 +1109,30 @@ def test_banned_author_blocks_both_interfaces(store, monkeypatch):
     asked = "Review · #9 - the PR's author is banned (the ask is dropped, sweep again to re-queue it)"
     assert [e.detail for e in activity.read() if e.action == "ban-skip"] == [
         "Review · #9 - the PR's author is banned (un-ban to review)", asked, asked]
+
+
+def test_an_unreadable_ban_list_holds_every_author_on_both_interfaces(store, monkeypatch):
+    """It could be banning anyone, so an author's job waits as a deferral does, a find
+    queued again, and no one is said to be banned. A job with no author is nobody's
+    text, and runs."""
+    from diplomat_app import bans, widgets
+    from diplomat_runtime import activity
+
+    calls = _spawn_recorder(monkeypatch, finish=True)
+    bans.banned_path().parent.mkdir(parents=True)
+    bans.banned_path().write_text("{")
+    for src in (autofix.SOURCE_PANEL, autofix.SOURCE_AUTO):
+        assert store.dispatch_agent(_job(author="alice"), src) == bans.VERDICT_UNREADABLE
+    find = _job(number=11, author="alice", counter="my_reviews")
+    assert store.dispatch_agent(find, autofix.SOURCE_AUTO) == bans.VERDICT_UNREADABLE
+    assert calls == []
+    assert [e.job for e in store._staged_queue] == [find]
+    assert [e for e in activity.read() if e.action == "ban-skip"] == []
+    assert widgets.dispatch_status_text(bans.VERDICT_UNREADABLE, "T") == (
+        "The prompt-injection ban list could not be read.")
+    assert widgets.dispatch_status_text(autofix.VERDICT_BANNED, "T") == (
+        "Author is banned for prompt injection - un-ban to review.")
+    assert store.dispatch_agent(_job(number=10, author=""), autofix.SOURCE_AUTO) == "spawned"
 
 
 def test_allowlist_holds_a_review_monitor_find_whoever_asks(store, monkeypatch):
@@ -2140,9 +2211,10 @@ def test_requested_work_waits_behind_the_monitors_and_ahead_of_a_conflict_fix():
         "review-req:o/r#3", "review-reply:o/r#4", "review:o/r#2", "issues:o/r#5", "investigate:6",
         "conflicts:o/r#1"
     ]
-    assert (autofix.queue_band("review:o/r#2"), autofix.queue_band("issues:o/r#5"),
-            autofix.queue_band("investigate:6"),
-            autofix.queue_band("conflicts:o/r#1")) == (1, 2, 3, 4)
+    # A rating waits between the requested review and the requested issue fix.
+    assert (autofix.queue_band("review:o/r#2"), autofix.queue_band("rate:o/r#7"),
+            autofix.queue_band("issues:o/r#5"), autofix.queue_band("investigate:6"),
+            autofix.queue_band("conflicts:o/r#1")) == (1, 2, 3, 4, 5)
     # An investigation is its own band, so a drag into the issue band is refused.
     assert (autofix.queue_reorder(["issues:o/r#5", "investigate:6"], "investigate:6", "issues:o/r#5")
             == ["issues:o/r#5", "investigate:6"])
@@ -2177,10 +2249,27 @@ def test_an_investigation_is_asked_for_work_with_the_label_the_core_gave_it():
     assert work.action == autofix.QUEUE_INVESTIGATE_ACTION == "investigate"
     assert work.key == "investigate:1508284197000015"
     assert work.label == "Investigate · Slack · alice · login page crashes"
-    assert autofix.QUEUE_REQUESTED_ACTIONS == {"review", "issues", "investigate"}
+    assert autofix.QUEUE_REQUESTED_ACTIONS == {"review", "issues", "investigate", "rate"}
     job = autofix.AgentJob(kind="investigate", audit_action="investigate", label=work.label,
                            prompt="p")
     assert job.requested
+
+
+def test_a_rating_is_asked_for_work_keyed_and_labelled_by_its_item():
+    """No depth: a rating has none. A Linear issue's is named by its identifier."""
+    def rating(number: int, url: str, **config) -> autofix.RequestedWork:
+        return autofix.RequestedWork(number=number, url=url, author="", repo="o/r", config={
+            "kind": "rate", "pipeline": True, "url": url, "stamp": "3", "forced": False,
+            **config})
+
+    pr = rating(7, "https://github.com/o/r/pull/7")
+    assert (pr.action, pr.key, pr.label, pr.label_among(2), pr.pipeline) == (
+        "rate", "rate:o/r#7", "Rating · #7", "Rating · r#7", True)
+    linear = rating(0, "https://linear.app/a/issue/ENG-12/x", linear={"identifier": "ENG-12"})
+    assert (linear.item, linear.key, linear.label_among(2)) == (
+        None, "rate:linear:ENG-12", "Rating · ENG-12")
+    assert autofix.AgentJob(kind="rate", audit_action="rate", label=pr.label,
+                            prompt="").requested
 
 
 def test_queue_reorder_can_reach_every_position():

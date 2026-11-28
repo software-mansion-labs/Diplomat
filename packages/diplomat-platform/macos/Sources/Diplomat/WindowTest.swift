@@ -8,7 +8,9 @@ import DiplomatCore
 /// the environment and removed from it, and the window is a regular one that a close
 /// keeps for the next open; its tooltips are AppKit's; its scroll views keep to their
 /// top-left; the Pipeline screen fills it; and an older login agent gets the unattended
-/// mark, on a scratch plist.
+/// mark and an older agent the launcher in front of its binary, on a scratch plist, and
+/// one launchd still runs from that older plist is loaded again, against a stand-in
+/// launchctl.
 /// Orders no window in, so it takes no focus; showing, reopening and focus are checked
 /// by `scripts/macos-vm-test.sh` in a VM.
 ///
@@ -166,6 +168,32 @@ enum WindowTest {
               },
               "\(beside.map { $0.convert($0.bounds, to: nil) })")
 
+        print("Pipeline: arrow keys step the selection across the graph, kept in view")
+        let keyed = MainWindow(store: wide, screen: .pipeline).window
+        keyed.setContentSize(NSSize(width: MainRoot.fullWidth, height: 500))
+        settle(keyed)
+        let frames = Dictionary(uniqueKeysWithValues: PipelineLayout.make(wide.pipelineResult!, lane: nil)
+            .cards.map { ($0.item.id, $0.frame) })
+        let graphScroll = scrollViews(in: keyed.contentView).dropFirst().first
+        // As with a mouse attached: scrollers that take room from the view.
+        graphScroll?.scrollerStyle = .legacy
+        settle(keyed)
+        func shown(_ i: Int) -> Bool { graphScroll.map { $0.contentView.bounds.contains(frames[ids[i]]!) } == true }
+        // The detail pane's id line is the only tooltip that is a bare item URL.
+        func picked() -> [String] { ids.filter(toolTips(in: keyed.contentView).contains) }
+        check("the chain's end and the last card start out of the graph's view", !shown(4) && !shown(ids.count - 1),
+              "\(graphScroll.map { "\($0.contentView.bounds)" } ?? "no graph scroll")")
+        for (key, want) in [(rightArrow, 0), (rightArrow, 1), (rightArrow, 2), (rightArrow, 3),
+                            (rightArrow, 4), (rightArrow, 4), (downArrow, 5), (upArrow, 0),
+                            (leftArrow, 0), (upArrow, 0), (downArrow, 5), (downArrow, 6)] {
+            press(keyed, key)
+            check("\(key.name) selects card \(want), in view", picked() == [ids[want]] && shown(want),
+                  "picked \(picked()), view \(graphScroll.map { "\($0.contentView.bounds)" } ?? "none")")
+        }
+        let rest = (7..<ids.count).filter { i in press(keyed, downArrow); return !(picked() == [ids[i]] && shown(i)) }
+        check("down through the rest of the column, each card in view", rest.isEmpty, "missed \(rest)")
+        keyed.close()
+
         let busy = Store()
         let panel = MainWindow(store: busy).window
         panel.setContentSize(NSSize(width: MainRoot.width - 300, height: 500))
@@ -216,6 +244,143 @@ enum WindowTest {
         check("no plist, no agent: nothing is written",
               !Daemon.markLoginStartUnattended(plist: absent) && !fm.fileExists(atPath: absent.path))
 
+        print("agents: an older plist starts the binary through the launcher, made where it is missing")
+        let launcher = scratch.appendingPathComponent("Application Support/Diplomat/Diplomat")
+        let binary = scratch.appendingPathComponent("chk/Diplomat.app/Contents/MacOS/Diplomat").path
+        let other = scratch.appendingPathComponent("other.plist")
+        func direct(_ binary: String, _ more: [String] = [], at url: URL = plist, program: String? = nil) {
+            var old: [String: Any] = ["Label": "\(Daemon.label).watchdog", "ProgramArguments": [binary] + more,
+                                      "StartInterval": 300]
+            old["Program"] = program
+            try? PropertyListSerialization.data(fromPropertyList: old, format: .xml, options: 0).write(to: url)
+        }
+        func agent(_ url: URL = plist) -> [String: Any] {
+            (try? Data(contentsOf: url)).flatMap {
+                try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any]
+            } ?? [:]
+        }
+        func program(_ url: URL = plist) -> [String] { agent(url)["ProgramArguments"] as? [String] ?? [] }
+        func isLauncher() -> Bool { (try? fm.destinationOfSymbolicLink(atPath: launcher.path)) == "/usr/bin/env" }
+        func rewritten(_ plists: [URL], onto link: URL = launcher) -> [URL] {
+            Daemon.rewriteOntoLauncher(plists: plists, launcher: link)
+        }
+        check("no plist: no launcher is made",
+              rewritten([absent]).isEmpty && (try? fm.attributesOfItem(atPath: launcher.path)) == nil)
+        direct(binary)
+        check("a plist naming the binary is rewritten", rewritten([plist, absent]) == [plist])
+        check("…to start the launcher with the binary as its argument",
+              program() == [launcher.path, binary], "\(program())")
+        check("…the launcher made, a link to /usr/bin/env", isLauncher())
+        check("…and every other key kept",
+              agent()["Label"] as? String == "\(Daemon.label).watchdog" && agent()["StartInterval"] as? Int == 300,
+              "\(agent())")
+        check("a plist starting the launcher is left alone", rewritten([plist]).isEmpty)
+        try? fm.removeItem(at: launcher)
+        check("…its launcher, gone, made again", rewritten([plist]).isEmpty && isLauncher())
+        try? fm.removeItem(at: launcher)
+        try? Data("/usr/bin/env".utf8).write(to: launcher)
+        _ = rewritten([plist])
+        check("…and a file where it belongs replaced by the link", isLauncher())
+        let elsewhere = scratch.appendingPathComponent("other checkout/Diplomat.app/Contents/MacOS/Diplomat").path
+        direct(elsewhere, ["--flag"], at: other)
+        check("another checkout's binary starts through the same launcher, its arguments kept",
+              rewritten([other]) == [other] && program(other) == [launcher.path, elsewhere, "--flag"],
+              "\(program(other))")
+        for (what, path) in [("a path holding =", "a=b/Diplomat.app/Contents/MacOS/Diplomat"),
+                             ("anything but a bundle's binary", "chk/Diplomat.app/Contents/Resources/Diplomat")] {
+            let path = scratch.appendingPathComponent(path).path
+            direct(path, at: other)
+            check("a plist starting \(what) is left alone",
+                  rewritten([other]).isEmpty && program(other) == [path], "\(program(other))")
+        }
+        direct(binary, at: other, program: binary)
+        check("a plist with a Program, which launchd runs instead, is left alone",
+              rewritten([other]).isEmpty && program(other) == [binary], "\(program(other))")
+        let blocked = scratch.appendingPathComponent("blocked")
+        try? Data().write(to: blocked)
+        direct(binary, at: other)
+        check("where no launcher can be made, nothing is written",
+              rewritten([other], onto: blocked.appendingPathComponent("Diplomat")).isEmpty
+                  && program(other) == [binary], "\(program(other))")
+        check("every agent the installers write is on the list the launch rewrites",
+              Daemon.agentLabels.map { Daemon.plist($0).lastPathComponent }
+                  == ["com.ignacy.diplomat.plist", "com.ignacy.diplomat.autoupdate.plist",
+                      "com.ignacy.diplomat.watchdog.plist"], "\(Daemon.agentLabels)")
+
+        print("agents: one still loaded from its older plist is loaded again, between runs")
+        let watchdog = "\(Daemon.label).watchdog"
+        let domain = "gui/\(getuid())"
+        // `launchctl print`'s layout, nested blocks included.
+        func job(_ program: String, _ state: String) -> (status: Int32, out: String) {
+            (0, "\(domain)/\(watchdog) = {\n\tactive count = 0\n\tpath = \(plist.path)\n\ttype = LaunchAgent\n"
+                + "\tstate = \(state)\n\n\tprogram = \(program)\n\targuments = {\n\t\t\(program)\n\t}\n\n"
+                + "\tendpoints = {\n\t\t\"\(watchdog)\" = {\n\t\t\tport = 0x1\n\t\t\tstate = active\n\t\t}\n\t}\n}\n")
+        }
+        /// `wait` nil is the default one.
+        func reload(_ prints: [(status: Int32, out: String)], wait: TimeInterval? = nil, plist url: URL = plist,
+                    bootstrap: Int32 = 0) -> (Bool, [[String]]) {
+            var calls: [[String]] = [], left = prints
+            let launchctl = { (args: [String]) -> (status: Int32, out: String) in
+                calls.append(args)
+                if args[0] == "bootstrap" { return (bootstrap, "") }
+                return args[0] == "print" && !left.isEmpty ? left.removeFirst() : (0, "")
+            }
+            let did = wait.map { Daemon.reloadIfStale(watchdog, plist: url, wait: $0, launchctl: launchctl) }
+                ?? Daemon.reloadIfStale(watchdog, plist: url, launchctl: launchctl)
+            return (did, calls)
+        }
+        let reloaded = [["bootout", "\(domain)/\(watchdog)"], ["bootstrap", domain, plist.path]]
+        let stale = reload([job(binary, "not running")])
+        check("a job starting the binary the plist no longer names is booted out and loaded again",
+              stale.0 && stale.1 == [["print", "\(domain)/\(watchdog)"]] + reloaded, "\(stale)")
+        let current = reload([job(launcher.path, "not running")])
+        check("a job starting what the plist names is left alone",
+              !current.0 && current.1.count == 1, "\(current)")
+        direct(launcher.path, [binary], at: other, program: binary)
+        let named = reload([job(binary, "not running")], plist: other)
+        check("…a plist's Program counting as what it names", !named.0 && named.1.count == 1, "\(named)")
+        let unloaded = reload([(113, "Could not find service \"\(watchdog)\" in domain for user gui: 501\n")])
+        check("an agent that is not loaded is not loaded", !unloaded.0 && unloaded.1.count == 1, "\(unloaded)")
+        let running = reload([job(binary, "running"), job(binary, "not running")])
+        check("a run in progress is waited out, then the job reloaded",
+              running.0 && running.1.count == 4 && Array(running.1.suffix(2)) == reloaded, "\(running)")
+        let stuck = reload([job(binary, "running")], wait: 0)
+        check("…and left running past the wait", !stuck.0 && stuck.1.count == 1, "\(stuck)")
+        let refused = reload([job(binary, "not running")], bootstrap: 5)
+        check("a bootstrap launchctl refuses is no reload", !refused.0 && refused.1.count == 3, "\(refused)")
+        let unreadable = reload([(0, "\(domain)/\(watchdog) = {\n}\n")])
+        check("output it cannot read reloads nothing", !unreadable.0 && unreadable.1.count == 1, "\(unreadable)")
+
+        print("agents: a GUI launch rewrites every agent and reloads the scheduled ones, off its thread")
+        let agents = scratch.appendingPathComponent("agents")
+        try? fm.createDirectory(at: agents, withIntermediateDirectories: true)
+        func at(_ label: String) -> URL { agents.appendingPathComponent("\(label).plist") }
+        for label in Daemon.agentLabels { direct(binary, at: at(label)) }
+        let lock = NSLock(), finished = DispatchSemaphore(value: 0)
+        var printed: [String] = [], reloadedLabels: [String] = []
+        let began = Date()
+        Daemon.startAgentsThroughLauncher(plist: at, launcher: launcher, launchctl: { args in
+            lock.lock(); defer { lock.unlock() }
+            guard args[0] == "print", let label = args[1].split(separator: "/").last.map(String.init)
+            else { return (0, "") }
+            printed.append(label)
+            // The watchdog mid-run for a second, as the one that launched the app is.
+            let busy = label == watchdog && printed.filter { $0 == watchdog }.count <= 2
+            return job(binary, busy ? "running" : "not running")
+        }, done: { labels in reloadedLabels = labels; finished.signal() })
+        let returned = Date().timeIntervalSince(began)
+        let ended = finished.wait(timeout: .now() + 10) == .success
+        check("every agent is rewritten to start the launcher",
+              Daemon.agentLabels.allSatisfy { program(at($0)) == [launcher.path, binary] },
+              "\(Daemon.agentLabels.map { program(at($0)) })")
+        check("…the reloads left to another thread, so the launch goes on", returned < 0.4, "\(returned)s")
+        check("…which load the updater and the watchdog again, the watchdog once its run ends",
+              ended && reloadedLabels == Daemon.scheduledAgents, "\(reloadedLabels)")
+        lock.lock()
+        check("…and never the login agent, a reload of which would start a second instance",
+              !printed.contains(Daemon.label), "\(printed)")
+        lock.unlock()
+
         if failures.isEmpty { print("window: all passed") }
         else { print("window: FAILED \(failures.count): \(failures.joined(separator: "; "))") }
         return failures.isEmpty
@@ -229,6 +394,31 @@ enum WindowTest {
     /// Lets a switch's animation finish.
     private static func settle(_ w: NSWindow) {
         RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        w.contentView?.layoutSubtreeIfNeeded()
+    }
+
+    private struct Arrow {
+        let name: String
+        let code: UInt16
+        let char: Int
+    }
+
+    private static let leftArrow = Arrow(name: "left", code: 123, char: NSLeftArrowFunctionKey)
+    private static let rightArrow = Arrow(name: "right", code: 124, char: NSRightArrowFunctionKey)
+    private static let downArrow = Arrow(name: "down", code: 125, char: NSDownArrowFunctionKey)
+    private static let upArrow = Arrow(name: "up", code: 126, char: NSUpArrowFunctionKey)
+
+    private static func press(_ w: NSWindow, _ key: Arrow) {
+        let chars = String(Character(UnicodeScalar(key.char)!))
+        for type in [NSEvent.EventType.keyDown, .keyUp] {
+            guard let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [.numericPad, .function],
+                                               timestamp: ProcessInfo.processInfo.systemUptime,
+                                               windowNumber: w.windowNumber, context: nil, characters: chars,
+                                               charactersIgnoringModifiers: chars, isARepeat: false,
+                                               keyCode: key.code) else { continue }
+            w.sendEvent(event)
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         w.contentView?.layoutSubtreeIfNeeded()
     }
 

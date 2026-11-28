@@ -145,6 +145,20 @@ frontmost app in front. Click the Dock icon to open the window. Any other launch
 answers before AppKit starts, so it never registers as an app. A login agent an
 older installer wrote, without `DIPLOMAT_BACKGROUND`, gets it at the next GUI launch.
 
+launchd starts each of the three as `~/Library/Application Support/Diplomat/Diplomat
+<the bundle's binary>`, where that file is a link to `/usr/bin/env` the installers make
+(`install/agent-launcher.sh`). macOS ties an agent loaded at login to its program's code
+signature and kills a start whose signature has changed since (`Launch Constraint
+Violation`, with a crash report), and every build re-signs the ad-hoc-signed binary; env
+never changes. The link is outside the checkout, so no checkout or revert takes it from
+the agents, and Login Items lists each agent by its name. A bundle path holding `=` is
+started directly, as env would take it for a variable. Every GUI launch makes or repairs
+the link while an agent is installed, and has an agent an older installer wrote, starting
+the binary itself, start it through the link. It then loads the updater and the watchdog
+again, since until the next login launchd refuses to start an agent loaded at login whose
+plist has changed since: each once its run in progress ends, waiting up to a minute, and
+one still running then at a later GUI launch.
+
 ### Logs
 
 `~/Library/Logs/diplomat.log` records what the app did, when, and how long it took, one
@@ -267,7 +281,9 @@ DIPLOMAT_NETWORK_TEST=1  ...                     # self-test: the Diplomacy Netw
                                                      #   Starts no daemon, opens no terminal; exit code = verdict
 DIPLOMAT_APIWATCH_TEST=1 ...                     # self-test: who a scan may type into (an agent's session,
                                                      #   including one a terminal only shows through tmux;
-                                                     #   never a plain shell). Reads no terminal, sends nothing
+                                                     #   never a plain shell), and reading and reaping a Ghostty
+                                                     #   run's own tmux server.
+                                                     #   Reads no terminal; types only into tmux servers of its own
 DIPLOMAT_SELF_UPDATE=1   ...                     # the unattended 06:00 update: merge if the build is behind,
                                                      #   rebuild, relaunch a running instance, launch a dead one
 DIPLOMAT_WATCHDOG=1      ...                     # the 5-minute check: launch the app if no instance is up
@@ -283,7 +299,9 @@ DIPLOMAT_RELAUNCH_TEST=1 ...                     # self-test: a relaunch is judg
 DIPLOMAT_REPOPATHS_TEST=1 ...                    # self-test: which checkout the bundle names, from inside
                                                      #   it or from a copy; scratch dirs; exit code = verdict
 DIPLOMAT_WINDOW_TEST=1 ...                       # self-test: the launch mode and the window's shape, with
-                                                     #   no window ordered in; exit code = verdict
+                                                     #   no window ordered in; older agent plists rewritten,
+                                                     #   on scratch copies, and reloaded, against a stand-in
+                                                     #   launchctl; exit code = verdict
 DIPLOMAT_REOPEN_TEST=1 ...                       # self-test: a window closed on Settings reopens on the
                                                      #   panel; no window ordered in; exit code = verdict
 DIPLOMAT_APPLOG_TEST=1 ...                       # self-test: the diagnostic log's lines and rotation, a busy
@@ -433,6 +451,7 @@ packages/
         PipelineRead.swift         a sync's GitHub and Linear reads, and the edges between what they read
         PipelineGate.swift         the floor a PR's diff puts under its rating, and the merge holds
         PipelineRater.swift        the sandboxed `claude -p` rating and split calls (assets/pipeline.json)
+        PipelineRateJob.swift      a rating a sync asked for, as the queued job a front-end runs
         PipelineLayout.swift       the graph's grid layout
         PipelineLog.swift          ~/.diplomat/pipeline: the log, the last sync, its state, cached ratings and live switches
         Telemetry.swift            folds the telemetry ledger + every figure on the Telemetry screen: window
@@ -445,7 +464,7 @@ packages/
                                  the engines the Linux side reimplements, and `pipeline-teams` its parse of the
                                  Linear teams setting, so the parity tests can diff them;
                                  `comms-tick`, `comms-auth`, `comms-feed` and `comms-effect` run Comms for the Linux applet,
-                                 and `pipeline-tick` and `pipeline-last` the Pipeline
+                                 and `pipeline-tick`, `pipeline-last` and `pipeline-rate` the Pipeline
     Tests/fixtures/            ← test inputs and expected outputs, not shipped
       prompts/                   expected prompt outputs (`<mode>.expected.txt`), asserted byte-for-byte by BOTH platforms' tests
 

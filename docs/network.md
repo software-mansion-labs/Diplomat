@@ -5,7 +5,8 @@ they have in common. It is off by default. **Settings → Offer every job to the
 Network** switches it on, and from then on it gates every job on this machine:
 
 - Diplomat starts no job in a terminal. Every job - a monitor's, the queue's, a wizard's - is
-  **offered** to the pool of its repository.
+  **offered** to the pool of its repository, but a [Pipeline rating](pipeline.md#ratings): no
+  agent, it runs on this machine, under its task cap.
 - Some machine in that pool with a free slot **takes** it. That may be this one.
 - Whoever takes it runs it in a **docker container**. Your own jobs on your own machine too.
 - Everything the agent does on GitHub or GitLab is done by the machine that offered the job,
