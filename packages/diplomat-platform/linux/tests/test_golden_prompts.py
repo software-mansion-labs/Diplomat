@@ -137,12 +137,13 @@ def test_prompt_matches_golden(name: str):
     assert prompt == golden, f"prompt {name} drifted from its golden file"
 
 
-def test_build_prompt_names_every_kind_the_core_accepts():
+def test_build_prompt_names_the_kinds_the_core_expects():
     with pytest.raises(RuntimeError, match="unknown kind") as err:
         promptcore.build_prompt({"kind": "no-such-kind"})
-    accepted = re.search(r"\(expected (.*)\)", str(err.value)).group(1).split(" | ")
-    documented = promptcore.build_prompt.__doc__.split("``kind`` is", 1)[1]
-    assert re.findall(r"``([\w-]+)``", documented) == accepted
+    expected = re.search(r"\(expected (.*)\)", str(err.value)).group(1).split(" | ")
+    doc = promptcore.build_prompt.__doc__
+    listed = re.search(r"``kind``\s+is\s+(.*?)\.", doc, re.S).group(1).split("|")
+    assert [k.strip(" `\n") for k in listed] == expected
 
 
 # MARK: - The assets README
