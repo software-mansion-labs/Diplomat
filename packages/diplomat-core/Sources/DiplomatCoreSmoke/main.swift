@@ -1253,7 +1253,6 @@ do {
                                    environment: ["HOME": fx.path, "PATH": "/usr/bin:/bin"])
     check(bash.fields == ["\(fx.path)/nvm/opencode", "\(fx.path)/state"],
           "an install only ~/.bashrc puts on PATH resolves, with that rc's state root: \(bash)")
-    // Under an rc's nounset, with no XDG_STATE_HOME.
     for (shell, rc, nounset) in [("/bin/bash", ".bashrc", "set -u"), ("/bin/zsh", ".zshrc", "setopt nounset")]
         where FileManager.default.isExecutableFile(atPath: shell) {
         executable("strict/\(rc)", "\(nounset)\nexport PATH=\(fx.path)/nvm:$PATH\n")
