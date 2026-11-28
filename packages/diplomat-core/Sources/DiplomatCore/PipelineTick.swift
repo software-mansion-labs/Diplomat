@@ -659,8 +659,8 @@ final class PipelineSync {
 
     /// `e`'s first rating is to be rated again instead of finished (`PipelineCachedRating.first`).
     func rateAgain(_ e: PipelineEntry) -> Bool {
-        guard settings.fastTrack, let c = cache[e.id], c.pending == true, c.first == true, let h = c.head,
-              c.rating.atLeast(e.item.floor ?? c.rating).isFastTrack else { return false }
+        guard settings.rate, settings.fastTrack, let c = cache[e.id], c.pending == true, c.first == true,
+              let h = c.head, c.rating.atLeast(e.item.floor ?? c.rating).isFastTrack else { return false }
         return (h != head(e) || (c.base ?? e.baseRef) != e.baseRef) && unworn(Set(e.labels.map { $0.lowercased() }))
             && closesHold(e) == nil
     }
@@ -1133,9 +1133,12 @@ final class PipelineSync {
                 if !forced.contains(i) { forced.append(i) }
             }
         }
-        let idx = settings.rate ? entries.indices.filter { eligible(entries[$0]) && !backingOff(entries[$0].id) } : []
-        let pending = idx.filter {
-            cache[entries[$0].id]?.pending == true && entries[$0].item.writable && open(entries[$0])
+        let ready = entries.indices.filter { eligible(entries[$0]) && !backingOff(entries[$0].id) }
+        let idx = settings.rate ? ready : []
+        let pending = ready.filter {
+            let c = cache[entries[$0].id]
+            return c?.pending == true && (settings.rate || c?.first == true) && entries[$0].item.writable
+                && open(entries[$0])
         }
         let bands = [0, 1, 2, 3].map { band in
             idx.filter { self.band(entries[$0]) == band && !state.declined.contains(entries[$0].id) }.sorted(by: newer)
@@ -1226,11 +1229,13 @@ final class PipelineSync {
     }
 
     /// Finishes the rating kept pending for `entries[i]`, never lower than the labels on it
-    /// now, with no new rating asked for. A PR's is dropped once its diff at the head this sync
-    /// read allows less.
+    /// now, with no new rating asked for: with Rate off, only a first rating, as no first rating
+    /// (`PipelineCachedRating.first`). A PR's is dropped once its diff at the head this sync read
+    /// allows less.
     func finish(_ i: Int) {
         let id = entries[i].id
-        guard let kept = cache[id]?.rating, !rateAgain(entries[i]), may(.rate) else { return }
+        guard let kept = cache[id]?.rating, !rateAgain(entries[i]),
+              may(.rate) || cache[id]?.first == true else { return }
         let head = entries[i].item.headSha
         guard recheck(i), entries[i].item.headSha == head else { return failed(id) }
         guard stops(entries[i]).isEmpty else { return }
@@ -1246,7 +1251,7 @@ final class PipelineSync {
                 return persist()
             }
         }
-        if !unworn(entries[i].labeled) { cache[id]?.first = nil }
+        if !unworn(entries[i].labeled) || !may(.rate) { cache[id]?.first = nil }
         cache[id]?.rating = rating
         state.retry[id] = nil
         entries[i].item.rating = rating
@@ -1372,13 +1377,14 @@ final class PipelineSync {
         }
         let counts = may(step) && banHold(e) == nil
         let allowed = counts && e.item.writable
-        // Unwritable, a rating waits for `finish`, which Rate off never reaches.
+        // With Rate off, a first rating does not wait for Diplomat to write to the PR.
         let first = counts && fresh && e.item.kind == .pr && may(.fastTrack) && (e.item.writable || may(.rate))
         // Saved before what it leads to: a sync stopped there does not ask again.
         record(i, rating, why, detail, head: head, base: a.base, again: again, pending: allowed || first, first: first)
         guard allowed else { return }
         guard recheck(i), entries[i].item.headSha == e.item.headSha else {
-            guard entries[i].item.writable || may(.rate) else {
+            // Unwritable at the head rated, only a first rating waits.
+            guard entries[i].item.writable || first || entries[i].item.headSha != e.item.headSha else {
                 cache[e.id]?.pending = nil
                 return persist()
             }

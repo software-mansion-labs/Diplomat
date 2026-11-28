@@ -6921,19 +6921,39 @@ private func pipelineRatingPass2(base: URL, root: PipelineSettings.Root, t0: Dat
         check(t.claudeCalls.count == 1 && s2.writes == tracked && s2.result.effects == [reviewFX(11, sha("a1"))],
               "\(saved) saved with no base: \(t.claudeCalls.count) \(s2.writes)")
     }
-    // An issue rated while Diplomat may not write to it, with Fast track on: no first rating to
-    // wait for, so its fix is asked for once it may, though its re-read fails.
-    let unlisted = only([1]), ud = dir("issue-unwritable")
-    unlisted.ratings["Typo on the login button"] = ["risk": "low", "complexity": "low", "why": "w"]
-    unlisted.issues[0].moreLabels = 1
+    // An issue rated while Diplomat may not write to it, by the read or the re-read applying it,
+    // with Fast track on: no first rating to wait for, so its fix is asked for once it may, though
+    // its re-read fails.
     var fixing = rateTrack
     fixing.fix = true
-    _ = sync(unlisted, fixing, ud, t0)
-    unlisted.issues[0].moreLabels = 0
-    applying(unlisted) { $0.ghFails = true }
-    let uf = sync(unlisted, fixing, ud, later(5))
-    check(unlisted.claudeCalls.count == 1 && uf.result.effects == [fixFX(1)] && stageOf(uf.result, issueURL(1)) == "candidate/fast",
-          "issue rated while unwritable, Fast track on: \(uf.result.effects) \(stageOf(uf.result, issueURL(1)))")
+    for at in ["read", "re-read"] {
+        let t = only([1]), d = dir("issue-unwritable-" + at)
+        t.ratings["Typo on the login button"] = ["risk": "low", "complexity": "low", "why": "w"]
+        if at == "read" { t.issues[0].moreLabels = 1 } else { applying(t) { $0.issues[0].moreLabels = 1 } }
+        _ = sync(t, fixing, d, t0)
+        t.issues[0].moreLabels = 0
+        applying(t) { $0.ghFails = true }
+        let uf = sync(t, fixing, d, later(5))
+        check(t.claudeCalls.count == 1 && uf.result.effects == [fixFX(1)] && stageOf(uf.result, issueURL(1)) == "candidate/fast",
+              "issue unwritable at the \(at), Fast track on: \(uf.result.effects) \(stageOf(uf.result, issueURL(1)))")
+    }
+    // A first rating waiting for Diplomat to write to the PR, or to read it again, as Rate is
+    // switched off: applied as no first rating once it may.
+    let waiting: [(String, (Trackers) -> Void, (Trackers) -> Void)] = [
+        ("given to someone else", { $0.prs[0].assignees = ["bob"] }, { $0.prs[0].assignees = [] }),
+        ("stacked", { $0.prs[0].base = "feat-a" }, { $0.prs[0].base = "main" }),
+        ("not read again", { t in applying(t) { $0.ghFails = true } }, { $0.ghFails = false }),
+    ]
+    for (what, wait, done) in waiting {
+        let t = fix(), d = dir("waiting-rate-off-" + what)
+        wait(t)
+        _ = sync(t, rateTrack, d, t0)
+        done(t)
+        let wo = sync(t, rateOff, d, later(5))
+        check(t.claudeCalls.count == 1 && wo.writes == ["+risk:low #11", "+complexity:low #11"] && wo.result.effects.isEmpty
+              && stageOf(wo.result, prURL(11)) == "human/human",
+              "first rating waiting, \(what), Rate switched off: \(wo.writes) \(stageOf(wo.result, prURL(11)))")
+    }
     // Its first rating left pending, then pushed to while given to someone else: rated at the new
     // head once it is yours again, and fast-tracked.
     let pendingFor: [(String, (Trackers) -> Void)] = [

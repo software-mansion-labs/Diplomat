@@ -190,11 +190,12 @@ model's answer, the rating kept and the diff floor, a dimension at a time. One a
 apply holds a PR off the fast track, and an issue from its fix, until a later sync does, tried again
 1, 2, 4 ... syncs later, unless a PR's diff at its head allows less: then it is dropped, and the PR
 is rated by its labels again, or rated anew without them. A first rating waits while Diplomat may not
-write to the PR; one **Rate now** made then, with **Rate issues and PRs** off, is applied at once, as
-no first rating. A PR pushed to or retargeted meanwhile has it finished there, unless it is a first
-rating made while **Fast-track my PRs** was on, low/low within the floor of the PR's files, the
-switch is on still, and the PR wears no rating or fast-track label and would close only `candidate`
-issues: then the PR is rated again instead, never lower, and that is still its first rating.
+write to the PR, and only while **Rate issues and PRs** is on: with it off, one that would wait is
+applied as no first rating. A PR pushed to or retargeted meanwhile has it finished there, unless it
+is a first rating made while **Fast-track my PRs** was on, low/low within the floor of the PR's
+files, the switch is on still, and the PR wears no rating or fast-track label and would close only
+`candidate` issues: then the PR is rated again instead, never lower, and that is still its first
+rating.
 
 Where you [mirror](#settings) ratings, a finished one's labels are written at once, and a sync labels
 up to 10 more kept ratings an item does not wear yet (`pipeline.json` `labels.mirrorPerSync`), your
