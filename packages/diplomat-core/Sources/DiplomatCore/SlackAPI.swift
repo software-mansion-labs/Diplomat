@@ -664,6 +664,10 @@ public struct SlackAPI {
             "\"" + s.replacingOccurrences(of: "\\", with: "\\\\")
                 .replacingOccurrences(of: "\"", with: "\\\"") + "\""
         }
+        // A line break would end its config line, and curl read the rest as options.
+        if let k = request.headers.first(where: { $0.value.unicodeScalars.contains { $0 == "\n" || $0 == "\r" } })?.key {
+            throw SlackError.transport("the \(k) header holds a line break")
+        }
         var config = "url = \(quoted(request.url.absoluteString))\n"
         for (k, v) in request.headers { config += "header = \(quoted("\(k): \(v)"))\n" }
         config += "data-binary = \(quoted(String(decoding: request.body, as: UTF8.self)))\n"

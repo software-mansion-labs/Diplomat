@@ -33,13 +33,13 @@ public struct PipelineIO {
     public var gh: ([String]) -> Exit
     public var claude: (_ arguments: [String], _ input: Data, _ cwd: String, _ timeout: TimeInterval) -> Exit
     public var linear: SlackAPI.Transport
-    /// A Linear call's `Authorization`, nil when signed out (`LinearLogin.authorization`).
-    public var linearAuth: () throws -> String?
+    /// What a Linear call carries, nil when signed out (`LinearLogin.access`).
+    public var linearAuth: () throws -> LinearLogin.Access?
 
     public init(gh: @escaping ([String]) -> Exit,
                 claude: @escaping ([String], Data, String, TimeInterval) -> Exit,
                 linear: @escaping SlackAPI.Transport,
-                linearAuth: @escaping () throws -> String?) {
+                linearAuth: @escaping () throws -> LinearLogin.Access?) {
         self.gh = gh
         self.claude = claude
         self.linear = linear
@@ -78,7 +78,7 @@ public struct PipelineIO {
                             "claude", timeout)
             },
             linear: SlackAPI.curl,
-            linearAuth: { try LinearLogin.authorization() })
+            linearAuth: { try LinearLogin.access() })
     }
 }
 
@@ -561,18 +561,32 @@ final class PipelineSync {
             mapped("Linear was not read")
         }
         let signedOut = "not signed in to Linear (Settings → Pipeline → Linear login)"
+        let method: LinearLogin.Method
         do {
-            guard try io.linearAuth() != nil else { return unreadable("Linear was not read: \(signedOut)") }
+            guard let access = try io.linearAuth() else { return unreadable("Linear was not read: \(signedOut)") }
+            method = access.method
         } catch {
             return unreadable("Linear was not read: \(error.localizedDescription)")
         }
-        guard let url = LinearAPI.endpoint(model) else {
-            return unreadable("Linear was not read: DIPLOMAT_LINEAR_API is not a URL")
+        let authorization = { [io] () throws -> String in
+            guard let access = try io.linearAuth() else { throw LinearAPI.Failure.api(signedOut) }
+            guard access.method == method else { throw LinearAPI.Failure.api("the Linear login changed during the sync") }
+            return access.authorization
         }
-        let api = LinearAPI(authorization: { [io] in
-            guard let auth = try io.linearAuth() else { throw LinearAPI.Failure.api(signedOut) }
-            return auth
-        }, url: url, timeout: model.httpTimeoutSecs, transport: io.linear)
+        let api: LinearAPI
+        switch method {
+        case .key:
+            guard let url = LinearAPI.endpoint(model) else {
+                return unreadable("Linear was not read: DIPLOMAT_LINEAR_API is not a URL")
+            }
+            api = LinearAPI(authorization: authorization, url: url, timeout: model.httpTimeoutSecs, transport: io.linear)
+        case .mcp:
+            guard let url = URL(string: model.linearMCP.url) else {
+                return unreadable("Linear was not read: linearMCP.url is not a URL")
+            }
+            api = LinearAPI(mcp: url, authorization: authorization, timeout: model.httpTimeoutSecs, transport: io.linear,
+                            cache: LinearLogin.cache(in: dir))
+        }
         linear = api
         var after: String?
         var read = 0

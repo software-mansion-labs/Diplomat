@@ -1013,12 +1013,14 @@ struct SettingsView: View {
     }
 
     private func commsField(_ placeholder: String, _ text: Binding<String>,
-                            symbol: String) -> some View {
+                            symbol: String, secure: Bool = false) -> some View {
         HStack(spacing: 6) {
             Image(systemName: symbol).font(.caption).foregroundStyle(.secondary)
-            TextField(placeholder, text: text)
-                .textFieldStyle(.plain)
-                .font(.callout)
+            Group {
+                if secure { SecureField(placeholder, text: text) } else { TextField(placeholder, text: text) }
+            }
+            .textFieldStyle(.plain)
+            .font(.callout)
         }
         .padding(7)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.12)))
@@ -1126,11 +1128,36 @@ struct SettingsView: View {
                 switchControl("Split big issues", $store.pipelineFracture)
             }
             linearTeamsRow
-            SettingRow(title: "Linear login", summary: SettingsView.linearLoginSummary(store),
-                       detail: SettingsView.linearLoginDetail) {
-                linearLoginButton
-            }
+            linearLoginRow
         }
+    }
+
+    private var linearLoginRow: some View {
+        let typing = store.linearKey != nil && store.linearLogin == nil
+        return SettingRow(title: "Linear login", summary: SettingsView.linearLoginSummary(store),
+                          detail: SettingsView.linearLoginDetail, stacked: typing) {
+            if typing { linearKeyField } else { linearLoginButton }
+        }
+    }
+
+    private var linearKeyField: some View {
+        HStack(spacing: 6) {
+            commsField("lin_api_…", Binding(get: { store.linearKey ?? "" }, set: { store.linearKey = $0 }),
+                       symbol: "key", secure: true)
+                .onSubmit { Task { await store.signInToLinearWithKey() } }
+            Button {
+                Task { await store.signInToLinearWithKey() }
+            } label: {
+                if store.linearSavingKey {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Text("Save")
+                }
+            }
+            Button("Cancel") { store.linearKey = nil }
+        }
+        .controlSize(.small)
+        .disabled(store.linearSavingKey)
     }
 
     private var linearLoginButton: some View {
@@ -1153,7 +1180,12 @@ struct SettingsView: View {
                 }
                 .disabled(store.linearSigningOut)
             } else {
-                Button("Sign in…") { Task { await store.signInToLinear() } }
+                HStack(spacing: 6) {
+                    Button("Sign in…") { Task { await store.signInToLinear() } }
+                        .tooltip("Through Linear's MCP server, in the browser")
+                    Button("Use API key…") { store.linearKey = "" }
+                        .tooltip("A personal API key from Linear's settings")
+                }
             }
         }
         .controlSize(.small)
@@ -1188,12 +1220,14 @@ struct SettingsView: View {
             return store.linearSignInPage?.opened == false ? "No browser opened: Copy link and paste it into one"
                 : "Waiting for the browser…"
         }
+        if store.linearSavingKey { return "Checking the key with Linear…" }
         if let note = store.linearLoginNote { return note }
         if ProcessInfo.processInfo.environment[LinearAPI.envVar]?.isEmpty == false {
             return "$\(LinearAPI.envVar), which wins over the login"
         }
         guard let login = store.linearLogin else { return "Not signed in" }
-        return "Signed in as \(login.user) (\(login.organization))"
+        return "Signed in as \(login.user) (\(login.organization)) "
+            + (login.method == .key ? "with an API key" : "through Linear's MCP server")
     }
 
     private static let pipelineDetail = """
@@ -1252,13 +1286,16 @@ struct SettingsView: View {
         """
 
     static let linearLoginDetail = """
-        Signs in through the browser to Diplomat's Linear app, which reads the tracked teams' \
-        issues and writes labels and child issues as you. The login is kept in \
-        ~/.diplomat/pipeline/linear-login.json, readable by you alone, refreshed by the sync, \
-        and never handed to an agent: a fix gets the issue's text as Diplomat read it. Sign \
-        out forgets it and asks Linear to revoke it. $DIPLOMAT_LINEAR_TOKEN, a personal API \
-        key, wins over it. Without a login, the teams set here are skipped with a notice and \
-        GitHub still syncs, but no PR is merged.
+        Reads the tracked teams' issues and writes labels and child issues as you. Use API \
+        key… takes a personal API key, which some workspaces need an admin to allow. Sign \
+        in… goes through Linear's MCP server in the browser and needs no admin, but a sync \
+        makes more calls under it, and as its tools cannot list the issues linking a PR, no \
+        PR is merged while teams are set here. The login is kept in \
+        ~/.diplomat/pipeline/linear-login.json, readable by you alone, and never handed to an \
+        agent: a fix gets the issue's text as Diplomat read it. Sign out forgets it, and asks \
+        Linear to revoke a browser sign-in; a key stays valid until revoked in Linear's \
+        settings. $DIPLOMAT_LINEAR_TOKEN, a personal API key, wins over it. Without a login, \
+        the teams set here are skipped with a notice and GitHub still syncs, but no PR is merged.
         """
 
     // MARK: Tool visibility

@@ -17,6 +17,7 @@ import dataclasses
 import os
 import shutil
 import time
+from collections.abc import Callable
 
 from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication
@@ -1452,31 +1453,50 @@ class SettingsView(QWidget):
         self._linear_copy = QPushButton("Copy link")
         self._linear_copy.clicked.connect(
             lambda: QGuiApplication.clipboard().setText(self._linear_page[0]))
+        self._linear_key = QLineEdit()
+        self._linear_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._linear_key.setPlaceholderText("Personal API key")
+        self._linear_key.setAccessibleName("Linear API key")
+        self._linear_key_save = QPushButton("Save")
+        self._linear_key_save.clicked.connect(self._on_linear_key_save)
+        self._linear_key.returnPressed.connect(self._linear_key_save.click)
+        self._linear_key_cancel = QPushButton("Cancel")
+        self._linear_key_cancel.clicked.connect(lambda: self._show_linear_key(False))
+        self._linear_key_button = QPushButton("Use API key…")
+        self._linear_key_button.clicked.connect(lambda: self._show_linear_key(True))
         self._linear_button = QPushButton()
         self._linear_button.clicked.connect(self._on_linear_button)
         login_control = QWidget()
         login_row = QHBoxLayout(login_control)
         login_row.setContentsMargins(0, 0, 0, 0)
         login_row.setSpacing(6)
-        login_row.addWidget(self._linear_copy)
-        login_row.addWidget(self._linear_button)
+        for w in (self._linear_key, self._linear_key_save, self._linear_key_cancel,
+                  self._linear_copy, self._linear_button, self._linear_key_button):
+            login_row.addWidget(w)
         self._pipeline_login_row = self._track(SettingRow(
             "Linear login", login_control,
-            detail="Signs in through the browser to Diplomat's Linear app, which reads the "
-                   "tracked teams' issues and writes labels and child issues as you. The "
-                   "login is kept in ~/.diplomat/pipeline/linear-login.json, readable by "
-                   "you alone, refreshed by the sync, and never handed to an agent: a fix "
-                   "gets the issue's text as Diplomat read it. Sign out forgets it and asks "
-                   f"Linear to revoke it. ${pipeline.TOKEN_ENV}, a personal API key, wins "
-                   "over it. Without a login, the teams set here are skipped with a notice "
-                   "and GitHub still syncs, but no PR is merged."))
+            detail="Reads the tracked teams' issues and writes labels and child issues as "
+                   "you. Use API key… takes a personal API key, which some workspaces need "
+                   "an admin to allow. Sign in… goes through Linear's MCP server in the "
+                   "browser and needs no admin, but a sync makes more calls under it, and "
+                   "as its tools cannot list the issues linking a PR, no PR is merged while "
+                   "teams are set here. The login is kept in "
+                   "~/.diplomat/pipeline/linear-login.json, readable by you alone, and "
+                   "never handed to an agent: a fix gets the issue's text as Diplomat read "
+                   "it. Sign out forgets it, and asks Linear to revoke a browser sign-in; a "
+                   "key stays valid until revoked in Linear's settings. "
+                   f"${pipeline.TOKEN_ENV}, a personal API key, wins over it. Without a "
+                   "login, the teams set here are skipped with a notice and GitHub still "
+                   "syncs, but no PR is merged."))
         options.addWidget(self._pipeline_login_row)
         # linear-whoami's last answer; the last action's failure or warning (text, colour);
-        # the sign-in's consent page and whether it opened.
+        # the sign-in's consent page and whether it opened; whether the key line is open,
+        # and its key being checked.
         self._linear_me = pipeline.linear_whoami()
         self._linear_note: tuple[str, str] | None = None
         self._linear_page: tuple[str, bool] | None = None
         self._linear_signing_in = self._linear_cancelled = False
+        self._linear_key_shown = self._linear_checking_key = False
         self._refresh_pipeline_ui()
         return card
 
@@ -1541,21 +1561,43 @@ class SettingsView(QWidget):
         self._linear_button.setEnabled(signing_in)
         self._refresh_linear_login()
 
+        def work() -> tuple[str, str]:
+            if signing_in:
+                return self.store.linear_login(lambda: self._linear_cancelled,
+                                               self._linear_page_arrived.emit)[1], ""
+            ok, text = pipeline.linear_logout()
+            return ("", text) if ok else (text, "")
+
+        self._linear_act(work, "linear-login" if signing_in else "linear-logout")
+
+    def _show_linear_key(self, shown: bool) -> None:
+        """Use API key… opens the key line, its Cancel closes it."""
+        self._linear_key_shown = shown
+        self._linear_key.clear()
+        self._linear_note = None
+        self._refresh_linear_login()
+        if shown:
+            self._linear_key.setFocus()
+
+    def _on_linear_key_save(self) -> None:
+        key = self._linear_key.text()
+        self._linear_checking_key = True
+        self._linear_note = None
+        self._refresh_linear_login()
+        self._linear_act(lambda: (pipeline.linear_login_key(key)[1], ""), "linear-login-key")
+
+    def _linear_act(self, work: Callable[[], tuple[str, str]], name: str) -> None:
+        """``work`` off the Qt thread; its (what failed, why Linear did not revoke the
+        login) and who is signed in after go to :meth:`_on_linear_answered`."""
         def ask() -> None:
-            # Always answer: the answer is what re-enables the button.
-            error = warning = ""
+            # Always answer: the answer is what re-enables the row.
             try:
-                if signing_in:
-                    error = self.store.linear_login(lambda: self._linear_cancelled,
-                                                    self._linear_page_arrived.emit)[1]
-                else:
-                    ok, text = pipeline.linear_logout()
-                    error, warning = ("", text) if ok else (text, "")
+                error, warning = work()
             except Exception as exc:  # noqa: BLE001
-                error = str(exc) or type(exc).__name__
+                error, warning = str(exc) or type(exc).__name__, ""
             self._linear_answered.emit(error, warning, pipeline.linear_whoami())
 
-        self.store.start_background(ask, name="linear-login" if signing_in else "linear-logout")
+        self.store.start_background(ask, name=name)
 
     def _on_linear_page(self, url: str) -> None:
         # A Cancel can land before the page does.
@@ -1566,10 +1608,13 @@ class SettingsView(QWidget):
     def _on_linear_answered(self, error: str, warning: str, me: object) -> None:
         me = me if isinstance(me, dict) else None
         # Saved is what counts: a core killed after saving answers an error.
-        signed_in = self._linear_signing_in and me is not None
+        signed_in = (self._linear_signing_in or self._linear_checking_key) and me is not None
         if self._linear_cancelled:
             error = ""
-        self._linear_signing_in = self._linear_cancelled = False
+        self._linear_signing_in = self._linear_cancelled = self._linear_checking_key = False
+        if me is not None:
+            self._linear_key_shown = False
+            self._linear_key.clear()
         self._linear_page = None
         self._linear_me = me
         self._linear_note = ((error, _RED) if error
@@ -1583,25 +1628,37 @@ class SettingsView(QWidget):
     def _on_pipeline_sync_applied(self) -> None:
         # A sync forgets a login it can no longer refresh. An action under way
         # reads it once answered.
-        if not self._linear_signing_in and self._linear_button.isEnabled():
+        if (not self._linear_signing_in and not self._linear_checking_key
+                and self._linear_button.isEnabled()):
             self._linear_me = pipeline.linear_whoami()
             self._refresh_linear_login()
 
     def _refresh_linear_login(self) -> None:
         me, row, page = self._linear_me, self._pipeline_login_row, self._linear_page
+        keying = self._linear_key_shown
         self._linear_button.setText("Cancel" if self._linear_signing_in
                                     else "Sign in…" if me is None else "Sign out")
+        self._linear_button.setVisible(not keying)
+        self._linear_key_button.setVisible(me is None and not keying
+                                           and not self._linear_signing_in)
+        for w in (self._linear_key, self._linear_key_save, self._linear_key_cancel):
+            w.setVisible(keying)
+            w.setEnabled(not self._linear_checking_key)
         self._linear_copy.setVisible(self._linear_signing_in)
         self._linear_copy.setEnabled(page is not None and not self._linear_cancelled)
         if self._linear_signing_in:
             row.set_summary("Waiting for the browser…" if page is None or page[1]
                             else "No browser opened: Copy link and paste it into one")
+        elif self._linear_checking_key:
+            row.set_summary("Checking the key with Linear…")
         elif self._linear_note:
             row.set_summary(self._linear_note[0], color=self._linear_note[1])
         elif os.environ.get(pipeline.TOKEN_ENV):
             row.set_summary(f"${pipeline.TOKEN_ENV}, which wins over the login")
         elif me is not None:
-            row.set_summary(f"Signed in as {me['user']} ({me['organization']})")
+            how = ("with an API key" if me.get("method") == "key"
+                   else "through Linear's MCP server")
+            row.set_summary(f"Signed in as {me['user']} ({me['organization']}) {how}")
         else:
             # A problem only once a team needs it.
             teams, _ = pipeline.parse_linear_teams(self.store.pipeline_linear_teams_raw)

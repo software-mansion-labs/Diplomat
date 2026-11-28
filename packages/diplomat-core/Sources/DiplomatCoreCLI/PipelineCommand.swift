@@ -20,14 +20,17 @@ private var linearLoginTerminated: sig_atomic_t = 0
 ///   pipeline-teams stdin = `{"raw": <the Linear teams setting>}`. stdout = `{"teams":
 ///                  [{"key", "repo"}], "bad": [entry]}` (`PipelineSettings.LinearTeam.parse`),
 ///                  so the Linux twin of the parse is tested against this one.
-///   linear-login   no stdin. `LinearLogin.signIn`; stdout = {"url": <Linear's consent
-///                  page, for the caller to open>} once listening, then {"ok": true,
-///                  "user", "organization"} or {"ok": false, "error"}. Exits 0 either way.
-///                  SIGTERM, or its parent's exit, cancels a sign-in still waiting for the
-///                  browser; one past it ends as it would have.
+///   linear-login   no stdin. `LinearLogin.signIn` through Linear's MCP server; stdout =
+///                  {"url": <its consent page, for the caller to open>} once listening,
+///                  then {"ok": true, "user", "organization"} or {"ok": false, "error"}.
+///                  Exits 0 either way. SIGTERM, or its parent's exit, cancels a sign-in
+///                  still waiting for the browser; one past it ends as it would have.
+///   linear-login-key stdin = {"key": <a personal API key>}. `LinearLogin.signIn(key:)`;
+///                  stdout = {"ok": true, "user", "organization"} or {"ok": false, "error"}.
 ///   linear-logout  no stdin. `LinearLogin.signOut`; stdout = {"ok": true, "warning":
 ///                  <why Linear did not revoke it>|null} or {"ok": false, "error"}.
-///   linear-whoami  no stdin. stdout = {"user", "organization"} of the saved login, or {}.
+///   linear-whoami  no stdin. stdout = {"user", "organization", "method": "key"|"mcp"} of
+///                  the saved login, or {}.
 ///
 /// Dates are ISO 8601 and keys sorted, as `CommsLog.encoder` writes them. Both read and
 /// write `$DIPLOMAT_PIPELINE_DIR` (default `~/.diplomat/pipeline`); `DIPLOMAT_GH`,
@@ -88,6 +91,15 @@ enum PipelineCommand {
         emitObject(answer)
     }
 
+    static func loginKey(_ obj: [String: Any]) {
+        do {
+            let me = try LinearLogin.signIn(key: obj["key"] as? String ?? "")
+            emitObject(["ok": true, "user": me.user, "organization": me.organization])
+        } catch {
+            emitObject(["ok": false, "error": error.localizedDescription])
+        }
+    }
+
     static func logout() {
         do {
             emitObject(["ok": true, "warning": try LinearLogin.signOut() ?? NSNull()])
@@ -97,7 +109,9 @@ enum PipelineCommand {
     }
 
     static func whoami() {
-        emitObject(LinearLogin.saved().map { ["user": $0.user, "organization": $0.organization] } ?? [:])
+        emitObject(LinearLogin.saved().map {
+            ["user": $0.user, "organization": $0.organization, "method": $0.method.rawValue]
+        } ?? [:])
     }
 
     private static func emitObject(_ answer: [String: Any]) {

@@ -1037,6 +1037,12 @@ final class Store: ObservableObject {
     @Published var linearLogin: LinearLogin.Saved?
     @Published var linearSigningIn = false
     @Published var linearSigningOut = false
+    /// The API key typed into the Linear login row, nil while its field is hidden; showing or
+    /// hiding the field clears the last note.
+    @Published var linearKey: String? {
+        didSet { if (oldValue == nil) != (linearKey == nil) { linearLoginNote = nil } }
+    }
+    @Published var linearSavingKey = false
     /// The running sign-in's consent page, for Copy link, and whether a browser opened it.
     @Published var linearSignInPage: (url: URL, opened: Bool)?
     /// Why the last sign-in or sign-out failed, or why Linear did not revoke the login.

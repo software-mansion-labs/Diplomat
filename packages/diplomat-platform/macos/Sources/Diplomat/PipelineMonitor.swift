@@ -676,8 +676,8 @@ extension Store {
 
     // MARK: the Linear login
 
-    /// The self-test's stand-ins for the browser, Diplomat's OAuth application and Linear.
-    static var linearLoginOverride: (open: (URL) -> Bool, oauth: CoreAssets.PipelineModel.LinearOAuth,
+    /// The self-test's stand-ins for the browser, Linear's MCP server and Linear.
+    static var linearLoginOverride: (open: (URL) -> Bool, mcp: CoreAssets.PipelineModel.LinearMCP,
                                      transport: SlackAPI.Transport)?
 
     func refreshLinearLogin() {
@@ -693,7 +693,7 @@ extension Store {
         let stub = Store.linearLoginOverride
         let signIn = Task.detached(priority: .userInitiated) { [weak self] in
             Result {
-                try LinearLogin.signIn(oauth: stub?.oauth, open: { url in
+                try LinearLogin.signIn(mcp: stub?.mcp, open: { url in
                     Task { @MainActor in self?.openLinearPage(url) }
                 }, cancelled: { Task.isCancelled }, transport: stub?.transport ?? SlackAPI.curl)
             }
@@ -707,6 +707,25 @@ extension Store {
         switch answer {
         case .success: if pipelineEnabled { Task { await runPipelineSyncOnce() } }
         case .failure where signIn.isCancelled: break
+        case .failure(let error): linearLoginNote = error.localizedDescription
+        }
+    }
+
+    /// Off the main actor: Linear is asked who the key is.
+    func signInToLinearWithKey() async {
+        guard !linearSavingKey, let key = linearKey else { return }
+        linearSavingKey = true
+        linearLoginNote = nil
+        let transport = Store.linearLoginOverride?.transport ?? SlackAPI.curl
+        let answer = await Task.detached(priority: .userInitiated) {
+            Result { try LinearLogin.signIn(key: key, transport: transport) }
+        }.value
+        linearSavingKey = false
+        refreshLinearLogin()
+        switch answer {
+        case .success:
+            linearKey = nil
+            if pipelineEnabled { Task { await runPipelineSyncOnce() } }
         case .failure(let error): linearLoginNote = error.localizedDescription
         }
     }

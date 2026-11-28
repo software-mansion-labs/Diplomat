@@ -1988,7 +1988,7 @@ enum PipelineTest {
 
     /// The Settings row's Linear login through the real `LinearLogin`, into the scratch
     /// `DIPLOMAT_PIPELINE_DIR`, with `Store.linearLoginOverride` standing in for the browser
-    /// (`StubBrowser`), Diplomat's OAuth application and Linear.
+    /// (`StubBrowser`) and Linear.
     @MainActor
     private static func linearLogin(_ store: Store, check: (String, Bool) -> Void) async {
         print("\npipeline: the Linear login")
@@ -2000,23 +2000,54 @@ enum PipelineTest {
         }
         let file = PipelineLog.dir.appendingPathComponent("linear-login.json").path
         func summary() -> String { SettingsView.linearLoginSummary(store) }
-        func oauth(secs: Double) -> CoreAssets.PipelineModel.LinearOAuth {
-            try! JSONDecoder().decode(CoreAssets.PipelineModel.LinearOAuth.self, from: Data("""
-                {"clientID": "diplomat-selftest", "authorize": "https://linear.invalid/oauth/authorize",
-                 "token": "https://linear.invalid/oauth/token", "revoke": "https://linear.invalid/oauth/revoke",
-                 "scope": "read,write", "redirect": "http://127.0.0.1:{port}/linear/callback",
+        func mcp(secs: Double) -> CoreAssets.PipelineModel.LinearMCP {
+            try! JSONDecoder().decode(CoreAssets.PipelineModel.LinearMCP.self, from: Data("""
+                {"url": "https://linear.invalid/mcp", "authorize": "https://linear.invalid/authorize",
+                 "token": "https://linear.invalid/token", "register": "https://linear.invalid/register",
+                 "revoke": "https://linear.invalid/token", "scope": "read write",
+                 "redirect": "http://127.0.0.1:{port}/linear/callback",
                  "ports": [41870, 41871, 41872], "signInSecs": \(secs), "refreshMarginSecs": 600}
                 """.utf8))
         }
         let granted = (200, #"{"access_token": "a1", "expires_in": 86399, "refresh_token": "r1"}"#)
+        var sent: [SlackAPI.Request] = []
+        /// Linear's MCP server, OAuth included, and its GraphQL API, which knows only the key
+        /// `lin_api_selftest`.
         func linear(token: (Int, String), revoke: Int = 200) -> SlackAPI.Transport {
             { request in
+                sent.append(request)
+                func json(_ obj: [String: Any]) -> Data { try! JSONSerialization.data(withJSONObject: obj) }
                 let url = request.url.absoluteString
-                if url.hasSuffix("/oauth/token") { return (token.0, [:], Data(token.1.utf8)) }
-                if url.hasSuffix("/oauth/revoke") { return (revoke, [:], Data()) }
+                if url.hasSuffix("/register") { return (201, [:], json(["client_id": "diplomat-selftest"])) }
+                // Revocation is at the token endpoint, as Linear's is.
+                if url.hasSuffix("/token") {
+                    if String(decoding: request.body, as: UTF8.self).contains("token_type_hint=") {
+                        return (revoke, [:], Data())
+                    }
+                    return (token.0, [:], Data(token.1.utf8))
+                }
                 let call = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any]
+                if url.hasSuffix("/mcp") {
+                    let id = call?["id"] ?? NSNull()
+                    switch call?["method"] as? String {
+                    case "initialize":
+                        return (200, ["mcp-session-id": "s1"],
+                                json(["jsonrpc": "2.0", "id": id, "result": ["protocolVersion": "2025-06-18"]]))
+                    case "notifications/initialized":
+                        return (202, [:], Data())
+                    case "tools/call" where (call?["params"] as? [String: Any])?["name"] as? String == "whoami":
+                        let me = #"{"user": {"id": "u1", "name": "Ada Lovelace"}, "workspace": {"name": "Acme"}}"#
+                        return (200, [:], json(["jsonrpc": "2.0", "id": id,
+                                                "result": ["content": [["type": "text", "text": me]]]]))
+                    default:
+                        return (400, [:], Data())
+                    }
+                }
                 guard call?["operationName"] as? String == "Viewer" else { return (400, [:], Data()) }
-                return (200, [:], Data(#"{"data": {"viewer": {"name": "Ada Lovelace"}, "organization": {"name": "Acme"}}}"#.utf8))
+                guard request.headers["Authorization"] == "lin_api_selftest" else {
+                    return (400, [:], json(["errors": [["message": "Authentication required, not authenticated"]]]))
+                }
+                return (200, [:], json(["data": ["viewer": ["name": "Ada Lovelace"], "organization": ["name": "Acme"]]]))
             }
         }
         /// Runs `during` once `action` is under way (`busy`, for up to 5s), then waits for it to end.
@@ -2034,13 +2065,13 @@ enum PipelineTest {
         /// `during` runs once the sign-in starts, or once its page is handed over (`page`).
         func signIn(_ browser: StubBrowser, secs: Double = 10, token: (Int, String) = granted, page: Bool = false,
                     during: () async -> Void = {}) async {
-            Store.linearLoginOverride = (open: browser.open, oauth: oauth(secs: secs), transport: linear(token: token))
+            Store.linearLoginOverride = (open: browser.open, mcp: mcp(secs: secs), transport: linear(token: token))
             await underWay({ await store.signInToLinear() },
                            busy: { page ? store.linearSignInPage != nil : store.linearSigningIn }, during: during)
         }
         /// Whether the row showed it under way.
         func signOut(revoke: Int) async -> Bool {
-            Store.linearLoginOverride = (open: { _ in false }, oauth: oauth(secs: 10),
+            Store.linearLoginOverride = (open: { _ in false }, mcp: mcp(secs: 10),
                                          transport: linear(token: granted, revoke: revoke))
             var busy = false
             await underWay({ await store.signOutOfLinear() }, busy: { store.linearSigningOut }) {
@@ -2096,21 +2127,26 @@ enum PipelineTest {
                   && store.linearLogin == nil && !FileManager.default.fileExists(atPath: file))
 
         var ticks = 0
-        Store.pipelineTickOverride = { _ in
+        /// The login the row showed as the last sync began.
+        var shown: LinearLogin.Method?
+        let counted: @MainActor (PipelineSettings) -> PipelineTickResult = { _ in
             ticks += 1
+            shown = store.linearLogin?.method
             return PipelineTickResult(at: Date())
         }
+        Store.pipelineTickOverride = counted
         defer { Store.pipelineTickOverride = nil }
         let consented = StubBrowser(code: "c")
         await signIn(consented) { waiting = summary() }
         for _ in 0..<200 where ticks == 0 { try? await Task.sleep(nanoseconds: 10_000_000) }
         check("signed in: as whom Linear said, saved in the pipeline's directory",
               waiting == "Waiting for the browser…" && !store.linearSigningIn && store.linearLoginNote == nil
-                  && summary() == "Signed in as Ada Lovelace (Acme)"
+                  && summary() == "Signed in as Ada Lovelace (Acme) through Linear's MCP server"
+                  && store.linearLogin?.method == .mcp && store.linearLogin?.clientID == "diplomat-selftest"
                   && store.linearLogin?.refreshToken == "r1" && store.linearLogin == LinearLogin.saved()
                   && consented.shown().map { $0.contains("Diplomat is signed in to Linear as Ada Lovelace (Acme).") }
                       == [true])
-        check("…and a sync runs", ticks == 1)
+        check("…and then a sync runs", ticks == 1 && shown == .mcp)
         let kept = try? Data(contentsOf: URL(fileURLWithPath: file))
         try? FileManager.default.removeItem(atPath: file)
         store.linearSigningOut = true
@@ -2136,8 +2172,8 @@ enum PipelineTest {
                   && summary() == "Signed out, but Linear answered HTTP 503 to the revocation")
 
         let exchanging = DispatchSemaphore(value: 0)
-        Store.linearLoginOverride = (open: StubBrowser(code: "c").open, oauth: oauth(secs: 10), transport: { request in
-            guard request.url.absoluteString.hasSuffix("/oauth/token") else { return try linear(token: granted)(request) }
+        Store.linearLoginOverride = (open: StubBrowser(code: "c").open, mcp: mcp(secs: 10), transport: { request in
+            guard request.url.absoluteString.hasSuffix("/token") else { return try linear(token: granted)(request) }
             exchanging.signal()
             Thread.sleep(forTimeInterval: 0.5)
             return (400, [:], Data(#"{"error": "invalid_grant"}"#.utf8))
@@ -2161,10 +2197,52 @@ enum PipelineTest {
         }
         check("no browser: still waiting, and Copy link hands over the page",
               unopened == "No browser opened: Copy link and paste it into one"
-                  && copied?.hasPrefix("https://linear.invalid/oauth/authorize?client_id=diplomat-selftest&") == true)
+                  && copied?.hasPrefix("https://linear.invalid/authorize?client_id=diplomat-selftest&") == true)
         check("…whose visit signs in", store.linearLogin?.user == "Ada Lovelace"
               && byHand.shown().map { $0.contains("signed in to Linear") } == [true])
         _ = await signOut(revoke: 200)
+
+        (ticks, shown) = (0, nil)
+        Store.pipelineTickOverride = counted
+        Store.linearLoginOverride = (open: { _ in false }, mcp: mcp(secs: 10), transport: linear(token: granted))
+        sent = []
+        store.linearKey = ""
+        await store.signInToLinearWithKey()
+        check("an API key: a blank one is refused before Linear is asked, the field left open",
+              summary() == "No Linear API key was given" && sent.isEmpty && store.linearKey == ""
+                  && store.linearLogin == nil)
+        store.linearKey = "lin_api_wrong"
+        await store.signInToLinearWithKey()
+        check("…one Linear refuses: said, left in the field, and nothing saved",
+              summary() == "Linear answered HTTP 400: Authentication required, not authenticated"
+                  && store.linearKey == "lin_api_wrong" && store.linearLogin == nil
+                  && !FileManager.default.fileExists(atPath: file))
+        store.linearKey = nil
+        let cancelled = summary()
+        store.linearLoginNote = "Signed out, but Linear answered HTTP 503 to the revocation"
+        store.linearKey = ""
+        check("…Cancel closes the field and its note, and opening it clears an older one",
+              cancelled == "Not signed in" && summary() == "Not signed in")
+        store.linearKey = "  lin_api_selftest\n"
+        sent = []
+        var saving = false
+        await underWay({ await store.signInToLinearWithKey() }, busy: { store.linearSavingKey }) {
+            saving = store.linearSavingKey && store.linearLoginNote == nil && summary() == "Checking the key with Linear…"
+            await store.signInToLinearWithKey()
+        }
+        for _ in 0..<200 where ticks == 0 { try? await Task.sleep(nanoseconds: 10_000_000) }
+        check("…a good one: busy until Linear answers, a second Save meanwhile asking nothing, then saved trimmed",
+              saving && !store.linearSavingKey && sent.count == 1 && store.linearLoginNote == nil
+                  && store.linearLogin?.method == .key && store.linearLogin?.accessToken == "lin_api_selftest"
+                  && store.linearLogin == LinearLogin.saved())
+        check("…the field closed, the row naming the key, and then a sync run",
+              store.linearKey == nil && summary() == "Signed in as Ada Lovelace (Acme) with an API key"
+                  && ticks == 1 && shown == .key)
+        sent = []
+        let forgetting = await signOut(revoke: 503)
+        check("…Sign out forgets the key and asks Linear nothing",
+              forgetting && store.linearLogin == nil && !FileManager.default.fileExists(atPath: file) && sent.isEmpty
+                  && store.linearLoginNote == nil && summary() == "Not signed in")
     }
 
     private static func segments(in view: NSView?) -> [[String]] {

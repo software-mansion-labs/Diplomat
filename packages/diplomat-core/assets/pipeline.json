@@ -1,5 +1,5 @@
 {
-  "_comment": "The Pipeline: every open issue of every source (GitHub roots, Linear) and the operator's open PRs, rated for risk and complexity, and routed down the fast track (rate -> fix PR -> rate the PR -> review until clean -> rate again -> merge) or left to a human. Its state is the trackers' labels (`labels`); `~/.diplomat/pipeline/` holds the log (whose re-rates prove a `cleared` label Diplomat's own, but for a takeover's), the last sync, the ratings Diplomat could not write, the guards against repeating a step, the front-end's live switches (`control.json`) and the Linear login (`linear-login.json`). `../Sources/DiplomatCore/Pipeline*.swift` and `LinearLogin.swift` are the one implementation; Linux reaches it through `diplomat-core pipeline-*` and `linear-*`.",
+  "_comment": "The Pipeline: every open issue of every source (GitHub roots, Linear) and the operator's open PRs, rated for risk and complexity, and routed down the fast track (rate -> fix PR -> rate the PR -> review until clean -> rate again -> merge) or left to a human. Its state is the trackers' labels (`labels`); `~/.diplomat/pipeline/` holds the log (whose re-rates prove a `cleared` label Diplomat's own, but for a takeover's), the last sync, the ratings Diplomat could not write, the guards against repeating a step, the front-end's live switches (`control.json`), the Linear login (`linear-login.json`) and the issues a sync under an MCP one keeps (`linear-mcp-cache.json`). `../Sources/DiplomatCore/Pipeline*.swift`, `LinearLogin.swift` and `LinearMCP.swift` are the one implementation; Linux reaches it through `diplomat-core pipeline-*` and `linear-*`.",
   "syncSecs": 300,
   "minSyncSecs": 60,
   "_limitsComment": "One sync shows at most maxItems items (whole groups, unsettled first) and the log's newest maxEvents events. Past maxLogBytes, log.jsonl is rewritten to the newest whole lines that fit in half of it. Linear is read 100 issues a page, at most linearMaxIssues, each call bounded by httpTimeoutSecs; DIPLOMAT_LINEAR_API overrides linearAPI. Each root's open issues and open PRs are read a page at a time, githubPage of each, at most githubMaxItems; a source with more is a partial read. A page GitHub times out or answers 5xx is read again at half its size, down to githubPage.least, and the root's later pages keep that size.",
@@ -8,13 +8,14 @@
   "maxLogBytes": 2097152,
   "httpTimeoutSecs": 30,
   "linearAPI": "https://api.linear.app/graphql",
-  "_linearOAuthComment": "Signing in to Linear is OAuth with PKCE and no client secret, for the OAuth application clientID names, whose callback URLs must list redirect at each of ports; the first port free on 127.0.0.1 is used. The browser gets signInSecs to come back. An access token is refreshed once it expires within refreshMarginSecs.",
-  "linearOAuth": {
-    "clientID": "",
-    "authorize": "https://linear.app/oauth/authorize",
-    "token": "https://api.linear.app/oauth/token",
-    "revoke": "https://api.linear.app/oauth/revoke",
-    "scope": "read,write",
+  "_linearMCPComment": "Signing in through Linear's MCP server is OAuth with PKCE and no client secret, for a client registered at register on each sign-in with redirect at the first of ports free on 127.0.0.1. The browser gets signInSecs to come back. An access token is refreshed once it expires within refreshMarginSecs. A sync under that login calls url's tools instead of linearAPI.",
+  "linearMCP": {
+    "url": "https://mcp.linear.app/mcp",
+    "authorize": "https://mcp.linear.app/authorize",
+    "token": "https://mcp.linear.app/token",
+    "register": "https://mcp.linear.app/register",
+    "revoke": "https://mcp.linear.app/token",
+    "scope": "read write",
     "redirect": "http://127.0.0.1:{port}/linear/callback",
     "ports": [29170, 29171, 29172],
     "signInSecs": 300,

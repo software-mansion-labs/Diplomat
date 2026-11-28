@@ -682,8 +682,9 @@ enum PipelineRead {
     }
 }
 
-/// Linear's GraphQL API under the operator's `LinearLogin`. The transport is
-/// `SlackAPI.curl`'s: the token travels only in an owner-only config on curl's stdin.
+/// Linear's GraphQL API under the operator's `LinearLogin`, or its MCP server's tools
+/// answering the same operations. The transport is `SlackAPI.curl`'s: the token travels
+/// only in an owner-only config on curl's stdin.
 public struct LinearAPI {
     /// A personal API key overriding the login; no child Diplomat starts inherits it.
     public static let envVar = "DIPLOMAT_LINEAR_TOKEN"
@@ -693,6 +694,22 @@ public struct LinearAPI {
     let url: URL
     let timeout: TimeInterval
     let transport: SlackAPI.Transport
+    private var mcp: LinearMCP?
+
+    init(authorization: @escaping () throws -> String, url: URL, timeout: TimeInterval,
+         transport: @escaping SlackAPI.Transport) {
+        self.authorization = authorization
+        self.url = url
+        self.timeout = timeout
+        self.transport = transport
+    }
+
+    /// The MCP server at `url`, keeping issue details in `cache`.
+    init(mcp url: URL, authorization: @escaping () throws -> String, timeout: TimeInterval,
+         transport: @escaping SlackAPI.Transport, cache: URL?) {
+        self.init(authorization: authorization, url: url, timeout: timeout, transport: transport)
+        mcp = LinearMCP(url: url, authorization: authorization, timeout: timeout, transport: transport, cache: cache)
+    }
 
     enum Failure: LocalizedError {
         case transport(String)
@@ -715,6 +732,7 @@ public struct LinearAPI {
     }
 
     func call(_ operation: String, _ variables: [String: Any]) throws -> [String: Any] {
+        if let mcp { return try mcp.call(operation, variables) }
         let query: String
         do { query = try CoreAssets.graphql("linear") } catch { throw Failure.api(error.localizedDescription) }
         let body = try JSONSerialization.data(
