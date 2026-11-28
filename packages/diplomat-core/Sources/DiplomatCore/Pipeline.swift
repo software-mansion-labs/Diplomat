@@ -54,8 +54,8 @@ public enum PipelineKind: String, Codable, Sendable { case issue, pr }
 /// `unrated`, then `human` or `fast-track`; `clean` once a Diplomat clean marker names its
 /// head; `cleared` once this Diplomat rated it low/low again at that head, or put `cleared`
 /// on it there for a takeover (its log or state says so:
-/// the `cleared` label alone, which anyone with triage rights can add, does not); `merged`
-/// or `closed`.
+/// the `cleared` label alone, which anyone with triage rights can add, does not), and at a
+/// later head carrying that head's change unchanged; `merged` or `closed`.
 public enum PipelineStage: String, Codable, CaseIterable, Sendable {
     case unrated, human, candidate, fractured, fixing
     case fastTrack = "fast-track"
@@ -209,7 +209,7 @@ public struct PipelineEvent: Codable, Equatable, Sendable {
     public var kind: Kind
     public var detail: String
     /// A PR's `rated` or `rerated`: the head it was rated at; a `cleared`: the head it was
-    /// cleared at.
+    /// cleared at, none for a clear carried to a later head.
     public var head: String?
     /// A `rated` or `rerated`: the rating given, never below the labels or the diff's floor.
     public var rating: PipelineRating?

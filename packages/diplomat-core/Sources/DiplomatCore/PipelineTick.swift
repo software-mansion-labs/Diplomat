@@ -174,6 +174,8 @@ final class PipelineSync {
     var lateRevoked: Set<String> = []
     /// Per cleared PR, the code of the hold `settle` found on it.
     var holdCodes: [String: String] = [:]
+    /// Per cleared PR whose head moved, why `carrySyncs` did not keep it cleared there.
+    var uncarried: [String: String] = [:]
     /// Each issue a merge this sync asked for may have closed, by its id as `byURL` keys it.
     var closedHere: Set<String> = []
 
@@ -227,6 +229,7 @@ final class PipelineSync {
             }
         }
         edges = PipelineRead.edges(entries)
+        carrySyncs()
         for i in entries.indices { annotate(&entries[i]) }
         takeOver()
         if settings.fastTrack { dropStaleClears() }
@@ -622,7 +625,7 @@ final class PipelineSync {
             let floor = PipelineGate.floorWithReasons(files: e.files, changedFiles: e.changedFiles)
             e.item.floor = floor.rating
             floorWhy[e.id] = floor.reasons
-            let head = e.item.headSha ?? ""
+            let head = reviewed(e) ?? ""
             e.item.cleanAt = e.markers.contains(head) ? head : e.markers.last
         }
     }
@@ -1060,19 +1063,25 @@ final class PipelineSync {
     /// each head is rated again once, whatever the answer.
     func awaitingRerate(_ e: PipelineEntry) -> Bool {
         guard !takenOver(e), own(e), open(e), e.item.writable, has(e, model.labels.fastTrack),
-              let head = e.item.headSha, !head.isEmpty, e.item.cleanAt == head, rerates[e.id]?[head] == nil,
+              let head = reviewed(e), e.item.cleanAt == head, rerates[e.id]?[head] == nil,
               let r = e.item.rating, r.atLeast(e.item.floor ?? r).isFastTrack,
               offTrack(e) == nil else { return false }
         return closesHold(e) == nil
     }
 
-    /// `cleared`, with a clean marker at its head, at which this Diplomat rated it low/low
-    /// again, or, taken over, put `cleared` on. The label alone is no proof of either: anyone
-    /// with triage rights can add it.
+    /// `cleared`, with a clean marker at its `reviewed` head, at which this Diplomat rated it
+    /// low/low again, or, taken over, put `cleared` on. The label alone is no proof of either:
+    /// anyone with triage rights can add it.
     func clearedByMe(_ e: PipelineEntry) -> Bool {
-        guard has(e, model.labels.cleared), let head = e.item.headSha, !head.isEmpty,
-              e.item.cleanAt == head else { return false }
+        guard has(e, model.labels.cleared), let head = reviewed(e), e.item.cleanAt == head else { return false }
         return takenOver(e) ? state.cleared[e.id] == head : rerates[e.id]?[head]?.isFastTrack == true
+    }
+
+    /// The head a PR's clean marker, second rating and clear count at: its own, or for a head
+    /// carrying a cleared change, the head it was cleared at (`carrySyncs`).
+    func reviewed(_ e: PipelineEntry) -> String? {
+        guard let head = e.item.headSha, !head.isEmpty else { return nil }
+        return state.synced[e.id]?[head] ?? head
     }
 
     func newer(_ a: Int, _ b: Int) -> Bool {
@@ -1435,7 +1444,7 @@ final class PipelineSync {
     /// Why my fast-track PR is off the fast track until taken over. A takeover stands whatever
     /// it is rated, and forgot what came off it before.
     func offTrack(_ e: PipelineEntry) -> String? {
-        let head = e.item.headSha ?? ""
+        let head = reviewed(e) ?? ""
         let taken = takenOver(e)
         let above = taken ? [:] : (rerates[e.id] ?? [:]).filter { !$0.value.isFastTrack }
         if let h = above[head] != nil ? head : above.keys.sorted().first, let r = above[h] {
@@ -1466,36 +1475,104 @@ final class PipelineSync {
             if state.takenOver.removeValue(forKey: e.id) != nil { log(e.id, .takeover, "takeover ended: \(why)") }
             return persist()
         }
-        guard has(e, ft), let head = e.item.headSha, e.item.cleanAt == head,
+        guard has(e, ft), let head = reviewed(e), e.item.cleanAt == head,
               takenOver(e) ? closesHold(e) == nil : rerates[e.id]?[head]?.isFastTrack == true,
               !has(e, cl) || state.cleared[e.id] != head else { return }
         if !has(e, cl) {
-            guard recheck(i), entries[i].item.headSha == head, has(entries[i], ft), add(i, cl, .fastTrack) else { return }
+            guard recheck(i), entries[i].item.headSha == e.item.headSha, has(entries[i], ft), add(i, cl, .fastTrack)
+            else { return }
         }
         state.cleared[e.id] = head
         log(e.id, .cleared, "cleared at \(head.prefix(7))", head: head)
         persist()
     }
 
-    /// Takes `cleared` off my fast-track PR whose head no clean marker names, for a review
-    /// of that head. One a person took off first is their opt-out, which `track` writes.
+    /// Takes `cleared` off my fast-track PR whose head no clean marker names, nor carries a
+    /// cleared change (`carrySyncs`), for a review of that head. One a person took off first is
+    /// their opt-out, which `track` writes.
     func dropStaleClears() {
         for i in entries.indices {
             let e = entries[i]
             guard own(e), open(e), has(e, model.labels.fastTrack), has(e, model.labels.cleared),
-                  partial[e.item.repo] == nil, let head = e.item.headSha, e.item.cleanAt != head,
+                  partial[e.item.repo] == nil, let head = e.item.headSha, e.item.cleanAt != reviewed(e),
                   offTrack(e) == nil, recheck(i) else { continue }
             let off = takeOff(i, model.labels.cleared, .fastTrack)
             guard off != false else { continue }
             // Also when gh failed: GitHub may have taken it off all the same.
             state.cleared[e.id] = nil
+            state.synced[e.id] = nil
             if off == true {
                 log(e.id, .labelled, "-\(model.labels.cleared): " + (e.item.cleanAt == nil
                     ? "no clean marker names its head \(head.prefix(7))"
-                    : "the head moved to \(head.prefix(7)), past its clean marker"))
+                    : "the head moved to \(head.prefix(7)), past its clean marker"
+                        + (uncarried[e.id].map { ": " + $0 } ?? "")))
             }
             persist()
         }
+    }
+
+    /// Keeps my cleared PR cleared at a head it moved to, as merging its base moves it, when
+    /// that head's change is the one cleared (`changeDiffers`): its merge is then the change
+    /// reviewed and rated, on its base as the base stands. Fast track's, as is taking a clear
+    /// off a head that carries none.
+    func carrySyncs() {
+        guard blocked == nil, settings.fastTrack else { return }
+        for e in entries {
+            guard own(e), open(e), e.item.writable, partial[e.item.repo] == nil, let root = e.root,
+                  has(e, model.labels.fastTrack), has(e, model.labels.cleared),
+                  let head = e.item.headSha, !head.isEmpty, state.synced[e.id]?[head] == nil,
+                  let from = state.cleared[e.id], from != head, e.markers.contains(from), offTrack(e) == nil
+            else { continue }
+            if let why = changeDiffers(root, e.baseRef, head, from) {
+                uncarried[e.id] = why
+                continue
+            }
+            state.synced[e.id, default: [:]][head] = from
+            // No `head`: a clear the log names at a head is one a person took off once gone.
+            log(e.id, .cleared, "cleared at \(head.prefix(7)): its change against \(e.baseRef) is the one cleared at "
+                + from.prefix(7))
+            persist()
+        }
+    }
+
+    /// GitHub's compare lists at most this many files.
+    static let compareFiles = 300
+
+    /// Why a PR's change at `head` is not the one cleared at `from`, nil when it is: its diff
+    /// against `baseRef` changes the same files to the same blobs at both, which hold each of
+    /// those paths in the same mode (a compare lists no modes), and the base changed none of
+    /// them since `from`. What cannot be read whole is a difference.
+    func changeDiffers(_ root: PipelineSettings.Root, _ baseRef: String, _ head: String, _ from: String) -> String? {
+        let unread = "its diff against \(baseRef) could not be read whole"
+        func json(_ path: String) -> [String: Any]? {
+            let out = io.gh(["api", "repos/\(root.name)/" + path])
+            return out.ok ? (try? JSONSerialization.jsonObject(with: out.stdout)) as? [String: Any] : nil
+        }
+        func files(_ base: String, _ head: String) -> [[String]]? {
+            guard let list = json("compare/\(base)...\(head)?per_page=1")?["files"] as? [[String: Any]],
+                  list.count < Self.compareFiles else { return nil }
+            return list.map { f in ["status", "previous_filename", "filename", "sha"].map { f[$0] as? String ?? "" } }
+        }
+        let base = baseRef.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? baseRef
+        guard let now = files(base, head), let then = files(base, from), let since = files(from, base) else {
+            return unread
+        }
+        let paths = Set(then.flatMap { $0[1...2] }).subtracting([""])
+        if let path = since.flatMap({ $0[1...2] }).filter(paths.contains).min() {
+            return "\(baseRef) changed \(path), which it changes too, since \(from.prefix(7))"
+        }
+        let differs = "its change against \(baseRef) is not the one cleared at \(from.prefix(7))"
+        guard Set(now) == Set(then) else { return differs }
+        // Each path's mode and object, nil for a tree GitHub cut short.
+        func tree(_ sha: String) -> [String: String]? {
+            guard let body = json("git/trees/\(sha)?recursive=1"), !PipelineRead.bool(body["truncated"], true),
+                  let list = body["tree"] as? [[String: Any]] else { return nil }
+            var out: [String: String] = [:]
+            for t in list { if let p = t["path"] as? String { out[p] = "\(t["mode"] ?? "") \(t["sha"] ?? "")" } }
+            return out
+        }
+        guard let at = tree(head), let was = tree(from) else { return unread }
+        return paths.allSatisfy { at[$0] == was[$0] } ? nil : differs
     }
 
     // MARK: - Takeover
@@ -1894,7 +1971,7 @@ final class PipelineSync {
     func settle() {
         for i in entries.indices where entries[i].item.kind == .pr && open(entries[i]) {
             let e = entries[i]
-            let head = e.item.headSha ?? ""
+            let head = reviewed(e) ?? ""
             let atHead = !head.isEmpty && e.item.cleanAt == head
             var hold: String?
             let stage: PipelineStage
@@ -2054,7 +2131,8 @@ final class PipelineSync {
         }
     }
 
-    func mergeHold(_ e: PipelineEntry, fixes: Bool, unjudged: [String]) -> PipelineGate.Hold? {
+    /// `upToDate`: as it would be with its base merged into it.
+    func mergeHold(_ e: PipelineEntry, fixes: Bool, unjudged: [String], upToDate: Bool = false) -> PipelineGate.Hold? {
         PipelineGate.hold(PipelineGate.Candidate(
             state: e.item.state, author: e.item.author ?? "", isCrossRepository: e.isCrossRepository,
             baseRef: e.baseRef, defaultBranch: e.defaultBranch, participants: e.participants,
@@ -2066,7 +2144,8 @@ final class PipelineSync {
             foreignCommits: e.gate?.foreignCommits ?? [],
             trackLabels: has(e, model.labels.fastTrack) && has(e, model.labels.cleared),
             fixesCandidate: fixes, closesUnwritable: unjudged, ciRan: e.gate?.ciRan ?? true,
-            wasReady: e.readied, mergeState: e.mergeState, behindBy: e.gate.map(\.behindBy) ?? 0, mergeQueue: e.mergeQueue,
+            wasReady: e.readied, mergeState: upToDate && e.mergeState == "BEHIND" ? "CLEAN" : e.mergeState,
+            behindBy: upToDate ? 0 : e.gate.map(\.behindBy) ?? 0, mergeQueue: e.mergeQueue,
             stopLabels: stops(e),
             requiredChecks: e.gate.map(\.requiredChecks) ?? [], passedChecks: e.gate?.passedChecks ?? [],
             baseRules: e.gate.map(\.baseRules) ?? [], unsignedCommits: e.gate?.unsignedCommits ?? false,
@@ -2096,12 +2175,14 @@ final class PipelineSync {
         return fresh
     }
 
-    /// Each cleared PR no hold stops but being a draft, read again: merged at exactly the
-    /// head the sync rated if nothing changed and nothing holds it now; a draft never ready
-    /// before is marked ready instead, and merged at a later sync once nothing holds it.
+    /// Each cleared PR no hold stops but being a draft or behind its base, read again: merged
+    /// at exactly the head the sync read if nothing changed and nothing holds it now; a draft
+    /// never ready before is marked ready instead, and merged at a later sync once nothing
+    /// holds it; one behind its base that nothing else would hold has the base merged into
+    /// it, for a later sync to carry its clear to the head that makes (`carrySyncs`).
     func merge() {
         for i in entries.indices where entries[i].item.stage == .cleared
-            && [nil, "draft"].contains(holdCodes[entries[i].id]) {
+            && [nil, PipelineGate.Hold.draft.code, PipelineGate.Hold.behind.code].contains(holdCodes[entries[i].id]) {
             let e = entries[i]
             guard let root = e.root, let n = e.number, let head = e.item.headSha,
                   may(.merge), let read = reread(e) else { continue }
@@ -2112,7 +2193,10 @@ final class PipelineSync {
             lateRevokes()
             if lateRevoked.contains(e.id) { continue }
             let flag = mergeFlag(fresh)
+            let noMethod = "the rules on its base branch allow none of the merge methods its repository allows"
             var hold: (code: String, message: String)?
+            // Behind: what would still hold it with its base merged in, "" for nothing.
+            var upToDate: String?
             if fresh.item.headSha != head {
                 hold = ("moved", "its head moved to \((fresh.item.headSha ?? "").prefix(7)) since this sync read it")
             } else if let why = offTrack(fresh) {
@@ -2121,16 +2205,27 @@ final class PipelineSync {
                 hold = ("not-cleared", "it is no longer cleared at its head")
             } else {
                 let closes = freshCloses(fresh, linear: judged)
-                let gate = mergeHold(fresh, fixes: closes.fixes, unjudged: closes.unjudged)
-                    .map { (code: $0.code, message: $0.message) }
+                let held = mergeHold(fresh, fixes: closes.fixes, unjudged: closes.unjudged)
+                if held == .behind {
+                    let after = mergeHold(fresh, fixes: closes.fixes, unjudged: closes.unjudged, upToDate: true)
+                    upToDate = after.flatMap { $0 == .draft ? nil : $0.message } ?? fresh.unwritable
+                        ?? (flag == nil ? noMethod : "")
+                }
+                let gate = held.map { (code: $0.code, message: $0.message) }
                 hold = gate.flatMap { $0.code == PipelineGate.Hold.draft.code ? nil : $0 }
                     ?? fresh.unwritable.map { ("unwritable", $0) }
-                    ?? (flag == nil ? ("no-method", "the rules on its base branch allow none of the merge methods its repository allows") : nil)
+                    ?? (flag == nil ? ("no-method", noMethod) : nil)
                     ?? gate
             }
             if let hold, hold.code != PipelineGate.Hold.draft.code {
-                entries[i].item.hold = hold.message
-                noteHold(i, hold.code, hold.message)
+                var message = hold.message
+                if let after = upToDate, !after.isEmpty {
+                    message += "; " + after
+                } else if upToDate != nil, may(.fastTrack), syncBase(fresh) {
+                    message += "; GitHub was asked to merge \(fresh.baseRef) into it"
+                }
+                entries[i].item.hold = message
+                noteHold(i, hold.code, message)
                 continue
             }
             guard let flag else { continue }
@@ -2179,6 +2274,25 @@ final class PipelineSync {
             }
             persist()
         }
+    }
+
+    /// Asks GitHub to merge `fresh`'s base into it at the head this sync read, logged `asked`
+    /// once per head; false, with a notice, when GitHub refused.
+    func syncBase(_ fresh: PipelineEntry) -> Bool {
+        guard let root = fresh.root, let n = fresh.number, let head = fresh.item.headSha else { return false }
+        let out = io.gh(["api", "-X", "PUT", "repos/\(root.name)/pulls/\(n)/update-branch",
+                         "-f", "expected_head_sha=\(head)"])
+        guard out.ok else {
+            notice("\(fresh.item.label) was not brought up to date with \(fresh.baseRef): \(out.why)")
+            return false
+        }
+        let key = "pipeline-update:" + fresh.id
+        if state.asked[key] != head {
+            log(fresh.id, .asked, "asked GitHub to merge \(fresh.baseRef) into it at \(head.prefix(7))")
+            state.asked[key] = head
+            persist()
+        }
+        return true
     }
 
     // MARK: - Effects
