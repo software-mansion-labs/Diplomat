@@ -21,7 +21,9 @@ written through the real recorder into the per-test temp dir.
 
 from __future__ import annotations
 
+import re
 import time
+from pathlib import Path
 
 import pytest
 
@@ -700,6 +702,18 @@ def test_a_reading_alone_between_two_silences_is_still_a_reading():
     """It is a measurement the probe did return, and the card counts it in "N of M
     missing". Dropping it made the chart disagree with its own caption."""
     assert [len(r) for r in _quota_runs([None] * 8 + [42.0] + [None] * 8)] == [1]
+
+
+def test_the_telemetry_doc_gives_the_silence_the_line_is_drawn_through():
+    from diplomat_app.telemetryview import QuotaChart
+
+    doc = Path(__file__).resolve().parents[4] / "docs" / "telemetry.md"
+    prose = " ".join(doc.read_text(encoding="utf-8").split())
+    assert re.findall(r"drawn through a silence of up to an? (\w+)", prose) == ["hour"]
+    hour = 60 * 60
+    points = tuple(telemetry.QuotaPoint(at=at, session_pct=50.0, week_pct=50.0)
+                   for at in (0.0, hour, 2 * hour + 1))
+    assert [len(r) for r in QuotaChart._runs(points, lambda p: p.week_pct)] == [2, 1]
 
 
 def _quota_chart(readings: list[float | None]):
