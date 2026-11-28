@@ -190,9 +190,9 @@ apply holds a PR off the fast track, and an issue from its fix, until a later sy
 1, 2, 4 ... syncs later, unless a PR's diff at its head allows less: then it is dropped, and the PR
 is rated by its labels again, or rated anew without them. A first rating waits while Diplomat may not
 write to the PR. A PR pushed to meanwhile has it finished at the new head, unless it is a first
-rating made while **Fast-track my PRs** was on, the switch is on still and the PR wears no rating or
-fast-track label: then the PR is rated again at the new head instead, never lower, and that is still
-its first rating.
+rating made while **Fast-track my PRs** was on, low/low within the new head's diff floor, the switch
+is on still and the PR wears no rating or fast-track label: then the PR is rated again at the new
+head instead, never lower, and that is still its first rating.
 
 Where you [mirror](#settings) ratings, a finished one's labels are written at once, and a sync labels
 up to 10 more kept ratings an item does not wear yet (`pipeline.json` `labels.mirrorPerSync`), your
@@ -497,7 +497,8 @@ trackers' labels, this is what a sync needs:
 - `state.json` - the labels made per repo, the items taken over, and the guards against repeating a step: each PR's
   re-rates by head, which prove a `cleared` label this Diplomat's own, and the head it was cleared
   at, which alone does for a PR taken over; the later heads that carry
-  that clear, their change the one cleared; the PRs Diplomat took off the fast track, or could not put on it; the items whose rating, its
+  that clear, their change the one cleared; the PRs Diplomat took off the fast track, could not put on it, or
+  kept off it at their first rating (with why); the items whose rating, its
   labels or split failed, and when to
   try again; the issues that would not split and why, and those being split with the parts the
   model answered and those filed so far; and the issues Diplomat filed as parts, with the ban each

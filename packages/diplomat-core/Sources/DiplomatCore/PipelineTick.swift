@@ -660,8 +660,8 @@ final class PipelineSync {
     /// `e`'s first rating is to be rated again at its head instead of finished
     /// (`PipelineCachedRating.first`).
     func rateAgain(_ e: PipelineEntry) -> Bool {
-        guard settings.fastTrack, let c = cache[e.id], c.pending == true, c.first == true, let h = c.head
-        else { return false }
+        guard settings.fastTrack, let c = cache[e.id], c.pending == true, c.first == true, let h = c.head,
+              c.rating.atLeast(e.item.floor ?? c.rating).isFastTrack else { return false }
         return h != head(e) && unworn(Set(e.labels.map { $0.lowercased() }))
     }
 
@@ -1159,7 +1159,8 @@ final class PipelineSync {
         guard settings.rate else { return persist() }
         // A first rating pushed past is rated again only once its answer could be applied.
         for i in bands.joined() where waiting < model.rater.asks && !forced.contains(i)
-            && state.rateAsks[entries[i].id] == nil && (entries[i].item.writable || !rateAgain(entries[i])) {
+            && state.rateAsks[entries[i].id] == nil
+            && (!rateAgain(entries[i]) || entries[i].item.writable && may(.fastTrack)) {
             if ask(i, forced: false) { waiting += 1 }
         }
         persist()
@@ -1983,8 +1984,9 @@ final class PipelineSync {
                 stage = e.item.rating == nil ? .unrated : .human
                 if own(e), let r = e.item.rating, r.atLeast(floor).isFastTrack {
                     hold = e.unwritable.map { "off the fast track: \($0)" }
-                        ?? (rateAgain(e) && state.declined.contains(e.id)
-                            ? "off the fast track until Rate now: the rating asked at its new head was cancelled"
+                        ?? (rateAgain(e) ? (state.declined.contains(e.id)
+                                ? "off the fast track until Rate now: a rating asked for it was cancelled"
+                                : "off the fast track until it is rated at its new head")
                             : cache[e.id]?.pending == true ? "off the fast track until a sync reads it again"
                             : !state.untracked.contains(e.id) ? state.keptOff[e.id]
                             : "off the fast track: \(model.labels.fastTrack) could not be put on at its first rating")
