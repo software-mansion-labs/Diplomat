@@ -15,9 +15,8 @@ MENU_ENTRY="${APPS_DIR}/diplomat.desktop"
 chmod +x "$LAUNCHER"
 mkdir -p "$AUTOSTART_DIR" "$APPS_DIR"
 
-# Build the Swift core (diplomat-core) the app shells out to. Soft-fail: the UI still
-# runs without it (build later with install/build-core.sh once a Swift toolchain is
-# installed).
+# Build the Swift core (diplomat-core) the app shells out to. Soft-fail: the UI
+# still runs without it.
 if ! "${LINUX_DIR}/install/build-core.sh"; then
     echo "warning: diplomat-core not built - Review, Fix issues, Conflicts, Audit, Comms," >&2
     echo "         the Pipeline and the Linear login need it; build it later with" >&2
