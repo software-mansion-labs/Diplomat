@@ -42,7 +42,11 @@ def pipeline_dir() -> Path:
 
 
 #: The switches a running sync re-reads from ``control.json`` before each outward action.
-CONTROL_KEYS = ("enabled", "rate", "fix", "fastTrack", "merge", "fracture")
+CONTROL_KEYS = ("enabled", "rate", "mirrorGitHub", "mirrorLinear", "fix", "fastTrack", "merge",
+                "fracture")
+
+#: ``PipelineMirrorScope``'s cases, narrowest first.
+MIRROR_SCOPES = ("prs", "mine", "all")
 
 #: ``PipelineLevel``, lowest first.
 LEVELS = ("low", "medium", "high")
@@ -77,8 +81,9 @@ def lowered(old: dict, new: dict) -> bool:
 
 
 def write_control(switches: dict) -> None:
-    """The switches and limits, and the ``revoke`` asks (when any), which a running sync applies
-    right before each merge and its asks. Never raises: a sync that cannot read ``control.json``
+    """The switches, the mirror scope (``prs`` unless one of :data:`MIRROR_SCOPES`), the limits,
+    and the ``revoke`` asks (when any), which a running sync applies right before each merge
+    and its asks. Never raises: a sync that cannot read ``control.json``, or finds a key missing,
     goes by the settings it was started with. Twin of ``Store.writePipelineControl``."""
     folder = pipeline_dir()
     tmp = folder / f"control.json.tmp-{os.getpid()}-{uuid.uuid4().hex}"
@@ -87,6 +92,8 @@ def write_control(switches: dict) -> None:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             control: dict = {k: bool(switches.get(k)) for k in CONTROL_KEYS}
+            scope = switches.get("mirrorScope")
+            control["mirrorScope"] = scope if scope in MIRROR_SCOPES else "prs"
             control["limits"] = switches["limits"]
             if switches.get("revoke"):
                 control["revoke"] = sorted(switches["revoke"])
@@ -141,13 +148,17 @@ _GH_CALLS_PER_CLAUDE = 16
 #: Per split part: a re-read, the parts filed before (twice after a failed create), the
 #: create and its sub-issue link.
 _GH_CALLS_PER_PART = 5
+#: Per kept rating a mirror labels past those answered (``labels.mirrorPerSync``): a re-read,
+#: then for each of its two labels a create, an add and the other levels' removal.
+_GH_CALLS_PER_MIRROR = 9
 #: Per takeover or revoke asked: a re-read, then the fast-track label's create and add, or
 #: the fast-track labels' removal; and a PR's clear in the same sync, as `cleared`'s.
 _GH_CALLS_PER_TAKEOVER = 6
 #: A root's merges: each PR read twice before ``gh pr merge`` (once without Linear) and
-#: once after.
+#: once after, and the three compares and two trees that keep it cleared past its base merged
+#: into it.
 _MERGES_PER_ROOT = 3
-_GH_CALLS_PER_MERGE = 4
+_GH_CALLS_PER_MERGE = 9
 #: Linear's reads (300 issues, paged), its label and child writes, and the re-read of
 #: their candidates: 3 calls of 100 at ``httpTimeoutSecs``; and the login's refresh.
 _LINEAR_SECS = 300 + 4 * 30
@@ -184,10 +195,13 @@ def tick_timeout(settings: dict) -> float:
     per_split = (int((t.get("fracture") or {}).get("maxChildren", 6)) * _GH_CALLS_PER_PART
                  * _GH_CALL_SECS)
     takeovers = len(force.get("takeover") or []) + len(force.get("revoke") or [])
+    mirrors = (int((t.get("labels") or {}).get("mirrorPerSync", 10))
+               if settings.get("mirrorGitHub") or settings.get("mirrorLinear") else 0)
     roots = max(1, len(settings.get("roots") or []))
     return min(MAX_SYNC_SECS, ratings * _GH_CALLS_PER_CLAUDE * _GH_CALL_SECS
                + splits * (per_claude + per_split)
                + takeovers * _GH_CALLS_PER_TAKEOVER * _GH_CALL_SECS
+               + mirrors * _GH_CALLS_PER_MIRROR * _GH_CALL_SECS
                + roots * (_read_calls(t) + _MERGES_PER_ROOT * _GH_CALLS_PER_MERGE) * _GH_CALL_SECS
                + len(settings.get("queued") or []) * _GH_CALL_SECS
                + (_LINEAR_SECS if settings.get("linearTeams") else 0)

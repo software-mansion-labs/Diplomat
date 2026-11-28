@@ -5,9 +5,9 @@ import Foundation
 // Every open issue of every source (the GitHub roots, Linear teams), and the operator's
 // open PRs, is rated for risk and complexity, and one within its root's limit goes down the fast track:
 // issue -> fix PR -> the PR rated on its own -> reviewed until clean -> rated again at that
-// head -> merged with no human review. Anything else is left to a human. The state is the
-// trackers' labels, Diplomat's clean-marker reviews, and in `PipelineLog.dir` what the
-// trackers cannot hold. The Linux front-end reaches `PipelineTick` through `diplomat-core
+// head -> merged with no human review. Anything else is left to a human. The state is
+// `PipelineLog.dir`, the ratings included, the trackers' `diplomat:` labels, and Diplomat's
+// clean-marker reviews. The Linux front-end reaches `PipelineTick` through `diplomat-core
 // pipeline-tick`, never by reimplementing it.
 
 public enum PipelineLevel: String, Codable, CaseIterable, Comparable, Sendable {
@@ -40,6 +40,17 @@ public struct PipelineRating: Codable, Equatable, Sendable {
 
 public enum PipelineSource: String, Codable, Sendable { case github, linear }
 
+/// Which items a mirrored tracker gets rating labels on, each taking in the one before: the
+/// operator's PRs, also their issues (opened by or assigned to them), every item Diplomat may
+/// write to.
+public enum PipelineMirrorScope: String, Codable, CaseIterable, Comparable, Sendable {
+    case prs, mine, all
+
+    public static func < (a: Self, b: Self) -> Bool {
+        allCases.firstIndex(of: a)! < allCases.firstIndex(of: b)!
+    }
+}
+
 public enum PipelineKind: String, Codable, Sendable { case issue, pr }
 
 /// Where an item stands. An issue: `unrated`, then `human` or `candidate` (within its limit, or
@@ -47,8 +58,8 @@ public enum PipelineKind: String, Codable, Sendable { case issue, pr }
 /// `unrated`, then `human` or `fast-track`; `clean` once a Diplomat clean marker names its
 /// head; `cleared` once this Diplomat rated it within its limit again at that head, or put `cleared`
 /// on it there for a takeover (its log or state says so:
-/// the `cleared` label alone, which anyone with triage rights can add, does not); `merged`
-/// or `closed`.
+/// the `cleared` label alone, which anyone with triage rights can add, does not), and at a
+/// later head carrying that head's change unchanged; `merged` or `closed`.
 public enum PipelineStage: String, Codable, CaseIterable, Sendable {
     case unrated, human, candidate, fractured, fixing
     case fastTrack = "fast-track"
@@ -81,8 +92,8 @@ public struct PipelineItem: Codable, Equatable, Sendable {
     /// from a branch of the repository itself into its default branch.
     public var writable: Bool
     public var rating: PipelineRating?
-    /// `label` when read off the tracker, `local` when Diplomat rated an item it may not
-    /// label; nil while unrated.
+    /// `local` when the rating Diplomat keeps stands, `label` when the tracker's labels set or
+    /// raise it; nil while unrated.
     public var ratedBy: String?
     /// The rater's one sentence, when Diplomat rated it.
     public var why: String?
@@ -202,7 +213,7 @@ public struct PipelineEvent: Codable, Equatable, Sendable {
     public var kind: Kind
     public var detail: String
     /// A PR's `rated` or `rerated`: the head it was rated at; a `cleared`: the head it was
-    /// cleared at.
+    /// cleared at, none for a clear carried to a later head.
     public var head: String?
     /// A `rated` or `rerated`: the rating given, never below the labels or the diff's floor.
     public var rating: PipelineRating?
@@ -415,9 +426,13 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
 
     public var roots: [Root]
     public var linearTeams: [LinearTeam]
-    /// Rate items unasked, and write the ratings kept while their labels could not be. It
-    /// stops nothing else: a forced rating, and each other switch's steps, go on with it off.
+    /// Rate items unasked, and finish the ratings a sync could not. It stops nothing else: a
+    /// forced rating, and each other switch's steps, go on with it off.
     public var rate: Bool
+    /// Write each rating as labels on GitHub, on Linear, onto the items `mirrorScope` takes in.
+    public var mirrorGitHub: Bool
+    public var mirrorLinear: Bool
+    public var mirrorScope: PipelineMirrorScope
     /// Ask for a fix PR for each candidate issue.
     public var fix: Bool
     /// Label PRs within their root's limit `fastTrack` and ask for their reviews.
@@ -431,12 +446,16 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
     /// sync reads even past a cap or once closed, so `read` can take each back.
     public var queued: [String]
 
-    public init(roots: [Root], linearTeams: [LinearTeam] = [], rate: Bool = false, fix: Bool = false,
-                fastTrack: Bool = false, merge: Bool = false, fracture: Bool = false,
+    public init(roots: [Root], linearTeams: [LinearTeam] = [], rate: Bool = false,
+                mirrorGitHub: Bool = false, mirrorLinear: Bool = false, mirrorScope: PipelineMirrorScope = .prs,
+                fix: Bool = false, fastTrack: Bool = false, merge: Bool = false, fracture: Bool = false,
                 force: Force? = nil, queued: [String] = []) {
         self.roots = roots
         self.linearTeams = linearTeams
         self.rate = rate
+        self.mirrorGitHub = mirrorGitHub
+        self.mirrorLinear = mirrorLinear
+        self.mirrorScope = mirrorScope
         self.fix = fix
         self.fastTrack = fastTrack
         self.merge = merge
@@ -446,17 +465,19 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case roots, linearTeams, rate, fix, fastTrack,
+        case roots, linearTeams, rate, mirrorGitHub, mirrorLinear, mirrorScope, fix, fastTrack,
              merge, fracture, force, queued
     }
 
-    /// A missing field reads as empty, and a missing switch as off.
+    /// A missing field reads as empty, a missing switch as off, and a missing scope as `prs`.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         func on(_ key: CodingKeys) throws -> Bool { try c.decodeIfPresent(Bool.self, forKey: key) ?? false }
         self.init(roots: try c.decodeIfPresent([Root].self, forKey: .roots) ?? [],
                   linearTeams: try c.decodeIfPresent([LinearTeam].self, forKey: .linearTeams) ?? [],
-                  rate: try on(.rate), fix: try on(.fix), fastTrack: try on(.fastTrack),
+                  rate: try on(.rate), mirrorGitHub: try on(.mirrorGitHub), mirrorLinear: try on(.mirrorLinear),
+                  mirrorScope: try c.decodeIfPresent(PipelineMirrorScope.self, forKey: .mirrorScope) ?? .prs,
+                  fix: try on(.fix), fastTrack: try on(.fastTrack),
                   merge: try on(.merge), fracture: try on(.fracture),
                   force: try c.decodeIfPresent(Force.self, forKey: .force),
                   queued: try c.decodeIfPresent([String].self, forKey: .queued) ?? [])
@@ -473,6 +494,9 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
 public struct PipelineControl: Codable, Equatable, Sendable {
     public var enabled: Bool
     public var rate: Bool
+    public var mirrorGitHub: Bool
+    public var mirrorLinear: Bool
+    public var mirrorScope: PipelineMirrorScope
     public var fix: Bool
     public var fastTrack: Bool
     public var merge: Bool
@@ -484,10 +508,14 @@ public struct PipelineControl: Codable, Equatable, Sendable {
     /// nil stops nothing.
     public var limits: [String: PipelineRating]?
 
-    public init(enabled: Bool, rate: Bool, fix: Bool, fastTrack: Bool, merge: Bool, fracture: Bool,
-                revoke: [String]? = nil, limits: [String: PipelineRating]? = nil) {
+    public init(enabled: Bool, rate: Bool, mirrorGitHub: Bool, mirrorLinear: Bool, mirrorScope: PipelineMirrorScope,
+                fix: Bool, fastTrack: Bool, merge: Bool, fracture: Bool, revoke: [String]? = nil,
+                limits: [String: PipelineRating]? = nil) {
         self.enabled = enabled
         self.rate = rate
+        self.mirrorGitHub = mirrorGitHub
+        self.mirrorLinear = mirrorLinear
+        self.mirrorScope = mirrorScope
         self.fix = fix
         self.fastTrack = fastTrack
         self.merge = merge
@@ -497,8 +525,9 @@ public struct PipelineControl: Codable, Equatable, Sendable {
     }
 
     public init(settings: PipelineSettings) {
-        self.init(enabled: true, rate: settings.rate, fix: settings.fix, fastTrack: settings.fastTrack,
-                  merge: settings.merge, fracture: settings.fracture,
+        self.init(enabled: true, rate: settings.rate, mirrorGitHub: settings.mirrorGitHub,
+                  mirrorLinear: settings.mirrorLinear, mirrorScope: settings.mirrorScope, fix: settings.fix,
+                  fastTrack: settings.fastTrack, merge: settings.merge, fracture: settings.fracture,
                   limits: Dictionary(settings.roots.map { ($0.slug.lowercased(), $0.limit) }) { a, _ in a })
     }
 

@@ -79,7 +79,8 @@ def _rows(panel, kind) -> list:
     ]
 
 
-def _queued(number: int, *, counter="review_requests", action="review-req", kind="review"):
+def _queued(number: int, *, counter="review_requests", action="review-req", kind="review",
+            author=None):
     return autofix.QueuedTask(
         id=autofix.queue_key(action, number),
         job=autofix.AgentJob(
@@ -89,6 +90,7 @@ def _queued(number: int, *, counter="review_requests", action="review-req", kind
             prompt="P",
             pr_url=f"https://github.com/o/r/pull/{number}",
             pr_number=number,
+            author_login=author,
             counter=counter,
         ),
         attempt=1,
@@ -248,6 +250,27 @@ def test_a_paused_monitors_row_says_nothing_will_start_it(panel):
     panel.store.review_requests_enabled = True
     panel._rebuild_agent_tasks()
     assert "monitor off" not in _row_text(_rows(panel, QueuedTaskRow)[0])
+
+
+def test_a_row_an_unreadable_ban_list_holds_says_so(panel):
+    """Not that its monitor is off: it is on, and starts the row once the list reads."""
+    from PySide6.QtWidgets import QPushButton
+
+    from diplomat_app import bans
+
+    panel.store.queued_tasks = [_queued(512, author="octocat"), _queued(508)]
+    panel._rebuild_agent_tasks()
+    bans.banned_path().parent.mkdir(parents=True, exist_ok=True)
+    bans.banned_path().write_text("{")
+    panel.store.refresh_activity()
+    rows = _rows(panel, QueuedTaskRow)
+    run = next(b for b in rows[0].findChildren(QPushButton) if b.text() == "execute now")
+    assert ("ban list unreadable" in _row_text(rows[0]), "monitor off" in _row_text(rows[0]),
+            "ban list cannot be read" in run.toolTip(), _row_text(rows[1]).endswith("queued")) == (
+        True, False, True, True)
+    bans.banned_path().unlink()
+    panel.store.refresh_activity()
+    assert "ban list unreadable" not in _row_text(_rows(panel, QueuedTaskRow)[0])
 
 
 def test_a_row_the_network_refused_says_why(panel):

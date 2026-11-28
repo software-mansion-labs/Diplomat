@@ -102,7 +102,8 @@ bays.
   you cannot leave.
 - **Queued** rows are auto-fixes, auto-reviews and the work you asked for by
   sweeping that nothing has started yet. Each
-  carries **execute now** - start it immediately, past whatever is holding it -
+  carries **execute now** - start it immediately, past whatever is holding it but an
+  unreadable ban list, on a row naming an author -
   and a drag grip: drop a row on another in its band to set the order the queue runs
   in (a drag into another band is refused). That
   order is honoured at the top of the next poll, *before* the monitors go looking
@@ -130,7 +131,7 @@ bays.
   often made unnecessary by the work ahead of it - and the poll re-offers it for
   as long as GitHub still calls the PR conflicting, so waiting costs it nothing.
 
-Five things hold work. The cap holds what there is no slot for, and releases it as
+Six things hold work. The cap holds what there is no slot for, and releases it as
 slots free. The [free-disk floor](automation.md#the-free-disk-floor) holds everything
 while the disk agents write to is nearly full. The [spending budget](automation.md#the-spending-budget) holds everything priced in an account
 too low to afford another agent, and releases it when a window refills or the
@@ -140,6 +141,8 @@ keeps listing what it finds (reading *queued · monitor off*), but nothing start
 itself - only *execute now* does, or a [Comms](comms.md) ping that asked for that work. So the toggles decide who starts the work, not
 whether you get to see it, and turning both off does not stop the 3-minute GitHub
 poll. **Auto-execute queue** holds every kind at once, the reviews you asked for
-included - which is the one thing no monitor toggle speaks for. The
+included - which is the one thing no monitor toggle speaks for. While the ban list cannot be
+read, every task naming an author is held, whoever asked for it (reading *queued · ban list
+unreadable*). The
 [Pipeline](pipeline.md) also holds its own asks while the ban list cannot be read, and after a
 launch or the Pipeline going on, until a sync since has judged their item.

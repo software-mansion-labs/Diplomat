@@ -21,6 +21,8 @@ if [ ! -x "$BIN" ]; then
   exit 1
 fi
 
+. "$PKG_DIR/install/agent-launcher.sh"
+PROGRAM="$(agent_program "$BIN")"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 mkdir -p "$HOME/Library/LaunchAgents"
 cat > "$PLIST" <<PL
@@ -30,7 +32,7 @@ cat > "$PLIST" <<PL
 <dict>
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
-  <array><string>$BIN</string></array>
+  <array>$PROGRAM</array>
   <key>EnvironmentVariables</key>
   <dict><key>DIPLOMAT_WATCHDOG</key><string>1</string></dict>
   <key>StartInterval</key><integer>300</integer>

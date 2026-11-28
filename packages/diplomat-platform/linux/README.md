@@ -66,7 +66,8 @@ slot**, then the **queue** that has no bay yet.
 - **Queued** rows are auto-fixes, auto-reviews and the reviews and issue fixes you
   asked for that nothing
   has started yet. Each
-  carries **execute now** — start it immediately, past whatever is holding it — and a
+  carries **execute now** — start it immediately, past whatever is holding it but an
+  unreadable ban list, on a row naming an author — and a
   drag grip: drop a row on another to set the order the queue runs in. That order is
   honoured at the top of the next poll, *before* the monitors go looking for more
   work, so a slot that just freed goes to whatever you put first rather than to
@@ -84,7 +85,7 @@ slot**, then the **queue** that has no bay yet.
   unnecessary by the work ahead of it — and the poll re-offers it for as long as
   GitHub still calls the PR conflicting, so waiting costs it nothing.
 
-Six things hold work. The cap holds what there is no slot for, and releases it as
+Seven things hold work. The cap holds what there is no slot for, and releases it as
 slots free. The [free-disk floor](../../../docs/automation.md#the-free-disk-floor)
 holds everything while the disk agents write to is nearly full. The [spending budget](../../../docs/automation.md#the-spending-budget) holds
 everything priced in an account too low to afford another agent, and releases it when a
@@ -94,9 +95,11 @@ keeps polling and keeps listing what it finds (reading *queued · monitor off*),
 nothing starts by itself — only *execute now* does. So the toggles decide who starts
 the work, not whether you get to see it, and turning both off does not stop the
 3-minute GitHub poll. **Auto-execute queue** holds every kind at once, the reviews you
-asked for included — which is the one thing no monitor toggle speaks for. The
+asked for included — which is the one thing no monitor toggle speaks for. While the
+**ban list** cannot be read, every task naming an author is held, whoever asked for it
+(reading *queued · ban list unreadable*). The
 **author allowlist** holds every review request from outside it, whoever asks and
-whatever else is free; it is the only one of the six that drops the work rather than
+whatever else is free; it is the only one of the seven that drops the work rather than
 listing it, because nothing about it changes on the next poll.
 
 The queue is a view of what the monitors would re-offer, not a second copy of their

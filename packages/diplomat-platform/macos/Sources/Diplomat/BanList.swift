@@ -114,7 +114,8 @@ enum BanList {
     static var fileURL: URL { dir.appendingPathComponent("banned.json") }
 
     /// Entry by entry: one without a string `login` is skipped, the rest still read.
-    /// Empty when the file is absent or unreadable.
+    /// Empty when the file is absent or unreadable, which a gate tells apart
+    /// (`File.isUnreadable`): an unreadable list could be banning anyone.
     static func read(_ file: File = BanList.readFile()) -> [BannedAuthor] {
         guard case .list(_, let entries) = file else { return [] }
         return entries.compactMap { raw in
@@ -126,16 +127,31 @@ enum BanList {
 
     enum File {
         case absent
-        /// Present, but not a JSON object whose `banned` is an array (or absent): never
+        /// Not known absent, but not a JSON object whose `banned` is an array (or absent): never
         /// written over, since that would lift every ban in it.
         case unreadable
         /// The whole object, and its `banned` entries as stored, including any `read`
         /// skips: a rewrite keeps every entry and key it does not change.
         case list([String: Any], [Any])
+
+        var isUnreadable: Bool { if case .unreadable = self { true } else { false } }
+    }
+
+    /// Why a ban or un-ban left a `.unreadable` file alone, without asking the daemon: an
+    /// older one writes over it.
+    private static var leftUnread: String { "\(fileURL.path) is unreadable, so it was left as it is" }
+
+    /// Why a gate refused work while the file is `.unreadable`.
+    static let unreadReason = "the prompt-injection ban list could not be read"
+    /// The feed's line for a spell of `.unreadable`.
+    static var unreadNote: String {
+        "\(fileURL.path) could not be read: it could be banning anyone, so work naming an "
+            + "author waits until it reads"
     }
 
     static func readFile() -> File {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return .absent }
+        var info = stat()
+        if stat(fileURL.path, &info) != 0, errno == ENOENT || errno == ENOTDIR { return .absent }
         guard let data = try? Data(contentsOf: fileURL),
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { return .unreadable }
@@ -184,6 +200,7 @@ enum BanList {
     /// that refuses or does not answer in time is not written past.
     @discardableResult
     static func unban(_ login: String, timeoutSecs: Int = 5) -> Unban {
+        if readFile().isUnreadable { return .failed(leftUnread) }
         switch DeviceAllocator.send("unban", body: ["login": login], timeoutSecs: timeoutSecs) {
         case .reply(let r) where (200..<300).contains(r.status): return .daemon
         case .reply(let r):
@@ -192,9 +209,11 @@ enum BanList {
             return .failed("the allocator daemon did not answer in time; it may still lift the ban")
         case .unreachable: break
         }
+        let file = readFile()
+        if file.isUnreadable { return .failed(leftUnread) }
         // Never rewrite the file unless that login is actually banned - so a
         // stray/duplicate call can't clobber the list.
-        guard case .list(var root, var entries) = readFile(),
+        guard case .list(var root, var entries) = file,
               entries.contains(where: { sameLogin($0, login) }) else { return .notBanned }
         entries.removeAll { sameLogin($0, login) }
         root["banned"] = entries
@@ -264,6 +283,7 @@ enum BanList {
         guard isSlackUserID(b.userID) else {
             return .failed("\"\(b.userID)\" is not a Slack user id")
         }
+        if readFile().isUnreadable { return .failed(leftUnread) }
         let login = CommsBan.login(b.userID)
         let before = read()
         if isBanned(login, in: before) { return .already }
@@ -307,7 +327,7 @@ enum BanList {
         var entries: [Any] = []
         switch readFile() {
         case .absent: break
-        case .unreadable: return "\(fileURL.path) is unreadable, so it was left as it is"
+        case .unreadable: return leftUnread
         case .list(let r, let e): (root, entries) = (r, e)
         }
         let iso = ISO8601DateFormatter()

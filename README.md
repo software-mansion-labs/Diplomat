@@ -37,10 +37,11 @@ flowchart TB
 ### Pipeline - every issue and your PRs, rated and routed
 
 Every open issue of your GitHub repos and Linear teams, and every open PR of yours, is rated for risk
-and complexity, as labels wherever Diplomat may write. An issue within its repo's limit (low/low by
-default) gets a fix PR; that PR, within it too, is reviewed until clean, rated again at that head,
-and merged with your admin rights. Anything else is left to you, unless you hand it to Diplomat whatever its rating. Issues, sub-issues, the PRs
-fixing them and the PRs stacked on those are drawn as one graph.
+and complexity, kept on this machine and labelled where you choose. An issue within its repo's limit
+(low/low by default) gets a fix PR; that PR, within it too, is reviewed until clean, rated again at
+that head, and merged with your admin rights. Anything else is left to you, unless you hand it to
+Diplomat whatever its rating. Issues, sub-issues, the PRs fixing them and the PRs stacked on those
+are drawn as one graph.
 Off by default, every step its own switch. [More](docs/pipeline.md)
 
 <img alt="The Pipeline screen" src="docs/img/pipeline.png" />

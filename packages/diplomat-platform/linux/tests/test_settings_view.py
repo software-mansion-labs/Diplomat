@@ -13,9 +13,11 @@ was last read would otherwise open in the wrong state with nothing to show for i
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from diplomat_runtime import autofix, review
+from diplomat_runtime import autofix, pipeline, review
 from diplomat_runtime.prref import LocalRepo
 from diplomat_app.settingsview import SettingsView
 from diplomat_app.store import Store
@@ -453,9 +455,12 @@ def test_a_healthy_screen_draws_no_line_under_any_row(make_view, monkeypatch, tm
                                    "upstream": "origin/main", "ahead": 0, "behind": 0})
     # But the PIPELINE card's, whose one-liners read as its macOS twin's do.
     pipeline_rows = {view._pipeline_row, view._pipeline_teams_row, view._pipeline_login_row,
-                     *(_row_of(w) for w in (view._sw_pipeline_rate, view._sw_pipeline_fix,
-                                            view._sw_pipeline_fast, view._pipeline_limits,
-                                            view._sw_pipeline_merge,
+                     view._pipeline_scope_row,
+                     *(_row_of(w) for w in (view._sw_pipeline_rate,
+                                            view._sw_pipeline_mirror_github,
+                                            view._sw_pipeline_mirror_linear,
+                                            view._sw_pipeline_fix, view._sw_pipeline_fast,
+                                            view._pipeline_limits, view._sw_pipeline_merge,
                                             view._sw_pipeline_fracture))}
     assert [(r._control.accessibleName(), r.summary()) for r in view._rows
             if r.summary() and r not in pipeline_rows] == []
@@ -572,7 +577,8 @@ def _pipeline_view(make_view, monkeypatch, **settings):
 
 def test_the_pipeline_options_are_drawn_only_while_it_runs(make_view, monkeypatch):
     view, synced = _pipeline_view(make_view, monkeypatch)
-    nested = [view._sw_pipeline_rate, view._sw_pipeline_fix, view._sw_pipeline_fast,
+    nested = [view._sw_pipeline_rate, view._sw_pipeline_mirror_github,
+              view._sw_pipeline_mirror_linear, view._sw_pipeline_fix, view._sw_pipeline_fast,
               view._pipeline_limits, view._sw_pipeline_merge, view._sw_pipeline_fracture,
               view._pipeline_teams, view._pipeline_login_row]
     assert view._pipeline_row.isVisibleTo(view)
@@ -591,6 +597,8 @@ def test_the_pipeline_options_are_drawn_only_while_it_runs(make_view, monkeypatc
 
 @pytest.mark.parametrize("switch, setting", [
     ("_sw_pipeline_rate", "pipeline_rate"),
+    ("_sw_pipeline_mirror_github", "pipeline_mirror_github"),
+    ("_sw_pipeline_mirror_linear", "pipeline_mirror_linear"),
     ("_sw_pipeline_fix", "pipeline_fix"),
     ("_sw_pipeline_fast", "pipeline_fast_track"),
     ("_sw_pipeline_merge", "pipeline_merge"),
@@ -613,10 +621,10 @@ def test_the_pipeline_rows_read_as_their_macos_twins_do(make_view, monkeypatch):
     view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
     rows = [_row_of(w) for w in (view._sw_pipeline_rate, view._sw_pipeline_fix,
                                  view._sw_pipeline_fast, view._sw_pipeline_merge,
-                                 view._sw_pipeline_fracture)]
+                                 view._sw_pipeline_fracture, view._sw_pipeline_mirror_github,
+                                 view._sw_pipeline_mirror_linear)] + [view._pipeline_scope_row]
     assert [(r._control.accessibleName(), r.summary()) for r in rows] == [
-        ("Rate issues and PRs",
-         "Risk and complexity, by claude, as labels where Diplomat may write"),
+        ("Rate issues and PRs", "Risk and complexity, by claude, kept on this machine"),
         ("Open fix PRs",
          "Queues an agent that fixes each issue within its repo's fast-track limit, and each you "
          "take over"),
@@ -629,6 +637,11 @@ def test_the_pipeline_rows_read_as_their_macos_twins_do(make_view, monkeypatch):
         ("Split big issues",
          "Each sync splits one issue more complex than its repo's limit into low-complexity "
          "child issues"),
+        ("Mirror ratings to GitHub",
+         "Writes each rating as risk: and complexity: labels on the GitHub items picked below"),
+        ("Mirror ratings to Linear",
+         "Writes each rating as risk: and complexity: labels on the Linear issues picked below"),
+        ("Mirror onto", "Which rated items get the labels"),
     ]
     limits = _row_of(view._pipeline_limits)
     assert (limits._control.accessibleName(), limits.summary(), limits._detail.text()) == (
@@ -636,16 +649,30 @@ def test_the_pipeline_rows_read_as_their_macos_twins_do(make_view, monkeypatch):
         "The highest rating each repo's fast track fixes, reviews and merges",
         "Low/low unless set. Risk stops at medium: a high-risk item goes down the fast track "
         "only taken over. A Linear team's issues go by the repo it maps to.")
-    assert rows[0]._detail.text().endswith(
-        " A rating already on the tracker is the rating, raised by a higher one kept here "
-        "until its labels are written; a PR's diff can only raise one.")
+    assert rows[0]._detail.text() == (
+        "A few unrated items a sync, each rated low, medium or high for risk and complexity "
+        "by one claude call with read-only tools in its repo's checkout and the item's text "
+        "as data. Each rating is kept on this machine, and goes on the tracker as labels only "
+        "where Mirror ratings says; someone else's PR is not rated. Labels already on an item "
+        "rate it, or raise the rating kept for it, never lower it; a PR's diff can only raise "
+        "one.")
+    assert rows[-1]._detail.text() == (
+        "My PRs: your own PRs. My PRs and issues: also the issues you opened or are assigned. "
+        "All rated items: every rated item Diplomat may write to. A sync labels a few ratings "
+        "it has not labelled yet, your PRs first, then the newest. Higher labels a person put "
+        "on stay, and raise the rating; a mirror switched off leaves the labels it wrote.")
+    assert [b.text() for b in view._pipeline_scope._group.buttons()] == [
+        "My PRs", "My PRs and issues", "All rated items"]
+    assert (" Its ratings are kept on this machine, and the rest of its state is the trackers' "
+            "diplomat: labels. ") in view._pipeline_row._detail.text()
     assert rows[2]._detail.text().startswith(
         "Only your own PRs from the repo itself into its default branch that close only "
         "candidate issues: the fixes the pipeline asks for.")
     assert rows[2]._detail.text().endswith(" A PR rated while this is off stays a person's.")
     assert rows[3]._detail.text().startswith(
         "A cleared PR is merged only when none of the holds in docs/pipeline.md applies "
-        "to it, checked again right before the merge.")
+        "to it, checked again right before the merge. With Fast-track my PRs on, one behind "
+        "its base has the base merged into it first.")
     assert view._pipeline_row.summary() == (
         "Every 5m, the open issues and PRs of the GitHub repo roots and the Linear teams "
         "below")
@@ -702,6 +729,35 @@ def test_the_limit_rows_follow_the_roots(make_view, monkeypatch):
     view.store.local_repos_changed.emit()
     assert list(view._pipeline_limit_sliders) == ["o/r"]
     assert view._pipeline_limits_list.count() == 1
+
+
+def test_mirror_onto_is_drawn_only_while_a_mirror_is_on(make_view, monkeypatch):
+    view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    row = view._pipeline_scope_row
+    assert not row.isVisibleTo(view)
+    view._sw_pipeline_mirror_linear.setChecked(True)
+    assert row.isVisibleTo(view)
+    view._sw_pipeline_mirror_github.setChecked(True)
+    view._sw_pipeline_mirror_linear.setChecked(False)
+    assert row.isVisibleTo(view)
+    view._sw_pipeline_mirror_github.setChecked(False)
+    assert not row.isVisibleTo(view)
+    again = make_view(pipeline_enabled=True, pipeline_mirror_github=True)
+    assert again._pipeline_scope_row.isVisibleTo(again)
+
+
+def test_mirror_onto_opens_on_the_stored_scope_and_writes_through(make_view, monkeypatch):
+    view, synced = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True,
+                                  pipeline_mirror_scope="mine")
+    assert view._pipeline_scope.value() == "mine"
+    view._pipeline_scope._group.button(2).click()
+    assert Store().pipeline_mirror_scope == "all"
+    assert json.loads((pipeline.pipeline_dir() / "control.json").read_text()
+                      )["mirrorScope"] == "all"
+    assert synced == [True]
+    view._pipeline_scope._group.button(0).click()
+    assert Store().pipeline_mirror_scope == "prs"
+    assert synced == [True]
 
 
 def test_the_linear_teams_line_reports_what_it_cannot_read(make_view, monkeypatch):
