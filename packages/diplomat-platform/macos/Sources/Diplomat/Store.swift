@@ -4291,7 +4291,7 @@ final class Store: ObservableObject {
         refreshAudit()
     }
 
-    /// Whether the monitor that owns this work is switched off.
+    /// Whether the monitor, or the Pipeline, that owns this work is switched off.
     ///
     /// A switched-off monitor still finds its work and still queues it — what your
     /// PRs owe is worth seeing whether or not this machine is set to act on it — but

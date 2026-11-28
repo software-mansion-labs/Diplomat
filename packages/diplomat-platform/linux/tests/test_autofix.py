@@ -1170,7 +1170,7 @@ def test_allowlist_speaks_only_for_the_review_monitors_finds(store, monkeypatch)
     assert len(calls) == 3
 
 
-def test_agent_job_counter_comment_names_every_counter_on_both_platforms():
+def test_agent_job_counter_comment_names_the_pipeline_on_both_platforms():
     """The monitors' and the Pipeline's, which no monitor sets and no tally counts."""
     from diplomat_app import store as linux_store
 
@@ -1181,7 +1181,7 @@ def test_agent_job_counter_comment_names_every_counter_on_both_platforms():
         setters | {linux_store.PIPELINE_COUNTER})
     swift = (Path(__file__).resolve().parents[2] / "macos" / "Sources" / "Diplomat"
              / "Store.swift").read_text(encoding="utf-8")
-    comment = re.search(r"var counter: AutoCounter\?\s*//(.*)", swift).group(1)
+    comment = re.search(r"var counter: AutoCounter\?[ \t]*//(.*)", swift).group(1)
     assert "Pipeline" in comment and "tally" not in comment
 
 
