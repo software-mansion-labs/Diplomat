@@ -18,6 +18,7 @@ import os
 import re
 import shlex
 import time
+from pathlib import Path
 
 import pytest
 
@@ -1506,6 +1507,19 @@ def test_a_logged_out_machine_never_rounds(credentials):
     credentials(file_token=None, keychain_token=None, live=set())
     assert quota.week_left() is None
     assert quota.probe_stats() == (0, 0)
+
+
+# MARK: - docs/telemetry.md
+
+
+def test_the_telemetry_doc_lists_the_two_gatherers_it_counts():
+    doc = (Path(__file__).resolve().parents[4] / "docs" / "telemetry.md").read_text(encoding="utf-8")
+    head = re.search(r"Two\s+gatherers\s+fill\s+in\s+what\s+GitHub\s+doesn't\s+know:", doc)
+    assert head
+    item = r" ?(?:[-*+]|\d+[.)])[ \t]"
+    # A blank line ends the list only before an unindented line that is not an item.
+    listed = re.split(rf"\n\n+(?!{item}|\s)", doc[head.end():], maxsplit=1)[0]
+    assert re.findall(rf"^{item}(?:\*\*(.+?)\*\*)?", listed, re.M) == ["Quota", "Token attribution"]
 
 
 # MARK: - The assets README
