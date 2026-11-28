@@ -1493,10 +1493,11 @@ def test_a_core_reaped_while_it_is_read_is_dead():
             parent.stdin.write("\n")
             parent.stdin.flush()
             parent.stdout.readline()
+            assert _alive(child)
             os.kill(child, signal.SIGKILL)
             deadline = time.time() + 5
-            while _alive(child) and time.time() < deadline:
-                pass
+            while _alive(child):
+                assert time.time() < deadline, "its zombie reads alive"
             parent.stdin.close()
             while os.path.exists(f"/proc/{child}") and time.time() < deadline:
                 assert not _alive(child)
